@@ -1,0 +1,128 @@
+{
+  "entities": {
+    "BusinessConfig": {
+      "title": "BusinessConfig",
+      "description": "Business settings and invoice config",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "phone": { "type": "string" },
+        "warranty": { "type": "string" },
+        "thankYouMessage": { "type": "string" }
+      }
+    },
+    "SocialNetwork": {
+      "title": "SocialNetwork",
+      "description": "Social network entry",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "icon": { "type": "string" }
+      }
+    },
+    "Service": {
+      "title": "Service",
+      "description": "Service offered by business",
+      "type": "object",
+      "properties": {
+        "socialNetworkId": { "type": "string" },
+        "name": { "type": "string" },
+        "providerCostPer1000": { "type": "number" },
+        "suggestedPricePer1000": { "type": "number" }
+      }
+    },
+    "Receipt": {
+      "title": "Receipt",
+      "description": "Receipt issued to client",
+      "type": "object",
+      "properties": {
+        "consecutive": { "type": "number" },
+        "clientName": { "type": "string" },
+        "clientPhone": { "type": "string" },
+        "totalCharged": { "type": "number" },
+        "date": { "type": "string" }
+      }
+    },
+    "Client": {
+      "title": "Client",
+      "description": "Client record",
+      "type": "object",
+      "properties": {
+        "clientCode": { "type": "string" },
+        "name": { "type": "string" },
+        "phone": { "type": "string" },
+        "purchaseCount": { "type": "number" },
+        "totalSpent": { "type": "number" },
+        "lastPurchaseDate": { "type": "string" }
+      }
+    },
+    "PersonalExpense": {
+      "title": "PersonalExpense",
+      "description": "Personal expense record",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "amount": { "type": "number" },
+        "category": { "type": "string" },
+        "date": { "type": "string" }
+      }
+    },
+    "DebtOrCard": {
+      "title": "DebtOrCard",
+      "description": "Personal debt or credit card",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "totalAmount": { "type": "number" },
+        "pendingBalance": { "type": "number" }
+      }
+    },
+    "DebtPayment": {
+      "title": "DebtPayment",
+      "description": "Payment made towards personal debt",
+      "type": "object",
+      "properties": {
+        "debtId": { "type": "string" },
+        "amount": { "type": "number" },
+        "date": { "type": "string" }
+      }
+    },
+    "SavingsGoal": {
+      "title": "SavingsGoal",
+      "description": "Personal savings goal",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "targetAmount": { "type": "number" },
+        "currentAmount": { "type": "number" }
+      }
+    },
+    "SupplierWarrantyRecord": {
+      "title": "SupplierWarrantyRecord",
+      "description": "Warranty claim record sent to provider with date and deadline tracking",
+      "type": "object",
+      "properties": {
+        "providerOrderId": { "type": "string" },
+        "clientName": { "type": "string" },
+        "serviceName": { "type": "string" },
+        "sentDate": { "type": "string" },
+        "expectedResponseHours": { "type": "number" },
+        "status": { "type": "string" },
+        "reason": { "type": "string" }
+      }
+    }
+  },
+  "firestore": {
+    "config/business": { "schema": "BusinessConfig", "description": "Business configuration" },
+    "config/personal": { "schema": "BusinessConfig", "description": "Personal finance config" },
+    "social_networks/{id}": { "schema": "SocialNetwork", "description": "Social networks" },
+    "services/{id}": { "schema": "Service", "description": "Services" },
+    "receipts/{id}": { "schema": "Receipt", "description": "Receipts" },
+    "clients/{id}": { "schema": "Client", "description": "Clients" },
+    "supplier_warranties/{id}": { "schema": "SupplierWarrantyRecord", "description": "Supplier warranty claims tracking" },
+    "personal_expenses/{id}": { "schema": "PersonalExpense", "description": "Personal expenses" },
+    "personal_debts/{id}": { "schema": "DebtOrCard", "description": "Personal debts" },
+    "personal_debt_payments/{id}": { "schema": "DebtPayment", "description": "Personal debt payments" },
+    "personal_savings_goals/{id}": { "schema": "SavingsGoal", "description": "Personal savings goals" }
+  }
+}

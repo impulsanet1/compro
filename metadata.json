@@ -1,0 +1,6 @@
+{
+  "name": "ImpulsaNet",
+  "description": "Sistema interno de administración de ventas, control financiero y generación de comprobantes para ImpulsaNet.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

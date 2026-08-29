@@ -13,9 +13,13 @@ import {
   AlertTriangle,
   Gift,
   Percent,
-  ShieldCheck
+  ShieldCheck,
+  Layers,
+  Package,
+  CheckCircle2,
+  Clock
 } from "lucide-react";
-import { Client, getClientCode, getNormalizedStatus } from "../types";
+import { Client, Receipt, ReceiptItem, getClientCode, getNormalizedStatus } from "../types";
 import { useApp } from "../context/AppContext";
 
 interface RepurchaseModalProps {
@@ -46,29 +50,51 @@ export const RepurchaseModal: React.FC<RepurchaseModalProps> = ({ initialClient,
       );
 
       const lastReceipt = sortedReceipts[0] || null;
-      let lastItem = null;
+      const lastReceiptServices: ReceiptItem[] = lastReceipt && lastReceipt.services && lastReceipt.services.length > 0
+        ? lastReceipt.services
+        : [];
+
+      let lastItem: ReceiptItem | null = null;
       let lastServiceName = "Servicios de Crecimiento";
       let lastSocialName = "Redes Sociales";
       let lastQuantity = 1000;
       let lastCharged = 15000;
       let lastCost = 0;
 
-      if (lastReceipt && lastReceipt.services && lastReceipt.services.length > 0) {
-        lastItem = lastReceipt.services[0];
+      if (lastReceiptServices.length > 0) {
+        lastItem = lastReceiptServices[0];
         lastServiceName = lastItem.serviceName || "Seguidores";
         lastSocialName = lastItem.socialNetworkName || "Redes";
         lastQuantity = lastItem.quantity || 1000;
-        lastCharged = lastItem.chargedPrice || lastReceipt.totalCharged || 15000;
+        lastCharged = lastItem.chargedPrice || (lastReceipt?.totalCharged ? Math.round(lastReceipt.totalCharged / lastReceiptServices.length) : 15000);
         lastCost =
           lastItem.providerCostCOP ||
           lastItem.providerCostAtPurchase ||
-          (lastReceipt.totalProviderCost ? lastReceipt.totalProviderCost / lastReceipt.services.length : 0);
+          (lastReceipt?.totalProviderCost ? Math.round(lastReceipt.totalProviderCost / lastReceiptServices.length) : Math.round(lastCharged * 0.4));
       } else if (lastReceipt) {
         lastCharged = lastReceipt.totalCharged || 15000;
-        lastCost = lastReceipt.totalProviderCost || 0;
+        lastCost = lastReceipt.totalProviderCost || Math.round(lastCharged * 0.4);
       }
 
       const totalSpent = clientReceipts.reduce((sum, r) => sum + (r.totalCharged || 0), 0);
+
+      // Days since last purchase calculation
+      const lastDateStr = lastReceipt ? lastReceipt.date : c.lastPurchaseDate || "";
+      let daysSinceLastPurchase = -1;
+      if (lastDateStr) {
+        try {
+          const lastD = new Date(lastDateStr).getTime();
+          const nowD = new Date().getTime();
+          if (!isNaN(lastD)) {
+            daysSinceLastPurchase = Math.max(0, Math.floor((nowD - lastD) / (1000 * 60 * 60 * 24)));
+          }
+        } catch {
+          daysSinceLastPurchase = -1;
+        }
+      }
+
+      // 10 days condition for promo eligibility
+      const isEligibleByDays = daysSinceLastPurchase >= 10;
 
       // Check active warranty for this client
       const hasActiveWarranty =
@@ -99,7 +125,11 @@ export const RepurchaseModal: React.FC<RepurchaseModalProps> = ({ initialClient,
         ...c,
         computedCode: code,
         receiptsCount: clientReceipts.length,
-        lastDate: lastReceipt ? lastReceipt.date : c.lastPurchaseDate || "",
+        lastReceipt,
+        lastReceiptServices,
+        lastDate: lastDateStr,
+        daysSinceLastPurchase,
+        isEligibleByDays,
         lastItem,
         lastServiceName,
         lastSocialName,
@@ -133,6 +163,19 @@ export const RepurchaseModal: React.FC<RepurchaseModalProps> = ({ initialClient,
     return enrichedClients.find((c) => c.id === selectedClientId) || enrichedClients[0] || null;
   }, [enrichedClients, selectedClientId]);
 
+  // Target selection state: "combo" (all items in last receipt) or item index (0, 1, 2...)
+  const [selectedTarget, setSelectedTarget] = useState<"combo" | number>("combo");
+
+  // Reset target and discount when client changes
+  useEffect(() => {
+    setSelectedTarget("combo");
+    if (selectedClient) {
+      setDiscountPct(selectedClient.suggestedDiscountPct);
+      setIsCustomPrice(false);
+      setCustomPromoPrice(0);
+    }
+  }, [selectedClientId, selectedClient]);
+
   // Active Template Type (default to dynamic promo)
   const [templateType, setTemplateType] = useState<
     "smart_promo" | "satisfaction" | "discount_general" | "growth" | "catalog" | "custom"
@@ -146,13 +189,122 @@ export const RepurchaseModal: React.FC<RepurchaseModalProps> = ({ initialClient,
   const [isCustomPrice, setIsCustomPrice] = useState<boolean>(false);
   const [customPromoPrice, setCustomPromoPrice] = useState<number>(0);
 
-  // Sync discount with selected client
-  useEffect(() => {
-    if (selectedClient) {
-      setDiscountPct(selectedClient.suggestedDiscountPct);
-      setIsCustomPrice(false);
+  // Active Target Information Calculation
+  const targetInfo = useMemo(() => {
+    if (!selectedClient) {
+      return {
+        isCombo: false,
+        title: "Servicios de Crecimiento",
+        itemsList: [],
+        previousCharged: 15000,
+        providerCost: 4500,
+        serviceName: "Seguidores",
+        socialName: "Instagram",
+        quantity: 1000,
+        summaryText: "1.000 Seguidores para Instagram",
+        bulletList: "• 1.000 Seguidores (Instagram)"
+      };
     }
-  }, [selectedClientId, selectedClient]);
+
+    const services = selectedClient.lastReceiptServices || [];
+    const isMultiple = services.length > 1;
+
+    if (selectedTarget === "combo" && isMultiple) {
+      // Combo of all services in the receipt
+      const itemsList = services.map((s) => {
+        const charged = s.chargedPrice && s.chargedPrice > 0
+          ? s.chargedPrice
+          : (selectedClient.lastReceipt?.totalCharged ? Math.round(selectedClient.lastReceipt.totalCharged / services.length) : 5000);
+        const cost = s.providerCostCOP && s.providerCostCOP > 0
+          ? s.providerCostCOP
+          : s.providerCostAtPurchase && s.providerCostAtPurchase > 0
+          ? s.providerCostAtPurchase
+          : (selectedClient.lastReceipt?.totalProviderCost ? Math.round(selectedClient.lastReceipt.totalProviderCost / services.length) : Math.round(charged * 0.4));
+        return {
+          id: s.id,
+          name: s.serviceName,
+          social: s.socialNetworkName,
+          quantity: s.quantity,
+          charged,
+          cost
+        };
+      });
+
+      const totalPrevCharged = selectedClient.lastReceipt?.totalCharged || itemsList.reduce((acc, it) => acc + it.charged, 0) || 15000;
+      const totalCost = selectedClient.lastReceipt?.totalProviderCost || itemsList.reduce((acc, it) => acc + it.cost, 0) || Math.round(totalPrevCharged * 0.4);
+      const bulletList = itemsList.map((it) => `• ${it.quantity.toLocaleString("es-CO")} ${it.name} (${it.social})`).join("\n");
+      const summaryText = itemsList.map((it) => `${it.quantity.toLocaleString("es-CO")} ${it.name}`).join(" + ");
+
+      return {
+        isCombo: true,
+        title: `Combo (${services.length} Servicios)`,
+        itemsList,
+        previousCharged: totalPrevCharged,
+        providerCost: totalCost,
+        serviceName: "Combo de Crecimiento",
+        socialName: "Redes Sociales",
+        quantity: 0,
+        summaryText,
+        bulletList
+      };
+    }
+
+    // Individual item target
+    const targetIdx = typeof selectedTarget === "number" ? selectedTarget : 0;
+    const item = services[targetIdx] || services[0] || null;
+
+    if (item) {
+      const charged = item.chargedPrice && item.chargedPrice > 0
+        ? item.chargedPrice
+        : (services.length === 1 && selectedClient.lastReceipt?.totalCharged
+            ? selectedClient.lastReceipt.totalCharged
+            : (selectedClient.lastReceipt?.totalCharged ? Math.round(selectedClient.lastReceipt.totalCharged / (services.length || 1)) : 10000));
+
+      const cost = item.providerCostCOP && item.providerCostCOP > 0
+        ? item.providerCostCOP
+        : item.providerCostAtPurchase && item.providerCostAtPurchase > 0
+        ? item.providerCostAtPurchase
+        : (services.length === 1 && selectedClient.lastReceipt?.totalProviderCost
+            ? selectedClient.lastReceipt.totalProviderCost
+            : Math.round(charged * 0.4));
+
+      return {
+        isCombo: false,
+        title: `${item.quantity.toLocaleString("es-CO")} ${item.serviceName}`,
+        itemsList: [{
+          id: item.id,
+          name: item.serviceName,
+          social: item.socialNetworkName,
+          quantity: item.quantity,
+          charged,
+          cost
+        }],
+        previousCharged: charged,
+        providerCost: cost,
+        serviceName: item.serviceName,
+        socialName: item.socialNetworkName,
+        quantity: item.quantity,
+        summaryText: `${item.quantity.toLocaleString("es-CO")} ${item.serviceName} para ${item.socialNetworkName}`,
+        bulletList: `• ${item.quantity.toLocaleString("es-CO")} ${item.serviceName} (${item.socialNetworkName})`
+      };
+    }
+
+    // Fallback if no receipt or items
+    const prevCharged = selectedClient.lastCharged || 15000;
+    const cost = selectedClient.lastCost || Math.round(prevCharged * 0.4);
+    return {
+      isCombo: false,
+      title: "Servicios de Crecimiento",
+      itemsList: [],
+      previousCharged: prevCharged,
+      providerCost: cost,
+      serviceName: "Seguidores",
+      socialName: "Instagram",
+      quantity: 1000,
+      summaryText: "1.000 Seguidores para Instagram",
+      bulletList: "• 1.000 Seguidores (Instagram)"
+    };
+  }, [selectedClient, selectedTarget]);
 
   // Dynamic calculations & 30% margin protection
   const {
@@ -166,24 +318,8 @@ export const RepurchaseModal: React.FC<RepurchaseModalProps> = ({ initialClient,
     actualMarginPct,
     isMarginSafe
   } = useMemo(() => {
-    if (!selectedClient) {
-      return {
-        previousCharged: 15000,
-        providerCost: 4500,
-        minSafePrice30Margin: 6500,
-        calculatedPromoPrice: 12000,
-        actualDiscountPct: 20,
-        clientSavings: 3000,
-        actualProfit: 7500,
-        actualMarginPct: 62.5,
-        isMarginSafe: true
-      };
-    }
-
-    const prevCharged = selectedClient.lastCharged > 0 ? selectedClient.lastCharged : 15000;
-    // Estimated cost: if recorded cost is 0, estimate 40% of previous price
-    const cost =
-      selectedClient.lastCost > 0 ? selectedClient.lastCost : Math.round(prevCharged * 0.4);
+    const prevCharged = targetInfo.previousCharged > 0 ? targetInfo.previousCharged : 15000;
+    const cost = targetInfo.providerCost > 0 ? targetInfo.providerCost : Math.round(prevCharged * 0.4);
 
     // Minimum price to guarantee at least 30% profit margin over sale price:
     // (Price - Cost) / Price >= 0.30  =>  Price >= Cost / 0.70
@@ -215,7 +351,7 @@ export const RepurchaseModal: React.FC<RepurchaseModalProps> = ({ initialClient,
       actualMarginPct: Math.round(margin * 10) / 10,
       isMarginSafe: safe
     };
-  }, [selectedClient, discountPct, isCustomPrice, customPromoPrice]);
+  }, [targetInfo, discountPct, isCustomPrice, customPromoPrice]);
 
   // Format helpers
   const formatCOP = (val: number) => "$" + Math.round(val).toLocaleString("es-CO");
@@ -229,26 +365,44 @@ export const RepurchaseModal: React.FC<RepurchaseModalProps> = ({ initialClient,
     if (!selectedClient) return "";
 
     const firstName = selectedClient.name.trim().split(" ")[0] || "Cliente";
-    const quantityStr = selectedClient.lastQuantity.toLocaleString("es-CO");
-    const serviceTitle = `${quantityStr} ${selectedClient.lastServiceName} para ${selectedClient.lastSocialName}`;
-    const cleanServiceName = selectedClient.lastServiceName || "tu servicio de crecimiento";
 
     switch (templateType) {
       case "smart_promo":
-        return `¡Hola ${firstName}! 👋 Te saludamos de ${businessName}.
+        if (targetInfo.isCombo) {
+          return `¡Hola ${firstName}! 👋 Te saludamos de ${businessName}.
 
-Como ya confiaste en nosotros para ${serviceTitle} (${formatCOP(previousCharged)}), hoy tenemos una promoción especial y exclusiva para ti 🔥:
+Como ya confiaste en nosotros para tu combo de:
+${targetInfo.bulletList}
+(Total anterior: ${formatCOP(previousCharged)} COP), hoy tenemos una promoción especial y exclusiva para ti 🔥:
 
-✨ Llévate de nuevo ${quantityStr} ${selectedClient.lastServiceName} por solo ${formatCOP(calculatedPromoPrice)} COP (¡Ahorras ${formatCOP(clientSavings)}!).
+✨ Llévate de nuevo todo tu paquete completo por solo ${formatCOP(calculatedPromoPrice)} COP (¡Ahorras ${formatCOP(clientSavings)}!).
+
+¿Te gustaría aprovechar este beneficio hoy mismo y recargar tus cuentas? Estamos listos para procesarlo de inmediato 📲🚀`;
+        } else {
+          const qtyStr = (targetInfo.quantity || 1000).toLocaleString("es-CO");
+          return `¡Hola ${firstName}! 👋 Te saludamos de ${businessName}.
+
+Como ya confiaste en nosotros para ${targetInfo.summaryText} (${formatCOP(previousCharged)} COP), hoy tenemos una promoción especial y exclusiva para ti 🔥:
+
+✨ Llévate de nuevo ${qtyStr} ${targetInfo.serviceName} por solo ${formatCOP(calculatedPromoPrice)} COP (¡Ahorras ${formatCOP(clientSavings)}!).
 
 ¿Te gustaría aprovechar este beneficio hoy mismo y recargar tu cuenta? Estamos listos para procesarlo de inmediato 📲🚀`;
+        }
 
       case "satisfaction":
-        return `¡Hola ${firstName}! 👋 Te saludamos de ${businessName}.
+        if (targetInfo.isCombo) {
+          return `¡Hola ${firstName}! 👋 Te saludamos de ${businessName}.
 
-Esperamos que estés teniendo un excelente día y que los resultados con tus ${cleanServiceName} hayan sido geniales 🚀.
+Esperamos que estés teniendo un excelente día y que los resultados con tu paquete de ${targetInfo.summaryText} hayan sido geniales 🚀.
 
 Pasábamos a saludarte y consultarte si te gustaría recargar o impulsar otra de tus cuentas o publicaciones esta semana. ¡Tenemos disponibilidad inmediata y atención prioritaria para ti! ✨`;
+        } else {
+          return `¡Hola ${firstName}! 👋 Te saludamos de ${businessName}.
+
+Esperamos que estés teniendo un excelente día y que los resultados con tus ${targetInfo.serviceName} hayan sido geniales 🚀.
+
+Pasábamos a saludarte y consultarte si te gustaría recargar o impulsar otra de tus cuentas o publicaciones esta semana. ¡Tenemos disponibilidad inmediata y atención prioritaria para ti! ✨`;
+        }
 
       case "discount_general":
         return `¡Hola ${firstName}! 🎉 Te saludamos de ${businessName}.
@@ -285,7 +439,8 @@ En ${businessName} acabamos de actualizar nuestros servidores con servicios de m
     previousCharged,
     calculatedPromoPrice,
     clientSavings,
-    actualDiscountPct
+    actualDiscountPct,
+    targetInfo
   ]);
 
   // Active editable message
@@ -325,6 +480,8 @@ En ${businessName} acabamos de actualizar nuestros servidores con servicios de m
     }
   };
 
+  const hasMultipleServices = selectedClient && selectedClient.lastReceiptServices && selectedClient.lastReceiptServices.length > 1;
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/65 backdrop-blur-xs overflow-y-auto animate-fade-in">
       <div
@@ -349,7 +506,7 @@ En ${businessName} acabamos de actualizar nuestros servidores con servicios de m
                 Propuesta de Recompra & Promoción
               </h3>
               <p className={`text-xs ${isDarkMode ? "text-slate-400" : "text-emerald-800/80"}`}>
-                Ofertas dinámicas basadas en la última compra del cliente con margen protegido ≥ 30%
+                Ofertas dinámicas para combo o servicio individual con costos reales y margen ≥ 30%
               </p>
             </div>
           </div>
@@ -368,12 +525,22 @@ En ${businessName} acabamos de actualizar nuestros servidores con servicios de m
         {/* Modal Body */}
         <div className="p-5 sm:p-6 space-y-4 max-h-[calc(85vh-110px)] overflow-y-auto">
           {/* Client Selection Row */}
-          <div className="space-y-1">
-            <label className={`block text-[11px] font-bold uppercase tracking-wider ${
-              isDarkMode ? "text-slate-300" : "text-gray-700"
-            }`}>
-              Cliente Seleccionado
-            </label>
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between">
+              <label className={`block text-[11px] font-bold uppercase tracking-wider ${
+                isDarkMode ? "text-slate-300" : "text-gray-700"
+              }`}>
+                Cliente Seleccionado
+              </label>
+              <div className="flex items-center gap-1.5 text-[10px]">
+                <span className="opacity-70">Filtro de clientes:</span>
+                <span className={`font-extrabold px-1.5 py-0.5 rounded ${
+                  isDarkMode ? "bg-emerald-950 text-emerald-300 border border-emerald-800" : "bg-emerald-100 text-emerald-800 border border-emerald-300"
+                }`}>
+                  ⏱️ {enrichedClients.filter((c) => c.isEligibleByDays).length} con ≥10 días
+                </span>
+              </div>
+            </div>
             <select
               value={selectedClientId}
               onChange={(e) => setSelectedClientId(e.target.value)}
@@ -385,15 +552,50 @@ En ${businessName} acabamos de actualizar nuestros servidores con servicios de m
             >
               {enrichedClients.map((c) => (
                 <option key={c.id} value={c.id}>
-                  #{c.computedCode} - {c.name} ({c.phone}) • {c.receiptsCount} {c.receiptsCount === 1 ? "compra" : "compras"} {c.tag ? `[${c.tag}]` : ""}
+                  {c.isEligibleByDays ? "🟢 [≥10d]" : "⏳ [<10d]"} #{c.computedCode} - {c.name} ({c.phone}) • {c.daysSinceLastPurchase >= 0 ? `Hace ${c.daysSinceLastPurchase} días` : "Sin compras"} {c.tag ? `[${c.tag}]` : ""}
                 </option>
               ))}
             </select>
           </div>
 
-          {/* Client Info Summary Card & Active Warranty Warning */}
+          {/* Client Info Summary Card & Active Warranty / Days Warning */}
           {selectedClient && (
             <div className="space-y-2">
+              {/* 10 Days Eligibility Alert / Status */}
+              {!selectedClient.isEligibleByDays && selectedClient.daysSinceLastPurchase >= 0 && (
+                <div className={`p-3 rounded-xl border flex items-start gap-2.5 text-xs transition ${
+                  isDarkMode
+                    ? "bg-amber-950/60 border-amber-800/80 text-amber-200"
+                    : "bg-amber-50 border-amber-200 text-amber-900"
+                }`}>
+                  <Clock className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+                  <div className="space-y-0.5 text-[11px]">
+                    <div className="font-extrabold flex items-center gap-1.5 text-amber-400">
+                      <span>⏳ Compra Reciente (Hace {selectedClient.daysSinceLastPurchase} {selectedClient.daysSinceLastPurchase === 1 ? "día" : "días"})</span>
+                    </div>
+                    <p className={`leading-tight ${isDarkMode ? "text-amber-300/90" : "text-amber-800"}`}>
+                      La recomendación es enviar promociones de recompra después de <strong>10 días</strong> para no saturar al cliente. Puedes enviarla si lo deseas o esperar {10 - selectedClient.daysSinceLastPurchase} {10 - selectedClient.daysSinceLastPurchase === 1 ? "día" : "días más"}.
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {selectedClient.isEligibleByDays && (
+                <div className={`p-2.5 rounded-xl border flex items-center justify-between text-xs transition ${
+                  isDarkMode
+                    ? "bg-emerald-950/40 border-emerald-800/60 text-emerald-300"
+                    : "bg-emerald-50/70 border-emerald-200 text-emerald-800"
+                }`}>
+                  <div className="flex items-center gap-2 text-[11px] font-bold">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
+                    <span>Tiempo Óptimo de Recompra (Compró hace {selectedClient.daysSinceLastPurchase} días)</span>
+                  </div>
+                  <span className="text-[10px] font-extrabold uppercase px-2 py-0.5 rounded bg-emerald-500 text-white shadow-2xs">
+                    Apto para promo
+                  </span>
+                </div>
+              )}
+
               {selectedClient.hasActiveWarranty && (
                 <div className={`p-3 rounded-xl border flex items-start gap-2.5 text-xs transition ${
                   isDarkMode
@@ -444,23 +646,143 @@ En ${businessName} acabamos de actualizar nuestros servidores con servicios de m
                   <div className="font-mono text-[11px] font-semibold text-emerald-400 mt-0.5">
                     {formatDate(selectedClient.lastDate)}
                   </div>
+                  {selectedClient.daysSinceLastPurchase >= 0 && (
+                    <span className={`text-[9px] font-bold block ${selectedClient.isEligibleByDays ? "text-emerald-400" : "text-amber-400"}`}>
+                      Hace {selectedClient.daysSinceLastPurchase} {selectedClient.daysSinceLastPurchase === 1 ? "día" : "días"}
+                    </span>
+                  )}
                 </div>
 
                 <div className="col-span-2 sm:col-span-2">
                   <span className={`text-[10px] block uppercase font-bold ${isDarkMode ? "text-slate-400" : "text-gray-400"}`}>
-                    Servicio Anterior Adquirido
+                    Último Pedido Registrado
                   </span>
                   <div className={`font-bold mt-0.5 truncate flex items-center justify-between gap-1 ${
                     isDarkMode ? "text-indigo-300" : "text-indigo-700"
                   }`}>
                     <span className="truncate">
-                      {selectedClient.lastQuantity.toLocaleString("es-CO")} {selectedClient.lastServiceName} ({selectedClient.lastSocialName})
+                      {selectedClient.lastReceiptServices.length > 1
+                        ? `Paquete Combo (${selectedClient.lastReceiptServices.length} servicios)`
+                        : `${selectedClient.lastQuantity.toLocaleString("es-CO")} ${selectedClient.lastServiceName} (${selectedClient.lastSocialName})`}
                     </span>
                     <span className="font-mono font-black text-xs shrink-0">
-                      {formatCOP(previousCharged)}
+                      {formatCOP(selectedClient.lastReceipt?.totalCharged || selectedClient.lastCharged)}
                     </span>
                   </div>
                 </div>
+              </div>
+            </div>
+          )}
+
+          {/* OPTION 1: SMART COMBO VS. SINGLE SERVICE SELECTOR */}
+          {hasMultipleServices && (
+            <div
+              className={`p-3.5 rounded-xl border space-y-2.5 transition ${
+                isDarkMode
+                  ? "bg-slate-850 border-indigo-900/50"
+                  : "bg-indigo-50/70 border-indigo-200/80"
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <span className={`text-[11px] font-extrabold uppercase tracking-wider flex items-center gap-1.5 ${
+                  isDarkMode ? "text-indigo-300" : "text-indigo-900"
+                }`}>
+                  <Layers className="w-3.5 h-3.5 text-indigo-500" />
+                  <span>¿Qué deseas promocionar de la última compra? ({selectedClient.lastReceiptServices.length} servicios)</span>
+                </span>
+                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md ${
+                  selectedTarget === "combo"
+                    ? isDarkMode ? "bg-indigo-900 text-indigo-200" : "bg-indigo-100 text-indigo-800"
+                    : isDarkMode ? "bg-emerald-900 text-emerald-200" : "bg-emerald-100 text-emerald-800"
+                }`}>
+                  {selectedTarget === "combo" ? "📦 Combo Completo" : "⚡ Servicio Individual"}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
+                {/* Option: Combo completo */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedTarget("combo");
+                    setIsCustomPrice(false);
+                  }}
+                  className={`p-2.5 rounded-xl border text-left font-semibold transition cursor-pointer flex flex-col justify-between ${
+                    selectedTarget === "combo"
+                      ? isDarkMode
+                        ? "bg-indigo-950/80 border-indigo-400 text-white shadow-xs ring-2 ring-indigo-500/30"
+                        : "bg-white border-indigo-600 text-gray-900 shadow-sm ring-2 ring-indigo-500/30"
+                      : isDarkMode
+                      ? "bg-slate-800/80 border-slate-700 text-slate-300 hover:bg-slate-750"
+                      : "bg-white/80 border-gray-200 text-gray-700 hover:bg-white"
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-1">
+                    <span className="font-black text-xs flex items-center gap-1 text-indigo-400">
+                      <Package className="w-3.5 h-3.5 shrink-0" />
+                      <span>Combo Completo</span>
+                    </span>
+                    {selectedTarget === "combo" && (
+                      <CheckCircle2 className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                    )}
+                  </div>
+                  <div className={`text-[10px] mt-1 line-clamp-1 font-normal ${isDarkMode ? "text-slate-300" : "text-gray-600"}`}>
+                    {selectedClient.lastReceiptServices.map((s) => `${s.quantity >= 1000 ? s.quantity / 1000 + 'k' : s.quantity} ${s.serviceName}`).join(" + ")}
+                  </div>
+                  <div className="mt-2 pt-1.5 border-t border-indigo-200/40 dark:border-indigo-900/50 flex items-center justify-between text-[11px] font-mono">
+                    <span className="opacity-70 text-[10px]">Total Original:</span>
+                    <span className="font-bold">{formatCOP(selectedClient.lastReceipt?.totalCharged || 0)}</span>
+                  </div>
+                </button>
+
+                {/* Options: Individual items */}
+                {selectedClient.lastReceiptServices.map((item, idx) => {
+                  const isSelected = selectedTarget === idx;
+                  const itemCharged = item.chargedPrice && item.chargedPrice > 0
+                    ? item.chargedPrice
+                    : Math.round((selectedClient.lastReceipt?.totalCharged || 10000) / selectedClient.lastReceiptServices.length);
+                  const itemCost = item.providerCostCOP && item.providerCostCOP > 0
+                    ? item.providerCostCOP
+                    : item.providerCostAtPurchase && item.providerCostAtPurchase > 0
+                    ? item.providerCostAtPurchase
+                    : Math.round(itemCharged * 0.4);
+
+                  return (
+                    <button
+                      key={item.id || idx}
+                      type="button"
+                      onClick={() => {
+                        setSelectedTarget(idx);
+                        setIsCustomPrice(false);
+                      }}
+                      className={`p-2.5 rounded-xl border text-left font-semibold transition cursor-pointer flex flex-col justify-between ${
+                        isSelected
+                          ? isDarkMode
+                            ? "bg-indigo-950/80 border-indigo-400 text-white shadow-xs ring-2 ring-indigo-500/30"
+                            : "bg-white border-indigo-600 text-gray-900 shadow-sm ring-2 ring-indigo-500/30"
+                          : isDarkMode
+                          ? "bg-slate-800/80 border-slate-700 text-slate-300 hover:bg-slate-750"
+                          : "bg-white/80 border-gray-200 text-gray-700 hover:bg-white"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-1">
+                        <span className="font-bold text-xs truncate">
+                          {item.quantity.toLocaleString("es-CO")} {item.serviceName}
+                        </span>
+                        {isSelected && (
+                          <CheckCircle2 className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                        )}
+                      </div>
+                      <div className={`text-[10px] mt-1 font-medium ${isDarkMode ? "text-slate-400" : "text-gray-500"}`}>
+                        {item.socialNetworkName} • Costo real: {formatCOP(itemCost)}
+                      </div>
+                      <div className="mt-2 pt-1.5 border-t border-indigo-200/40 dark:border-indigo-900/50 flex items-center justify-between text-[11px] font-mono">
+                        <span className="opacity-70 text-[10px]">Precio Original:</span>
+                        <span className="font-bold">{formatCOP(itemCharged)}</span>
+                      </div>
+                    </button>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -478,11 +800,16 @@ En ${businessName} acabamos de actualizar nuestros servidores con servicios de m
                 <div className="p-1 rounded-md bg-emerald-500 text-white shadow-2xs">
                   <Percent className="w-3.5 h-3.5" />
                 </div>
-                <h4 className={`text-xs font-extrabold uppercase tracking-wider ${
-                  isDarkMode ? "text-emerald-300" : "text-emerald-900"
-                }`}>
-                  Calculadora de Oferta de Recompra
-                </h4>
+                <div>
+                  <h4 className={`text-xs font-extrabold uppercase tracking-wider ${
+                    isDarkMode ? "text-emerald-300" : "text-emerald-900"
+                  }`}>
+                    Calculadora de Oferta de Recompra
+                  </h4>
+                  <span className={`text-[10px] font-semibold block ${isDarkMode ? "text-slate-400" : "text-gray-600"}`}>
+                    Promocionando: <strong className="text-emerald-400">{targetInfo.title}</strong>
+                  </span>
+                </div>
               </div>
 
               {/* Safety Margin Badge */}
@@ -612,7 +939,7 @@ En ${businessName} acabamos de actualizar nuestros servidores con servicios de m
 
               <div className={`p-2 rounded-lg ${isDarkMode ? "bg-slate-850/80" : "bg-white"}`}>
                 <span className={`text-[10px] uppercase font-bold block ${isDarkMode ? "text-slate-400" : "text-gray-400"}`}>
-                  Costo Proveedor
+                  Costo Proveedor Real
                 </span>
                 <span className="font-mono font-semibold text-gray-400">
                   {formatCOP(providerCost)}
@@ -654,10 +981,10 @@ En ${businessName} acabamos de actualizar nuestros servidores con servicios de m
               >
                 <div className="font-bold flex items-center gap-1">
                   <span>🔥</span>
-                  <span>Promo Última Compra</span>
+                  <span>Promo {targetInfo.isCombo ? "Combo" : "Servicio"}</span>
                 </div>
                 <div className={`text-[10px] mt-0.5 font-normal ${isDarkMode ? "text-slate-400" : "text-gray-500"}`}>
-                  Oferta con descuento directo
+                  Oferta directa con descuento
                 </div>
               </button>
 
@@ -742,7 +1069,7 @@ En ${businessName} acabamos de actualizar nuestros servidores con servicios de m
               </span>
             </div>
             <textarea
-              rows={5}
+              rows={6}
               value={editableMessage}
               onChange={(e) => {
                 setEditableMessage(e.target.value);
@@ -816,3 +1143,4 @@ En ${businessName} acabamos de actualizar nuestros servidores con servicios de m
     </div>
   );
 };
+

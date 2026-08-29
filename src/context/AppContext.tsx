@@ -14,9 +14,7 @@ import {
   addDoc,
   updateDoc,
   deleteDoc,
-  onSnapshot,
-  query,
-  orderBy
+  onSnapshot
 } from "firebase/firestore";
 import { auth, db } from "../firebase";
 import {
@@ -25,7 +23,6 @@ import {
   Service,
   Receipt,
   Client,
-  ReceiptItem,
   TrmState,
   getNormalizedStatus,
   SupplierWarrantyRecord
@@ -57,6 +54,7 @@ interface AppContextType {
   deleteSupplierWarranty: (id: string) => Promise<void>;
   resolveSupplierWarranty: (id: string, notes?: string) => Promise<void>;
   claimAgainSupplierWarranty: (id: string, notes?: string) => Promise<void>;
+  resolveAllWarrantiesInProcess: () => Promise<{ updatedReceiptsCount: number; resolvedWarrantiesCount: number }>;
 
   // Auth actions
   login: (email: string, password: string) => Promise<void>;
@@ -410,21 +408,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     return () => clearTimeout(timeoutId);
   }, [user, loadingData, receipts, clients]);
-
-  // Automatically migrate any existing in-process orders to completed as requested
-  useEffect(() => {
-    if (!user || loadingData || receipts.length === 0) return;
-    const inProcess = receipts.filter((r) => getNormalizedStatus(r.status) === "en_proceso");
-    if (inProcess.length > 0) {
-      inProcess.forEach(async (r) => {
-        try {
-          await updateDoc(doc(db, "receipts", r.id), { status: "completado" });
-        } catch (err) {
-          console.warn("Auto-completing in-process receipt:", r.id, err);
-        }
-      });
-    }
-  }, [user, loadingData, receipts]);
 
   // Auth Operations
   const login = async (email: string, password: string) => {
@@ -846,9 +829,69 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     await deleteDoc(docRef);
   };
 
-  const resolveSupplierWarranty = async (id: string, _notes?: string) => {
+  const resolveSupplierWarranty = async (id: string, notes?: string) => {
     const docRef = doc(db, "supplier_warranties", id);
-    await deleteDoc(docRef);
+    try {
+      const snap = await getDoc(docRef);
+      if (snap.exists()) {
+        const data = snap.data() as SupplierWarrantyRecord;
+        if (data.receiptId) {
+          try {
+            await updateDoc(doc(db, "receipts", data.receiptId), { status: "completado" });
+          } catch (recErr) {
+            console.warn("Could not update receipt on resolve warranty:", recErr);
+          }
+        }
+      }
+    } catch (err) {
+      console.warn("Error getting supplier warranty record before resolve:", err);
+    }
+
+    // Persist as resolved in background database history
+    const updateData: Record<string, any> = {
+      status: "resuelto",
+      resolvedDate: new Date().toISOString()
+    };
+    if (notes) {
+      updateData.supplierNotes = notes;
+    }
+    await updateDoc(docRef, updateData);
+  };
+
+  const resolveAllWarrantiesInProcess = async () => {
+    let updatedReceiptsCount = 0;
+    let resolvedWarrantiesCount = 0;
+
+    // 1. Resolve warranty receipts
+    const warrantyReceipts = receipts.filter(
+      (r) => getNormalizedStatus(r.status) === "garantia_en_proceso"
+    );
+    for (const r of warrantyReceipts) {
+      try {
+        await updateDoc(doc(db, "receipts", r.id), { status: "completado" });
+        updatedReceiptsCount++;
+      } catch (err) {
+        console.error("Error completing warranty receipt:", r.id, err);
+      }
+    }
+
+    // 2. Resolve active supplier warranty records in background
+    const activeWarranties = supplierWarranties.filter(
+      (w) => w.status === "en_espera" || w.status === "reclamado_nuevamente"
+    );
+    for (const w of activeWarranties) {
+      try {
+        await updateDoc(doc(db, "supplier_warranties", w.id), {
+          status: "resuelto",
+          resolvedDate: new Date().toISOString()
+        });
+        resolvedWarrantiesCount++;
+      } catch (err) {
+        console.error("Error resolving warranty record:", w.id, err);
+      }
+    }
+
+    return { updatedReceiptsCount, resolvedWarrantiesCount };
   };
 
   const claimAgainSupplierWarranty = async (id: string, notes?: string) => {
@@ -888,6 +931,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         deleteSupplierWarranty,
         resolveSupplierWarranty,
         claimAgainSupplierWarranty,
+        resolveAllWarrantiesInProcess,
         login,
         loginWithGoogle,
         logout,

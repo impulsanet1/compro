@@ -4,7 +4,7 @@
  */
 
 import React, { useRef, useState, useEffect, useMemo } from "react";
-import { X, ShieldCheck, Edit3, Save, Trash2, ShieldAlert, Calendar, ChevronDown, ChevronUp, MessageSquare, Send, Bell, ExternalLink, PhoneCall } from "lucide-react";
+import { X, ShieldCheck, Edit3, Save, Trash2, ShieldAlert, Calendar, ChevronDown, ChevronUp, MessageSquare, Send, PhoneCall, ExternalLink, Bell } from "lucide-react";
 import { Receipt, ReceiptItem, getNormalizedStatus, getItemOrderIds, getItemOrderIdDisplay } from "../types";
 import { motion, AnimatePresence } from "motion/react";
 import { useApp } from "../context/AppContext";

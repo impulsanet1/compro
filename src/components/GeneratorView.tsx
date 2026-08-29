@@ -10,24 +10,24 @@ import {
   Trash2,
   FileText,
   DollarSign,
-  Layers,
   Eye,
   EyeOff,
   User,
   Phone,
   AlertCircle,
   PlusCircle,
-  Calculator,
   Search,
   Check,
   X,
   Copy,
-  MessageSquare,
   RefreshCw,
-  Sparkles
+  Sparkles,
+  Layers,
+  Calculator,
+  MessageSquare
 } from "lucide-react";
 import { ReceiptItem, Receipt, Client, getServiceBaseCosts, calculateServicePrices, getClientCode, calculateSupplierCostUSD, calculateSupplierCostCOP, getItemOrderIds } from "../types";
-import { motion, AnimatePresence } from "motion/react";
+import { motion } from "motion/react";
 
 interface GeneratorViewProps {
   onReceiptGenerated: (receipt: Receipt) => void;

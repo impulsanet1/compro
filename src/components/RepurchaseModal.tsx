@@ -6,20 +6,16 @@
 import React, { useState, useMemo, useEffect } from "react";
 import {
   X,
-  MessageSquare,
   Send,
   Copy,
   Check,
   Sparkles,
-  Tag,
-  TrendingUp,
-  ShieldCheck,
   AlertTriangle,
+  Gift,
   Percent,
-  RefreshCw,
-  Gift
+  ShieldCheck
 } from "lucide-react";
-import { Client, getClientCode } from "../types";
+import { Client, getClientCode, getNormalizedStatus } from "../types";
 import { useApp } from "../context/AppContext";
 
 interface RepurchaseModalProps {
@@ -28,19 +24,22 @@ interface RepurchaseModalProps {
 }
 
 export const RepurchaseModal: React.FC<RepurchaseModalProps> = ({ initialClient, onClose }) => {
-  const { clients, receipts, businessConfig, isDarkMode } = useApp();
+  const { clients, receipts, supplierWarranties, businessConfig, isDarkMode } = useApp();
 
   const businessName = businessConfig?.businessName || "ImpulsaNet";
 
-  // Build client list with enriched purchase info
+  // Build client list with enriched purchase and warranty info
   const enrichedClients = useMemo(() => {
     return clients.map((c, index) => {
       const code = getClientCode(c, index);
-      const clientReceipts = receipts.filter(
-        (r) =>
-          r.clientName.trim().toLowerCase() === c.name.trim().toLowerCase() ||
-          (c.phone && r.clientPhone.trim() === c.phone.trim())
-      );
+      const cleanPhone = (c.phone || "").replace(/\D/g, "");
+      const cleanName = (c.name || "").trim().toLowerCase();
+
+      const clientReceipts = receipts.filter((r) => {
+        const rPhone = (r.clientPhone || "").replace(/\D/g, "");
+        const rName = (r.clientName || "").trim().toLowerCase();
+        return (cleanPhone && rPhone && cleanPhone === rPhone) || (cleanName && rName && cleanName === rName);
+      });
 
       const sortedReceipts = [...clientReceipts].sort(
         (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()
@@ -71,6 +70,19 @@ export const RepurchaseModal: React.FC<RepurchaseModalProps> = ({ initialClient,
 
       const totalSpent = clientReceipts.reduce((sum, r) => sum + (r.totalCharged || 0), 0);
 
+      // Check active warranty for this client
+      const hasActiveWarranty =
+        supplierWarranties.some((w) => {
+          const wPhone = (w.clientPhone || "").replace(/\D/g, "");
+          const wName = (w.clientName || "").trim().toLowerCase();
+          const matches =
+            (cleanPhone && wPhone && cleanPhone === wPhone) ||
+            (cleanName && wName && cleanName === wName) ||
+            (w.receiptId && clientReceipts.some((r) => r.id === w.receiptId));
+          return matches && (w.status === "en_espera" || w.status === "reclamado_nuevamente");
+        }) ||
+        clientReceipts.some((r) => getNormalizedStatus(r.status) === "garantia_en_proceso");
+
       // Loyalty tier estimation
       const isHighVolume =
         c.tag === "VIP" ||
@@ -95,12 +107,13 @@ export const RepurchaseModal: React.FC<RepurchaseModalProps> = ({ initialClient,
         lastCharged,
         lastCost,
         totalSpent,
+        hasActiveWarranty,
         isHighVolume,
         isMediumVolume,
         suggestedDiscountPct
       };
     });
-  }, [clients, receipts]);
+  }, [clients, receipts, supplierWarranties]);
 
   // Selected client ID state
   const [selectedClientId, setSelectedClientId] = useState<string>(() => {
@@ -378,55 +391,75 @@ En ${businessName} acabamos de actualizar nuestros servidores con servicios de m
             </select>
           </div>
 
-          {/* Client Info Summary Card */}
+          {/* Client Info Summary Card & Active Warranty Warning */}
           {selectedClient && (
-            <div
-              className={`p-3.5 rounded-xl border grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs ${
-                isDarkMode
-                  ? "bg-slate-800/50 border-slate-700/80"
-                  : "bg-gray-50 border-gray-200/80"
-              }`}
-            >
-              <div>
-                <span className={`text-[10px] block uppercase font-bold ${isDarkMode ? "text-slate-400" : "text-gray-400"}`}>
-                  Historial / Volumen
-                </span>
-                <div className="font-bold mt-0.5 flex items-center gap-1 flex-wrap">
-                  <span className={isDarkMode ? "text-white" : "text-gray-900"}>
-                    {selectedClient.receiptsCount} {selectedClient.receiptsCount === 1 ? "pedido" : "pedidos"}
-                  </span>
-                  <span className={`text-[9px] px-1.5 py-0.2 rounded font-extrabold border ${
-                    selectedClient.isHighVolume
-                      ? isDarkMode ? "bg-purple-950 text-purple-300 border-purple-800" : "bg-purple-100 text-purple-800 border-purple-200"
-                      : isDarkMode ? "bg-blue-950 text-blue-300 border-blue-800" : "bg-blue-100 text-blue-800 border-blue-200"
-                  }`}>
-                    {selectedClient.isHighVolume ? "Frecuente / Alto" : "Ocasional"}
-                  </span>
-                </div>
-              </div>
-
-              <div>
-                <span className={`text-[10px] block uppercase font-bold ${isDarkMode ? "text-slate-400" : "text-gray-400"}`}>
-                  Última Compra
-                </span>
-                <div className="font-mono text-[11px] font-semibold text-emerald-400 mt-0.5">
-                  {formatDate(selectedClient.lastDate)}
-                </div>
-              </div>
-
-              <div className="col-span-2 sm:col-span-2">
-                <span className={`text-[10px] block uppercase font-bold ${isDarkMode ? "text-slate-400" : "text-gray-400"}`}>
-                  Servicio Anterior Adquirido
-                </span>
-                <div className={`font-bold mt-0.5 truncate flex items-center justify-between gap-1 ${
-                  isDarkMode ? "text-indigo-300" : "text-indigo-700"
+            <div className="space-y-2">
+              {selectedClient.hasActiveWarranty && (
+                <div className={`p-3 rounded-xl border flex items-start gap-2.5 text-xs transition ${
+                  isDarkMode
+                    ? "bg-rose-950/70 border-rose-800 text-rose-200"
+                    : "bg-rose-50 border-rose-200 text-rose-900"
                 }`}>
-                  <span className="truncate">
-                    {selectedClient.lastQuantity.toLocaleString("es-CO")} {selectedClient.lastServiceName} ({selectedClient.lastSocialName})
+                  <AlertTriangle className="w-4 h-4 text-rose-500 shrink-0 mt-0.5" />
+                  <div className="space-y-0.5 text-[11px]">
+                    <div className="font-extrabold flex items-center gap-1.5 text-rose-400">
+                      <span>⚠️ Cliente con Reclamo de Garantía en Curso</span>
+                    </div>
+                    <p className={`leading-tight ${isDarkMode ? "text-rose-300" : "text-rose-700"}`}>
+                      Este cliente tiene una garantía pendiente en el cronómetro de 48h. Considera esperar a que se resuelva antes de enviarle ofertas de recompra.
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              <div
+                className={`p-3.5 rounded-xl border grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs ${
+                  isDarkMode
+                    ? "bg-slate-800/50 border-slate-700/80"
+                    : "bg-gray-50 border-gray-200/80"
+                }`}
+              >
+                <div>
+                  <span className={`text-[10px] block uppercase font-bold ${isDarkMode ? "text-slate-400" : "text-gray-400"}`}>
+                    Historial / Volumen
                   </span>
-                  <span className="font-mono font-black text-xs shrink-0">
-                    {formatCOP(previousCharged)}
+                  <div className="font-bold mt-0.5 flex items-center gap-1 flex-wrap">
+                    <span className={isDarkMode ? "text-white" : "text-gray-900"}>
+                      {selectedClient.receiptsCount} {selectedClient.receiptsCount === 1 ? "pedido" : "pedidos"}
+                    </span>
+                    <span className={`text-[9px] px-1.5 py-0.2 rounded font-extrabold border ${
+                      selectedClient.isHighVolume
+                        ? isDarkMode ? "bg-purple-950 text-purple-300 border-purple-800" : "bg-purple-100 text-purple-800 border-purple-200"
+                        : isDarkMode ? "bg-blue-950 text-blue-300 border-blue-800" : "bg-blue-100 text-blue-800 border-blue-200"
+                    }`}>
+                      {selectedClient.isHighVolume ? "Frecuente / Alto" : "Ocasional"}
+                    </span>
+                  </div>
+                </div>
+
+                <div>
+                  <span className={`text-[10px] block uppercase font-bold ${isDarkMode ? "text-slate-400" : "text-gray-400"}`}>
+                    Última Compra
                   </span>
+                  <div className="font-mono text-[11px] font-semibold text-emerald-400 mt-0.5">
+                    {formatDate(selectedClient.lastDate)}
+                  </div>
+                </div>
+
+                <div className="col-span-2 sm:col-span-2">
+                  <span className={`text-[10px] block uppercase font-bold ${isDarkMode ? "text-slate-400" : "text-gray-400"}`}>
+                    Servicio Anterior Adquirido
+                  </span>
+                  <div className={`font-bold mt-0.5 truncate flex items-center justify-between gap-1 ${
+                    isDarkMode ? "text-indigo-300" : "text-indigo-700"
+                  }`}>
+                    <span className="truncate">
+                      {selectedClient.lastQuantity.toLocaleString("es-CO")} {selectedClient.lastServiceName} ({selectedClient.lastSocialName})
+                    </span>
+                    <span className="font-mono font-black text-xs shrink-0">
+                      {formatCOP(previousCharged)}
+                    </span>
+                  </div>
                 </div>
               </div>
             </div>

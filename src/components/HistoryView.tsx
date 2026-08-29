@@ -18,7 +18,6 @@ import {
   Copy
 } from "lucide-react";
 import { Receipt, getNormalizedStatus, getItemOrderIds } from "../types";
-import { motion } from "motion/react";
 
 interface HistoryViewProps {
   onSelectReceipt: (receipt: Receipt) => void;

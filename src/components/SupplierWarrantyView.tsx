@@ -30,11 +30,11 @@ import {
   Edit2,
   FileText,
   X,
-  CheckSquare,
-  Square,
-  Zap,
   Moon,
-  Sun
+  Sun,
+  Zap,
+  CheckSquare,
+  Square
 } from "lucide-react";
 
 interface SupplierWarrantyViewProps {
@@ -100,13 +100,14 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
     addSupplierWarranty,
     updateSupplierWarranty,
     deleteSupplierWarranty,
+    resolveSupplierWarranty,
     updateReceipt,
     isDarkMode,
     toggleDarkMode
   } = useApp();
 
   // Navigation & View state
-  const [activeSubTab, setActiveSubTab] = useState<"tracking" | "in_process_receipts" | "active_ids">("tracking");
+  const [activeSubTab, setActiveSubTab] = useState<"tracking" | "active_ids">("tracking");
   const [statusFilter, setStatusFilter] = useState<"all" | "overdue" | "pending">("all");
   const [searchTerm, setSearchTerm] = useState("");
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -164,18 +165,6 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
       (r) => (r.status === "en_espera" || r.status === "reclamado_nuevamente") && !r.timeInfo.isOverdue
     ).length;
   }, [warrantyRecordsWithStatus]);
-
-  const countResolved = useMemo(() => {
-    return warrantyRecordsWithStatus.filter((r) => r.status === "resuelto").length;
-  }, [warrantyRecordsWithStatus]);
-
-  // Receipts that currently have status "garantia_en_proceso"
-  const receiptsInWarranty = useMemo(() => {
-    return receipts.filter((r) => {
-      const normStatus = getNormalizedStatus(r.status);
-      return normStatus === "garantia_en_proceso";
-    });
-  }, [receipts]);
 
   // 2. Calculate All Active Client Warranty IDs from Receipts
   const activeClientWarrantyItems = useMemo(() => {
@@ -552,13 +541,13 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
     }
   };
 
-  // Direct Resolve handler (1-click, marks resolved and eliminates to prevent clutter)
+  // Direct Resolve handler (1-click, marks resolved and stores in background history, updates linked receipt to completado, and hides from active timer list)
   const handleQuickResolve = async (record: SupplierWarrantyRecord) => {
     try {
-      await deleteSupplierWarranty(record.id);
-      copyToClipboard("", undefined, "¡Garantía resuelta y eliminada de la lista!");
+      await resolveSupplierWarranty(record.id);
+      copyToClipboard("", undefined, "¡Garantía resuelta y archivada con éxito!");
     } catch (err) {
-      console.error("Error resolving/deleting supplier warranty:", err);
+      console.error("Error resolving supplier warranty:", err);
     }
   };
 
@@ -659,7 +648,7 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
       </div>
 
       {/* KPI Stats Grid */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 md:gap-4">
         {/* Overdue Alert (>48h) */}
         <button
           onClick={() => {
@@ -736,38 +725,6 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
           <div className={`text-[10px] mt-1 font-medium ${isDarkMode ? "text-blue-400" : "text-blue-600"}`}>Esperando respuesta del proveedor</div>
         </button>
 
-        {/* Facturas en Garantía */}
-        <button
-          onClick={() => {
-            setActiveSubTab("in_process_receipts");
-          }}
-          className={`p-4 rounded-2xl border text-left transition cursor-pointer ${
-            activeSubTab === "in_process_receipts"
-              ? isDarkMode
-                ? "bg-amber-950/80 border-amber-500 ring-2 ring-amber-400"
-                : "bg-amber-50/80 border-amber-300 ring-2 ring-amber-400"
-              : isDarkMode
-              ? "bg-slate-800/90 border-slate-700 hover:border-slate-600"
-              : "bg-white border-gray-200 hover:border-gray-300"
-          }`}
-        >
-          <div className="flex items-center justify-between">
-            <span className={`text-xs font-bold tracking-wide uppercase ${isDarkMode ? "text-amber-400" : "text-amber-700"}`}>
-              🟡 Facturas en Garantía
-            </span>
-            <span className={`w-7 h-7 rounded-lg flex items-center justify-center text-xs font-bold ${
-              isDarkMode ? "bg-amber-950 text-amber-300 border border-amber-800" : "bg-amber-100 text-amber-700"
-            }`}>
-              <FileText className="w-3.5 h-3.5" />
-            </span>
-          </div>
-          <div className="mt-2 flex items-baseline gap-1.5">
-            <span className={`text-2xl font-black ${isDarkMode ? "text-amber-200" : "text-amber-900"}`}>{receiptsInWarranty.length}</span>
-            <span className={`text-[11px] ${isDarkMode ? "text-slate-400" : "text-gray-500"}`}>facturas activas</span>
-          </div>
-          <div className={`text-[10px] mt-1 font-medium ${isDarkMode ? "text-amber-400" : "text-amber-700"}`}>Comprobantes en estado Garantía</div>
-        </button>
-
         {/* Total Active Client IDs */}
         <button
           onClick={() => setActiveSubTab("active_ids")}
@@ -820,18 +777,6 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
             >
               <Clock className="w-3.5 h-3.5 text-indigo-500" />
               <span>Cronómetros (Límite 48h) ({supplierWarranties.length})</span>
-            </button>
-
-            <button
-              onClick={() => setActiveSubTab("in_process_receipts")}
-              className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer ${
-                activeSubTab === "in_process_receipts"
-                  ? isDarkMode ? "bg-slate-700 text-white shadow-xs" : "bg-white text-gray-900 shadow-xs"
-                  : isDarkMode ? "text-slate-400 hover:text-slate-200" : "text-gray-500 hover:text-gray-800"
-              }`}
-            >
-              <FileText className="w-3.5 h-3.5 text-amber-500" />
-              <span>Facturas en Garantía ({receiptsInWarranty.length})</span>
             </button>
 
             <button
@@ -1156,147 +1101,7 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
         </div>
       )}
 
-      {/* VIEW: 2. FACTURAS EN ESTADO "GARANTÍA EN PROCESO" */}
-      {activeSubTab === "in_process_receipts" && (
-        <div className="space-y-4">
-          <div className={`border rounded-2xl p-4 flex items-start gap-3 transition ${
-            isDarkMode ? "bg-amber-950/40 border-amber-800" : "bg-amber-50 border-amber-200"
-          }`}>
-            <AlertTriangle className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
-            <div>
-              <h3 className={`text-xs font-bold ${isDarkMode ? "text-amber-300" : "text-amber-900"}`}>
-                Comprobantes marcados con "Garantía en Proceso" ({receiptsInWarranty.length})
-              </h3>
-              <p className={`text-[11px] mt-0.5 ${isDarkMode ? "text-amber-400" : "text-amber-700"}`}>
-                Estos son los comprobantes donde el cliente solicitó reposición. Puedes iniciar el cronómetro de 48h con un solo clic.
-              </p>
-            </div>
-          </div>
-
-          {receiptsInWarranty.length === 0 ? (
-            <div className={`rounded-2xl border p-12 text-center shadow-sm transition ${
-              isDarkMode ? "bg-slate-800/90 border-slate-700" : "bg-white border-gray-200"
-            }`}>
-              <CheckCircle2 className="w-12 h-12 text-emerald-400 mx-auto mb-3" />
-              <h3 className={`text-base font-bold ${isDarkMode ? "text-white" : "text-gray-800"}`}>
-                No hay facturas con garantía en proceso actualmente
-              </h3>
-              <p className={`text-xs max-w-md mx-auto mt-1 ${isDarkMode ? "text-slate-400" : "text-gray-500"}`}>
-                Cuando cambies el estado de un comprobante a "Garantía en proceso" aparecerá listado aquí.
-              </p>
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {receiptsInWarranty.map((r) => {
-                const allIds: string[] = [];
-                r.services.forEach((s) => {
-                  if (s.orderIds && s.orderIds.length > 0) allIds.push(...s.orderIds);
-                  else if (s.orderId) allIds.push(s.orderId);
-                });
-
-                return (
-                  <div
-                    key={r.id}
-                    className={`rounded-2xl border shadow-sm p-4 space-y-3 flex flex-col justify-between hover:shadow-md transition ${
-                      isDarkMode
-                        ? "bg-slate-800/95 border-slate-700"
-                        : "bg-white border-amber-200"
-                    }`}
-                  >
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between">
-                        <span className={`font-mono font-bold text-xs px-2 py-0.5 rounded-lg border ${
-                          isDarkMode
-                            ? "bg-indigo-950/80 text-indigo-300 border-indigo-800"
-                            : "bg-indigo-50 text-indigo-700 border-indigo-150"
-                        }`}>
-                          Factura #{String(r.consecutive).padStart(4, "0")}
-                        </span>
-                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md border ${
-                          isDarkMode
-                            ? "bg-amber-950/80 text-amber-300 border-amber-800"
-                            : "bg-amber-50 text-amber-800 border-amber-200"
-                        }`}>
-                          Garantía en Proceso
-                        </span>
-                      </div>
-
-                      <div className="space-y-1 text-xs">
-                        <div className="flex justify-between font-semibold">
-                          <span className={isDarkMode ? "text-slate-400" : "text-gray-400"}>Cliente:</span>
-                          <span className={isDarkMode ? "text-slate-200" : "text-gray-900"}>{r.clientName}</span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span className={isDarkMode ? "text-slate-400" : "text-gray-400"}>Fecha:</span>
-                          <span className={`font-mono ${isDarkMode ? "text-slate-300" : "text-gray-700"}`}>
-                            {new Date(r.date).toLocaleDateString("es-ES")}
-                          </span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span className={isDarkMode ? "text-slate-400" : "text-gray-400"}>Servicio:</span>
-                          <span className={`font-medium truncate max-w-[180px] ${isDarkMode ? "text-slate-200" : "text-gray-900"}`}>
-                            {r.services[0]?.serviceName || "Servicio"}
-                          </span>
-                        </div>
-                      </div>
-
-                      {/* IDs tag list */}
-                      <div className={`pt-2 border-t ${isDarkMode ? "border-slate-700" : "border-gray-100"}`}>
-                        <div className={`text-[10px] font-bold uppercase mb-1 ${isDarkMode ? "text-slate-400" : "text-gray-400"}`}>
-                          IDs del Pedido ({allIds.length}):
-                        </div>
-                        {allIds.length > 0 ? (
-                          <div className="flex flex-wrap gap-1">
-                            {allIds.map((id, idx) => (
-                              <span
-                                key={idx}
-                                className={`font-mono text-[11px] font-bold px-1.5 py-0.5 rounded border ${
-                                  isDarkMode
-                                    ? "bg-slate-900 text-slate-200 border-slate-700"
-                                    : "bg-gray-100 text-gray-800 border-gray-200"
-                                }`}
-                              >
-                                {id}
-                              </span>
-                            ))}
-                          </div>
-                        ) : (
-                          <span className="text-[11px] text-gray-400 italic">Sin IDs asignados</span>
-                        )}
-                      </div>
-                    </div>
-
-                    <div className={`pt-3 border-t flex items-center justify-between gap-2 ${
-                      isDarkMode ? "border-slate-700" : "border-gray-100"
-                    }`}>
-                      <button
-                        onClick={() => onSelectReceipt?.(r)}
-                        className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition cursor-pointer ${
-                          isDarkMode
-                            ? "bg-slate-700 hover:bg-slate-600 text-slate-200"
-                            : "bg-gray-100 hover:bg-gray-200 text-gray-700"
-                        }`}
-                      >
-                        Ver Factura
-                      </button>
-
-                      <button
-                        onClick={() => handleOpenNewModal(r)}
-                        className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition flex items-center gap-1 shadow-2xs cursor-pointer"
-                      >
-                        <Zap className="w-3.5 h-3.5" />
-                        <span>Enviar a Garantía (48h)</span>
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* VIEW: 3. ALL ACTIVE CLIENT IDS TABLE */}
+      {/* VIEW: 2. ALL ACTIVE CLIENT IDS TABLE */}
       {activeSubTab === "active_ids" && (
         <div className="space-y-4">
           <div className={`border rounded-2xl p-4 flex items-start gap-3 transition ${

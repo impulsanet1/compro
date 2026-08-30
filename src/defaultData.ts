@@ -98,7 +98,7 @@ export const DEFAULT_SERVICES: Service[] = [
   {
     id: "fb-likes",
     socialNetworkId: "facebook",
-    name: "Likes de Página",
+    name: "Likes",
     providerCostPer1000: 1920,
     suggestedPricePer1000: 12000,
     customPresets: [1000, 2000, 5000, 10000],

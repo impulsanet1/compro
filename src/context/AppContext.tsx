@@ -251,9 +251,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           const found = srvsFromDb.find((s) => s.id === def.id);
           if (!found) return def;
 
+          const sanitizedName =
+            def.id === "fb-likes" && (found.name === "Likes de Página" || found.name === "Likes de Pagina")
+              ? "Likes"
+              : found.name || def.name;
+
           return {
             ...def,
             ...found,
+            name: sanitizedName,
             providerCostPer1000: found.providerCostPer1000 || def.providerCostPer1000,
             quantities:
               found.quantities && found.quantities.length > 0 ? found.quantities : def.quantities

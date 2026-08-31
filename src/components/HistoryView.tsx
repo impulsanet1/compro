@@ -17,7 +17,7 @@ import {
   Check,
   Copy
 } from "lucide-react";
-import { Receipt, getNormalizedStatus, getItemOrderIds } from "../types";
+import { Receipt, getNormalizedStatus, getItemOrderIds, isReceiptForClient } from "../types";
 
 interface HistoryViewProps {
   onSelectReceipt: (receipt: Receipt) => void;
@@ -539,11 +539,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => 
                 isDarkMode ? "divide-slate-800" : "divide-gray-150"
               }`}>
                 {filteredReceipts.map((r) => {
-                  const clientObj = clients.find(
-                    (c) =>
-                      c.name.trim().toLowerCase() === r.clientName.trim().toLowerCase() &&
-                      c.phone.trim() === r.clientPhone.trim()
-                  );
+                  const clientObj = clients.find((c) => isReceiptForClient(c, r));
                   const clientTag = clientObj?.tag;
 
                   // Tag style class

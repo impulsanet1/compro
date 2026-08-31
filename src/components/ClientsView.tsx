@@ -22,7 +22,7 @@ import {
   CheckCircle2,
   Clock
 } from "lucide-react";
-import { Receipt, getClientCode, getNormalizedStatus } from "../types";
+import { Receipt, getClientCode, getNormalizedStatus, isReceiptForClient, isWarrantyForClient } from "../types";
 import { RepurchaseModal } from "./RepurchaseModal";
 
 interface ClientsViewProps {
@@ -43,14 +43,9 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
   const enrichedClients = useMemo(() => {
     return clients.map((c, index) => {
       const code = getClientCode(c, index);
-      const cleanPhone = c.phone.replace(/\D/g, "");
-      const cleanName = c.name.trim().toLowerCase();
 
-      const actualReceipts = receipts.filter((r) => {
-        const rPhone = (r.clientPhone || "").replace(/\D/g, "");
-        const rName = (r.clientName || "").trim().toLowerCase();
-        return (rPhone && rPhone === cleanPhone) || (rName && rName === cleanName);
-      });
+      // Strictly match receipts belonging ONLY to this specific client
+      const actualReceipts = receipts.filter((r) => isReceiptForClient(c, r));
       
       const sortedReceipts = [...actualReceipts].sort(
         (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()
@@ -84,17 +79,8 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
       const averagePurchase = actualReceipts.length > 0 ? totalSpent / actualReceipts.length : 0;
       const numServicesAcquired = actualReceipts.reduce((sum, r) => sum + (r.services?.length || 0), 0);
 
-      // Match warranties for this client
-      const matchedWarranties = supplierWarranties.filter((w) => {
-        const wPhone = (w.clientPhone || "").replace(/\D/g, "");
-        const wName = (w.clientName || "").trim().toLowerCase();
-        const matchesPhone = cleanPhone && wPhone && cleanPhone === wPhone;
-        const matchesName = cleanName && wName && cleanName === wName;
-        const matchesReceipt = w.receiptId ? actualReceipts.some((r) => r.id === w.receiptId) : false;
-        const matchesConsecutive = w.receiptConsecutive ? actualReceipts.some((r) => r.consecutive === w.receiptConsecutive) : false;
-
-        return matchesPhone || matchesName || matchesReceipt || matchesConsecutive;
-      });
+      // Match warranties for this client strictly
+      const matchedWarranties = supplierWarranties.filter((w) => isWarrantyForClient(c, w, actualReceipts));
 
       // Check active warranties (either in supplierWarranties active or receipts marked as garantia_en_proceso)
       const activeWarranties = matchedWarranties.filter(

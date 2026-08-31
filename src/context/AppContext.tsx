@@ -25,7 +25,8 @@ import {
   Client,
   TrmState,
   getNormalizedStatus,
-  SupplierWarrantyRecord
+  SupplierWarrantyRecord,
+  isReceiptForClient
 } from "../types";
 import { DEFAULT_BUSINESS_CONFIG, DEFAULT_SOCIAL_NETWORKS, DEFAULT_SERVICES } from "../defaultData";
 
@@ -397,11 +398,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
 
         if (receipts.length > 0) {
-          const matchingReceipts = receipts.filter(
-            (r) =>
-              r.clientName.trim().toLowerCase() === client.name.trim().toLowerCase() &&
-              r.clientPhone.trim() === client.phone.trim()
-          );
+          const matchingReceipts = receipts.filter((r) => isReceiptForClient(client, r));
 
           if (matchingReceipts.length > 0) {
             const actualCount = matchingReceipts.length;
@@ -414,6 +411,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             if (client.purchaseCount !== actualCount) updatePayload.purchaseCount = actualCount;
             if (client.totalSpent !== actualSpent) updatePayload.totalSpent = actualSpent;
             if (client.lastPurchaseDate !== actualLastDate) updatePayload.lastPurchaseDate = actualLastDate;
+
+            const actualReceiptIds = matchingReceipts.map((r) => r.id).filter(Boolean);
+            const currentIds = client.receiptIds || [];
+            const idsChanged =
+              currentIds.length !== actualReceiptIds.length ||
+              !actualReceiptIds.every((id) => currentIds.includes(id));
+            if (idsChanged) {
+              updatePayload.receiptIds = actualReceiptIds;
+            }
           }
         }
 
@@ -649,7 +655,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         
         // Find new lastPurchaseDate by looking up the remaining receipts of this client
         let lastPurchaseDate = clientData.lastPurchaseDate;
-        const remainingClientReceipts = receipts.filter((r) => r.id !== id && r.clientName.trim().toLowerCase() === receiptData.clientName.trim().toLowerCase());
+        const remainingClientReceipts = receipts.filter((r) => r.id !== id && isReceiptForClient(clientData, r));
         if (remainingClientReceipts.length > 0) {
           remainingClientReceipts.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
           lastPurchaseDate = remainingClientReceipts[0].date;

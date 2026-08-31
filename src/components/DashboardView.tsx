@@ -383,14 +383,17 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onViewChange, onSe
       .sort((a, b) => b.total - a.total)
       .slice(0, 5);
 
-    // Top clients in period
+    // Top clients in period (keyed by normalized phone if available, or clean name)
     const clientAggMap: Record<
       string,
       { name: string; phone: string; spent: number; count: number; lastDate: string; tag?: string; id?: string }
     > = {};
 
     inPeriodActive.forEach((r) => {
-      const key = (r.clientName || "Cliente").trim().toLowerCase();
+      const cleanPhone = (r.clientPhone || "").replace(/\D/g, "");
+      const cleanName = (r.clientName || "Cliente").trim().toLowerCase();
+      const key = cleanPhone.length >= 7 ? `phone_${cleanPhone.slice(-10)}` : `name_${cleanName}`;
+
       if (!clientAggMap[key]) {
         clientAggMap[key] = {
           name: r.clientName || "Cliente",
@@ -410,9 +413,12 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onViewChange, onSe
       }
     });
 
-    // Tag from registered clients list if available
+    // Tag and ID from registered clients list if available
     clients.forEach((c) => {
-      const key = (c.name || "").trim().toLowerCase();
+      const cPhone = (c.phone || "").replace(/\D/g, "");
+      const cName = (c.name || "").trim().toLowerCase();
+      const key = cPhone.length >= 7 ? `phone_${cPhone.slice(-10)}` : `name_${cName}`;
+
       if (clientAggMap[key]) {
         clientAggMap[key].tag = c.tag;
         clientAggMap[key].id = c.id;

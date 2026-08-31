@@ -19,7 +19,7 @@ import {
   CheckCircle2,
   Clock
 } from "lucide-react";
-import { Client, Receipt, ReceiptItem, getClientCode, getNormalizedStatus } from "../types";
+import { Client, Receipt, ReceiptItem, getClientCode, getNormalizedStatus, isReceiptForClient, isWarrantyForClient } from "../types";
 import { useApp } from "../context/AppContext";
 
 interface RepurchaseModalProps {
@@ -36,14 +36,8 @@ export const RepurchaseModal: React.FC<RepurchaseModalProps> = ({ initialClient,
   const enrichedClients = useMemo(() => {
     return clients.map((c, index) => {
       const code = getClientCode(c, index);
-      const cleanPhone = (c.phone || "").replace(/\D/g, "");
-      const cleanName = (c.name || "").trim().toLowerCase();
 
-      const clientReceipts = receipts.filter((r) => {
-        const rPhone = (r.clientPhone || "").replace(/\D/g, "");
-        const rName = (r.clientName || "").trim().toLowerCase();
-        return (cleanPhone && rPhone && cleanPhone === rPhone) || (cleanName && rName && cleanName === rName);
-      });
+      const clientReceipts = receipts.filter((r) => isReceiptForClient(c, r));
 
       const sortedReceipts = [...clientReceipts].sort(
         (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()
@@ -99,13 +93,10 @@ export const RepurchaseModal: React.FC<RepurchaseModalProps> = ({ initialClient,
       // Check active warranty for this client
       const hasActiveWarranty =
         supplierWarranties.some((w) => {
-          const wPhone = (w.clientPhone || "").replace(/\D/g, "");
-          const wName = (w.clientName || "").trim().toLowerCase();
-          const matches =
-            (cleanPhone && wPhone && cleanPhone === wPhone) ||
-            (cleanName && wName && cleanName === wName) ||
-            (w.receiptId && clientReceipts.some((r) => r.id === w.receiptId));
-          return matches && (w.status === "en_espera" || w.status === "reclamado_nuevamente");
+          return (
+            isWarrantyForClient(c, w, clientReceipts) &&
+            (w.status === "en_espera" || w.status === "reclamado_nuevamente")
+          );
         }) ||
         clientReceipts.some((r) => getNormalizedStatus(r.status) === "garantia_en_proceso");
 

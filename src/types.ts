@@ -169,6 +169,150 @@ export function getItemOrderIdDisplay(item?: Partial<ReceiptItem> | null): strin
   return getItemOrderIds(item).join(", ");
 }
 
+export function getPhoneDigits(phone?: string | null): string {
+  if (!phone) return "";
+  return phone.replace(/\D/g, "");
+}
+
+export function matchPhones(phoneA?: string | null, phoneB?: string | null): boolean {
+  if (!phoneA || !phoneB) return false;
+  const digitsA = getPhoneDigits(phoneA);
+  const digitsB = getPhoneDigits(phoneB);
+
+  if (digitsA.length < 7 || digitsB.length < 7) return false;
+  if (digitsA === digitsB) return true;
+
+  // Compare standard 10-digit national number suffix
+  const last10A = digitsA.length >= 10 ? digitsA.slice(-10) : digitsA;
+  const last10B = digitsB.length >= 10 ? digitsB.slice(-10) : digitsB;
+  if (last10A.length === 10 && last10B.length === 10 && last10A === last10B) return true;
+
+  // In case one has country code (e.g. 57300... vs 300...)
+  if (digitsA.length >= 10 && digitsB.length >= 10) {
+    if (digitsA.endsWith(digitsB) || digitsB.endsWith(digitsA)) return true;
+  }
+
+  return false;
+}
+
+/**
+ * Checks if a receipt strictly belongs to a given client:
+ * 1. If BOTH have valid phone numbers (>= 7 digits):
+ *    - They match IF AND ONLY IF their phone numbers match.
+ *    - If their phone numbers differ, THEY DO NOT MATCH UNDER ANY CIRCUMSTANCES.
+ *      (Prevents mixing clients 0019, 0046, 0061, etc. even if they have same name or corrupted receiptIds).
+ * 2. If ONE has phone and the other has a different/missing phone:
+ *    - If both have partial non-empty phones that conflict: DO NOT MATCH.
+ *    - If one is completely missing a phone: match ONLY if clean names match exactly and are non-generic.
+ * 3. If NEITHER has phone:
+ *    - Match strictly by exact clean non-generic name.
+ */
+export function isReceiptForClient(
+  client: Partial<Client> | { name?: string; phone?: string; receiptIds?: string[]; id?: string; clientCode?: string } | null | undefined,
+  receipt: Partial<Receipt> | null | undefined
+): boolean {
+  if (!client || !receipt) return false;
+
+  const clientPhone = (client.phone || "").trim();
+  const receiptPhone = (receipt.clientPhone || "").trim();
+  const clientPhoneDigits = getPhoneDigits(clientPhone);
+  const receiptPhoneDigits = getPhoneDigits(receiptPhone);
+
+  const clientHasValidPhone = clientPhoneDigits.length >= 7;
+  const receiptHasValidPhone = receiptPhoneDigits.length >= 7;
+
+  // 1. Strict Phone Match Rule (Highest Priority Authority):
+  // When both parties have telephone numbers, the phone number is the definitive identity.
+  if (clientHasValidPhone && receiptHasValidPhone) {
+    return matchPhones(clientPhone, receiptPhone);
+  }
+
+  // If both have phones with digits but < 7 digits:
+  if (clientPhoneDigits.length > 0 && receiptPhoneDigits.length > 0) {
+    if (clientPhoneDigits !== receiptPhoneDigits) {
+      return false; // Conflicting phone numbers
+    }
+  }
+
+  // 2. One has phone, the other is completely empty:
+  const clientNameClean = (client.name || "").trim().toLowerCase();
+  const receiptNameClean = (receipt.clientName || "").trim().toLowerCase();
+
+  if (clientHasValidPhone !== receiptHasValidPhone) {
+    // If one has a valid 10-digit phone and the other has a different phone number:
+    if (clientPhoneDigits.length > 0 && receiptPhoneDigits.length > 0) {
+      return false;
+    }
+
+    // If names match cleanly and are not a generic placeholder
+    if (clientNameClean && receiptNameClean && clientNameClean === receiptNameClean) {
+      if (clientNameClean !== "cliente" && clientNameClean.length >= 3) {
+        // If client specifically lists this receipt ID, allow match
+        if (receipt.id && client.receiptIds && client.receiptIds.includes(receipt.id)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  // 3. Neither has a phone number:
+  if (clientNameClean && receiptNameClean && clientNameClean === receiptNameClean) {
+    if (clientNameClean !== "cliente" && clientNameClean.length >= 2) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Checks if a warranty record belongs to a given client
+ */
+export function isWarrantyForClient(
+  client: Partial<Client> | { name?: string; phone?: string; receiptIds?: string[]; id?: string; clientCode?: string } | null | undefined,
+  warranty: Partial<SupplierWarrantyRecord> | null | undefined,
+  clientReceipts: Array<Partial<Receipt>> = []
+): boolean {
+  if (!client || !warranty) return false;
+
+  // 1. Receipt ID or Consecutivo direct match from verified clientReceipts list
+  if (warranty.receiptId && clientReceipts.some((r) => r.id === warranty.receiptId)) {
+    return true;
+  }
+  if (warranty.receiptConsecutive && clientReceipts.some((r) => r.consecutive === warranty.receiptConsecutive)) {
+    return true;
+  }
+
+  const clientPhone = (client.phone || "").trim();
+  const warrantyPhone = (warranty.clientPhone || "").trim();
+  const clientPhoneDigits = getPhoneDigits(clientPhone);
+  const warrantyPhoneDigits = getPhoneDigits(warrantyPhone);
+
+  const clientHasValidPhone = clientPhoneDigits.length >= 7;
+  const warrantyHasValidPhone = warrantyPhoneDigits.length >= 7;
+
+  if (clientHasValidPhone && warrantyHasValidPhone) {
+    return matchPhones(clientPhone, warrantyPhone);
+  }
+
+  if (clientPhoneDigits.length > 0 && warrantyPhoneDigits.length > 0) {
+    if (clientPhoneDigits !== warrantyPhoneDigits) return false;
+  }
+
+  const clientNameClean = (client.name || "").trim().toLowerCase();
+  const warrantyNameClean = (warranty.clientName || "").trim().toLowerCase();
+
+  if (clientNameClean && warrantyNameClean && clientNameClean === warrantyNameClean) {
+    if (clientNameClean !== "cliente" && clientNameClean.length >= 3) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+
 /**
   * Extract base costs (per 1,000 units) and quick preset quantities for any Service,
   * seamlessly supporting both new smart cost center model and legacy quantities structure.

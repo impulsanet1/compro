@@ -24,14 +24,11 @@ import {
   Search,
   Copy,
   Check,
-  MessageCircle,
   RotateCcw,
   Trash2,
   Edit2,
   FileText,
   X,
-  Moon,
-  Sun,
   Zap,
   CheckSquare,
   Square
@@ -102,8 +99,7 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
     deleteSupplierWarranty,
     resolveSupplierWarranty,
     updateReceipt,
-    isDarkMode,
-    toggleDarkMode
+    isDarkMode
   } = useApp();
 
   // Navigation & View state
@@ -141,9 +137,13 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
     }
   };
 
-  // 1. Calculate stats for tracking records (All 48h standard)
+  // 1. Calculate stats for active tracking records (excluding resolved records)
+  const activeSupplierWarranties = useMemo(() => {
+    return supplierWarranties.filter((w) => w.status !== "resuelto");
+  }, [supplierWarranties]);
+
   const warrantyRecordsWithStatus = useMemo(() => {
-    return supplierWarranties.map((record) => {
+    return activeSupplierWarranties.map((record) => {
       const timeInfo = getSupplierWarrantyTimeStatus({
         ...record,
         expectedResponseHours: 48 // Fixed to 48 hours
@@ -154,7 +154,7 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
         timeInfo
       };
     });
-  }, [supplierWarranties]);
+  }, [activeSupplierWarranties]);
 
   const countOverdue = useMemo(() => {
     return warrantyRecordsWithStatus.filter((r) => r.timeInfo.isOverdue).length;
@@ -590,210 +590,96 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
       )}
 
       {/* Main Header */}
-      <div className={`flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-6 rounded-2xl border shadow-sm transition ${
+      <div className={`flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-5 rounded-2xl border shadow-sm transition ${
         isDarkMode ? "bg-slate-800/90 border-slate-700" : "bg-white border-gray-200"
       }`}>
-        <div>
-          <div className="flex items-center gap-2.5">
-            <div className={`w-10 h-10 rounded-xl border flex items-center justify-center ${
-              isDarkMode ? "bg-indigo-950/60 border-indigo-800 text-indigo-400" : "bg-indigo-50 border-indigo-100 text-indigo-600"
-            }`}>
-              <ShieldAlert className="w-5 h-5" />
-            </div>
-            <div>
-              <h1 className={`text-xl font-bold tracking-tight ${isDarkMode ? "text-white" : "text-gray-900"}`}>
-                Control de Garantías con Proveedor
-              </h1>
-              <p className={`text-xs mt-0.5 ${isDarkMode ? "text-slate-400" : "text-gray-500"}`}>
-                Busca la factura, tacha los IDs a reclamar y controla el tiempo estándar de <strong className={isDarkMode ? "text-slate-200" : "text-gray-700"}>48 horas</strong>.
-              </p>
-            </div>
+        <div className="flex items-center gap-3">
+          <div className={`w-10 h-10 rounded-xl border flex items-center justify-center shrink-0 ${
+            isDarkMode ? "bg-indigo-950/60 border-indigo-800 text-indigo-400" : "bg-indigo-50 border-indigo-100 text-indigo-600"
+          }`}>
+            <ShieldAlert className="w-5 h-5" />
+          </div>
+          <div>
+            <h1 className={`text-lg font-bold tracking-tight ${isDarkMode ? "text-white" : "text-gray-900"}`}>
+              Garantías con Proveedor
+            </h1>
+            <p className={`text-xs mt-0.5 ${isDarkMode ? "text-slate-400" : "text-gray-500"}`}>
+              Seguimiento de reposiciones con límite estándar de 48 horas y consulta de IDs vigentes.
+            </p>
           </div>
         </div>
 
-        {/* Action Buttons & Dark Mode Toggle */}
-        <div className="flex items-center gap-2 flex-wrap">
-          {/* Night Mode Toggle */}
-          <button
-            onClick={toggleDarkMode}
-            className={`flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-bold transition border cursor-pointer ${
-              isDarkMode
-                ? "bg-slate-700 hover:bg-slate-600 border-slate-600 text-amber-300"
-                : "bg-gray-100 hover:bg-gray-200 border-gray-200 text-gray-700"
-            }`}
-            title={isDarkMode ? "Cambiar a modo día" : "Cambiar a modo noche"}
-          >
-            {isDarkMode ? (
-              <>
-                <Sun className="w-4 h-4 text-amber-300" />
-                <span>Modo Día</span>
-              </>
-            ) : (
-              <>
-                <Moon className="w-4 h-4 text-slate-700" />
-                <span>Modo Noche</span>
-              </>
-            )}
-          </button>
+        <button
+          id="btn-new-warranty-claim"
+          onClick={() => handleOpenNewModal()}
+          className="flex items-center justify-center gap-2 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 active:scale-[0.98] text-white rounded-xl font-bold text-xs transition shadow-sm cursor-pointer shrink-0"
+        >
+          <PlusCircle className="w-4 h-4" />
+          <span>+ Registrar Envío (Buscar Factura)</span>
+        </button>
+      </div>
 
+      {/* Overdue Alert Banner (Only when there are overdue items) */}
+      {countOverdue > 0 && (
+        <div className={`p-3.5 px-4 rounded-xl border flex items-center justify-between gap-3 text-xs transition ${
+          isDarkMode
+            ? "bg-red-950/60 border-red-800/80 text-red-200"
+            : "bg-red-50 border-red-200 text-red-800"
+        }`}>
+          <div className="flex items-center gap-2 font-semibold">
+            <AlertTriangle className="w-4 h-4 text-red-500 shrink-0" />
+            <span>
+              Tienes <strong className="font-black text-red-500">{countOverdue}</strong> pedido(s) que superaron las 48 horas de espera con el proveedor.
+            </span>
+          </div>
           <button
-            id="btn-new-warranty-claim"
-            onClick={() => handleOpenNewModal()}
-            className="flex items-center gap-2 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 active:scale-[0.98] text-white rounded-xl font-bold text-xs transition shadow-sm cursor-pointer"
+            onClick={() => {
+              setActiveSubTab("tracking");
+              setStatusFilter("overdue");
+            }}
+            className="px-2.5 py-1 bg-red-600 hover:bg-red-700 text-white font-bold rounded-lg text-[11px] shrink-0 cursor-pointer transition"
           >
-            <PlusCircle className="w-4 h-4" />
-            <span>+ Registrar Envío (Buscar Factura)</span>
+            Ver retrasados
           </button>
         </div>
-      </div>
+      )}
 
-      {/* KPI Stats Grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 md:gap-4">
-        {/* Overdue Alert (>48h) */}
-        <button
-          onClick={() => {
-            setActiveSubTab("tracking");
-            setStatusFilter(statusFilter === "overdue" ? "all" : "overdue");
-          }}
-          className={`p-4 rounded-2xl border text-left transition relative overflow-hidden cursor-pointer ${
-            statusFilter === "overdue"
-              ? isDarkMode
-                ? "bg-red-950/80 border-red-500 ring-2 ring-red-400"
-                : "bg-red-50/80 border-red-300 ring-2 ring-red-400"
-              : countOverdue > 0
-              ? isDarkMode
-                ? "bg-red-950/40 border-red-800 hover:border-red-600"
-                : "bg-red-50/40 border-red-200 hover:border-red-300"
-              : isDarkMode
-              ? "bg-slate-800/90 border-slate-700 hover:border-slate-600"
-              : "bg-white border-gray-200 hover:border-gray-300"
-          }`}
-        >
-          <div className="flex items-center justify-between">
-            <span className={`text-xs font-bold tracking-wide uppercase ${isDarkMode ? "text-red-400" : "text-red-700"}`}>
-              🚨 Excedieron 48h
-            </span>
-            <span
-              className={`w-7 h-7 rounded-lg flex items-center justify-center text-xs font-bold ${
-                countOverdue > 0 ? "bg-red-600 text-white animate-pulse" : isDarkMode ? "bg-slate-700 text-slate-400" : "bg-gray-100 text-gray-400"
-              }`}
-            >
-              <AlertTriangle className="w-3.5 h-3.5" />
-            </span>
-          </div>
-          <div className="mt-2 flex items-baseline gap-1.5">
-            <span className={`text-2xl font-black ${countOverdue > 0 ? (isDarkMode ? "text-red-400" : "text-red-700") : isDarkMode ? "text-white" : "text-gray-900"}`}>
-              {countOverdue}
-            </span>
-            <span className={`text-[11px] ${isDarkMode ? "text-slate-400" : "text-gray-500"}`}>pedidos retrasados</span>
-          </div>
-          <div className={`text-[10px] mt-1 font-medium ${isDarkMode ? "text-red-400" : "text-red-600/90"}`}>
-            {countOverdue > 0 ? "¡Superaron el límite de 48 horas!" : "Sin retrasos detectados"}
-          </div>
-        </button>
-
-        {/* Pending on track (<48h) */}
-        <button
-          onClick={() => {
-            setActiveSubTab("tracking");
-            setStatusFilter(statusFilter === "pending" ? "all" : "pending");
-          }}
-          className={`p-4 rounded-2xl border text-left transition cursor-pointer ${
-            statusFilter === "pending"
-              ? isDarkMode
-                ? "bg-blue-950/80 border-blue-500 ring-2 ring-blue-400"
-                : "bg-blue-50/80 border-blue-300 ring-2 ring-blue-400"
-              : isDarkMode
-              ? "bg-slate-800/90 border-slate-700 hover:border-slate-600"
-              : "bg-white border-gray-200 hover:border-gray-300"
-          }`}
-        >
-          <div className="flex items-center justify-between">
-            <span className={`text-xs font-bold tracking-wide uppercase ${isDarkMode ? "text-blue-400" : "text-blue-700"}`}>
-              ⏳ En Espera (&lt;48h)
-            </span>
-            <span className={`w-7 h-7 rounded-lg flex items-center justify-center text-xs font-bold ${
-              isDarkMode ? "bg-blue-950 text-blue-300 border border-blue-800" : "bg-blue-100 text-blue-700"
-            }`}>
-              <Clock className="w-3.5 h-3.5" />
-            </span>
-          </div>
-          <div className="mt-2 flex items-baseline gap-1.5">
-            <span className={`text-2xl font-black ${isDarkMode ? "text-blue-200" : "text-blue-900"}`}>{countPending}</span>
-            <span className={`text-[11px] ${isDarkMode ? "text-slate-400" : "text-gray-500"}`}>en tiempo</span>
-          </div>
-          <div className={`text-[10px] mt-1 font-medium ${isDarkMode ? "text-blue-400" : "text-blue-600"}`}>Esperando respuesta del proveedor</div>
-        </button>
-
-        {/* Total Active Client IDs */}
-        <button
-          onClick={() => setActiveSubTab("active_ids")}
-          className={`p-4 rounded-2xl border text-left transition cursor-pointer ${
-            activeSubTab === "active_ids"
-              ? isDarkMode
-                ? "bg-indigo-950/80 border-indigo-500 ring-2 ring-indigo-400"
-                : "bg-indigo-50/80 border-indigo-300 ring-2 ring-indigo-400"
-              : isDarkMode
-              ? "bg-slate-800/90 border-slate-700 hover:border-slate-600"
-              : "bg-white border-gray-200 hover:border-gray-300"
-          }`}
-        >
-          <div className="flex items-center justify-between">
-            <span className={`text-xs font-bold tracking-wide uppercase ${isDarkMode ? "text-indigo-400" : "text-indigo-700"}`}>
-              🛡️ IDs en Cobertura
-            </span>
-            <span className={`w-7 h-7 rounded-lg flex items-center justify-center text-xs font-bold ${
-              isDarkMode ? "bg-indigo-950 text-indigo-300 border border-indigo-800" : "bg-indigo-100 text-indigo-700"
-            }`}>
-              <ShieldCheck className="w-3.5 h-3.5" />
-            </span>
-          </div>
-          <div className="mt-2 flex items-baseline gap-1.5">
-            <span className={`text-2xl font-black ${isDarkMode ? "text-indigo-200" : "text-indigo-900"}`}>
-              {activeUnexpiredClientWarrantyItems.length}
-            </span>
-            <span className={`text-[11px] ${isDarkMode ? "text-slate-400" : "text-gray-500"}`}>pedidos vigentes</span>
-          </div>
-          <div className={`text-[10px] mt-1 font-medium ${isDarkMode ? "text-indigo-400" : "text-indigo-600"}`}>De comprobantes emitidos (&lt;30 días)</div>
-        </button>
-      </div>
-
-      {/* Subtabs & Filtering Bar */}
-      <div className={`p-4 rounded-2xl border shadow-sm space-y-3 transition ${
+      {/* Unified Toolbar: Tabs, Filters & Search */}
+      <div className={`p-3.5 rounded-2xl border shadow-sm space-y-3 transition ${
         isDarkMode ? "bg-slate-800/90 border-slate-700" : "bg-white border-gray-200"
       }`}>
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
-          {/* Subtabs selector */}
-          <div className={`flex items-center gap-1.5 p-1 rounded-xl flex-wrap ${
-            isDarkMode ? "bg-slate-900/90" : "bg-gray-100/80"
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+          {/* Tabs */}
+          <div className={`flex items-center gap-1 p-1 rounded-xl flex-wrap ${
+            isDarkMode ? "bg-slate-900/90" : "bg-gray-100"
           }`}>
             <button
               onClick={() => setActiveSubTab("tracking")}
-              className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer ${
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer ${
                 activeSubTab === "tracking"
                   ? isDarkMode ? "bg-slate-700 text-white shadow-xs" : "bg-white text-gray-900 shadow-xs"
                   : isDarkMode ? "text-slate-400 hover:text-slate-200" : "text-gray-500 hover:text-gray-800"
               }`}
             >
-              <Clock className="w-3.5 h-3.5 text-indigo-500" />
-              <span>Cronómetros (Límite 48h) ({supplierWarranties.length})</span>
+              <Clock className="w-3.5 h-3.5 text-indigo-400" />
+              <span>Reclamos en Espera ({activeSupplierWarranties.length})</span>
             </button>
 
             <button
               onClick={() => setActiveSubTab("active_ids")}
-              className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer ${
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer ${
                 activeSubTab === "active_ids"
                   ? isDarkMode ? "bg-slate-700 text-white shadow-xs" : "bg-white text-gray-900 shadow-xs"
                   : isDarkMode ? "text-slate-400 hover:text-slate-200" : "text-gray-500 hover:text-gray-800"
               }`}
             >
               <ShieldCheck className="w-3.5 h-3.5 text-emerald-500" />
-              <span>Todos los IDs en Cobertura ({activeUnexpiredClientWarrantyItems.length})</span>
+              <span>IDs en Cobertura ({activeUnexpiredClientWarrantyItems.length})</span>
             </button>
           </div>
 
-          {/* Quick Copy buttons */}
-          <div className="flex items-center gap-2">
+          {/* Quick Copy */}
+          <div className="flex items-center gap-2 shrink-0">
             {activeSubTab === "tracking" ? (
               <button
                 onClick={copyAllPendingIds}
@@ -802,7 +688,7 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
                     ? "bg-slate-700 hover:bg-slate-600 border-slate-600 text-slate-200"
                     : "bg-gray-100 hover:bg-gray-200 border-gray-200 text-gray-700"
                 }`}
-                title="Copiar todos los IDs que están en espera o retrasados"
+                title="Copiar todos los IDs pendientes"
               >
                 <Copy className="w-3.5 h-3.5 text-indigo-400" />
                 <span>Copiar IDs Pendientes</span>
@@ -815,17 +701,17 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
                     ? "bg-indigo-950/60 hover:bg-indigo-900/80 border-indigo-800 text-indigo-300"
                     : "bg-indigo-50 hover:bg-indigo-100 border-indigo-200 text-indigo-700"
                 }`}
-                title="Copiar todos los IDs de pedidos con garantía vigente"
+                title="Copiar todos los IDs activos"
               >
                 <Copy className="w-3.5 h-3.5 text-indigo-400" />
-                <span>Copiar Todos los IDs Activos</span>
+                <span>Copiar IDs Activos</span>
               </button>
             )}
           </div>
         </div>
 
-        {/* Search and Status Filters */}
-        <div className={`flex flex-col sm:flex-row items-center gap-2.5 pt-2 border-t ${
+        {/* Search & Status Filters */}
+        <div className={`flex flex-col sm:flex-row items-center gap-2.5 pt-2.5 border-t ${
           isDarkMode ? "border-slate-700" : "border-gray-100"
         }`}>
           <div className="relative flex-1 w-full">
@@ -835,9 +721,9 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
               placeholder="Buscar por # de factura, ID de proveedor, cliente o servicio..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              className={`w-full pl-9.5 pr-4 py-2 border rounded-xl text-xs outline-none transition focus:ring-2 focus:ring-indigo-500 ${
+              className={`w-full pl-9.5 pr-8 py-2 border rounded-xl text-xs outline-none transition focus:ring-2 focus:ring-indigo-500 ${
                 isDarkMode
-                  ? "bg-slate-900 border-slate-700 text-white placeholder-slate-500 focus:bg-slate-900"
+                  ? "bg-slate-900 border-slate-700 text-white placeholder-slate-500"
                   : "bg-gray-50/50 border-gray-200 text-gray-900 placeholder-gray-400 focus:bg-white"
               }`}
             />
@@ -1531,56 +1417,26 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
                 </div>
               )}
 
-              {/* Si no seleccionó factura, opción manual */}
+              {/* Si no seleccionó factura, opción manual sencilla de IDs */}
               {!selectedInvoice && (
-                <div className="space-y-3 pt-1">
-                  <div>
-                    <label className={`block text-xs font-bold mb-1 ${isDarkMode ? "text-slate-200" : "text-gray-700"}`}>
-                      O escribe el ID del Proveedor Directamente:
-                    </label>
-                    <input
-                      type="text"
-                      placeholder="Ej: 1049281, 1049282"
-                      value={manualOrderIdInput}
-                      onChange={(e) => setManualOrderIdInput(e.target.value)}
-                      className={`w-full px-3 py-2 border rounded-xl text-xs font-mono font-bold outline-none focus:ring-2 focus:ring-indigo-500 ${
-                        isDarkMode
-                          ? "bg-slate-900 border-slate-700 text-white"
-                          : "bg-gray-50 border-gray-200 text-gray-900 focus:bg-white"
-                      }`}
-                    />
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <label className={`block text-[11px] font-bold mb-1 ${isDarkMode ? "text-slate-400" : "text-gray-600"}`}>Cliente:</label>
-                      <input
-                        type="text"
-                        placeholder="Nombre cliente"
-                        value={formClientNameManual}
-                        onChange={(e) => setFormClientNameManual(e.target.value)}
-                        className={`w-full px-3 py-1.5 border rounded-xl text-xs outline-none ${
-                          isDarkMode
-                            ? "bg-slate-900 border-slate-700 text-white"
-                            : "bg-gray-50 border-gray-200 text-gray-900"
-                        }`}
-                      />
-                    </div>
-                    <div>
-                      <label className={`block text-[11px] font-bold mb-1 ${isDarkMode ? "text-slate-400" : "text-gray-600"}`}>Servicio:</label>
-                      <input
-                        type="text"
-                        placeholder="Ej: Instagram Seguidores"
-                        value={formServiceNameManual}
-                        onChange={(e) => setFormServiceNameManual(e.target.value)}
-                        className={`w-full px-3 py-1.5 border rounded-xl text-xs outline-none ${
-                          isDarkMode
-                            ? "bg-slate-900 border-slate-700 text-white"
-                            : "bg-gray-50 border-gray-200 text-gray-900"
-                        }`}
-                      />
-                    </div>
-                  </div>
+                <div className="space-y-1.5 pt-1">
+                  <label className={`block text-xs font-bold ${isDarkMode ? "text-slate-200" : "text-gray-700"}`}>
+                    O escribe el/los ID(s) del Proveedor Directamente:
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Ej: 1049281, 1049282"
+                    value={manualOrderIdInput}
+                    onChange={(e) => setManualOrderIdInput(e.target.value)}
+                    className={`w-full px-3.5 py-2.5 border rounded-xl text-xs font-mono font-bold outline-none focus:ring-2 focus:ring-indigo-500 ${
+                      isDarkMode
+                        ? "bg-slate-900 border-slate-700 text-white"
+                        : "bg-gray-50 border-gray-200 text-gray-900 focus:bg-white"
+                    }`}
+                  />
+                  <p className={`text-[10px] ${isDarkMode ? "text-slate-500" : "text-gray-400"}`}>
+                    Puedes separar varios IDs por comas o espacios.
+                  </p>
                 </div>
               )}
 
@@ -1644,100 +1500,57 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
                 )}
               </div>
 
-              {/* Personalización de Fecha y Hora de Envío al Proveedor */}
-              <div className={`border rounded-xl p-3.5 space-y-3 transition ${
-                isDarkMode ? "bg-slate-900/90 border-slate-700" : "bg-slate-50 border-slate-200"
+              {/* Fecha y Hora de Envío al Proveedor */}
+              <div className={`border rounded-xl p-3 space-y-2.5 transition ${
+                isDarkMode ? "bg-slate-900/70 border-slate-700" : "bg-slate-50 border-slate-200"
               }`}>
                 <div className="flex items-center justify-between">
                   <div className={`flex items-center gap-1.5 text-xs font-bold ${
                     isDarkMode ? "text-slate-200" : "text-slate-800"
                   }`}>
-                    <Clock className="w-4 h-4 text-indigo-400" />
+                    <Clock className="w-3.5 h-3.5 text-indigo-400" />
                     <span>Fecha y Hora de Envío al Proveedor</span>
                   </div>
                   <button
                     type="button"
                     onClick={() => setFormSentDate(getLocalDatetimeInputValue())}
-                    className="text-[11px] font-bold text-indigo-400 hover:underline flex items-center gap-1 cursor-pointer"
+                    className="text-[10px] font-bold text-indigo-400 hover:underline flex items-center gap-1 cursor-pointer"
                     title="Fijar con la fecha y hora de este momento"
                   >
-                    <RotateCcw className="w-3 h-3" />
+                    <RotateCcw className="w-2.5 h-2.5" />
                     <span>Poner hora actual</span>
                   </button>
                 </div>
 
-                {/* Campo Fecha y Hora de Envío */}
-                <div>
-                  <label className={`block text-[11px] font-semibold mb-1 ${
-                    isDarkMode ? "text-slate-400" : "text-slate-600"
-                  }`}>
-                    Indica cuándo le diste el pedido al proveedor:
-                  </label>
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
                   <input
                     type="datetime-local"
                     value={formSentDate}
                     onChange={(e) => setFormSentDate(e.target.value)}
-                    className={`w-full px-3 py-2 border rounded-xl text-xs font-bold outline-none focus:ring-2 focus:ring-indigo-500 shadow-2xs ${
+                    className={`flex-1 px-3 py-1.5 border rounded-xl text-xs font-bold outline-none focus:ring-2 focus:ring-indigo-500 shadow-2xs ${
                       isDarkMode
                         ? "bg-slate-800 border-slate-700 text-white"
                         : "bg-white border-slate-300 text-slate-800"
                     }`}
                   />
-                </div>
-
-                {/* Indicador de confirmación visual legible con AM / PM */}
-                {formSentDate && (
-                  <div className={`flex items-center justify-between text-[11px] px-3 py-2 rounded-lg border ${
-                    isDarkMode
-                      ? "bg-slate-800 border-slate-700 text-slate-300"
-                      : "bg-white border-slate-200 text-slate-600"
-                  }`}>
-                    <span>Fecha registrada:</span>
-                    <span className={`font-bold ${isDarkMode ? "text-indigo-300" : "text-indigo-900"}`}>
-                      {parseLocalDatetimeInput(formSentDate).toLocaleDateString("es-ES", {
-                        weekday: "short",
-                        day: "2-digit",
-                        month: "short",
-                        year: "numeric",
-                        hour: "2-digit",
-                        minute: "2-digit",
-                        hour12: true
-                      })}
-                    </span>
-                  </div>
-                )}
-
-                {/* Resumen en vivo */}
-                <div
-                  className={`p-2.5 rounded-lg border flex items-center justify-between text-xs transition ${
-                    modalTimePreview.isOverdue
-                      ? isDarkMode
-                        ? "bg-red-950/80 border-red-800 text-red-300"
-                        : "bg-red-50/90 border-red-200 text-red-800"
-                      : modalTimePreview.hoursRemaining <= 6
-                      ? isDarkMode
-                        ? "bg-amber-950/80 border-amber-800 text-amber-300"
-                        : "bg-amber-50/90 border-amber-200 text-amber-800"
-                      : isDarkMode
-                      ? "bg-indigo-950/80 border-indigo-800 text-indigo-300"
-                      : "bg-indigo-50/90 border-indigo-200 text-indigo-950"
-                  }`}
-                >
-                  <div className="flex items-center gap-1.5 font-bold">
-                    <Clock className="w-3.5 h-3.5" />
+                  <div
+                    className={`px-3 py-1.5 rounded-xl border text-[11px] font-bold flex items-center justify-center gap-1.5 shrink-0 ${
+                      modalTimePreview.isOverdue
+                        ? isDarkMode
+                          ? "bg-red-950/80 border-red-800 text-red-300"
+                          : "bg-red-50 border-red-200 text-red-700"
+                        : isDarkMode
+                        ? "bg-indigo-950/80 border-indigo-800 text-indigo-300"
+                        : "bg-indigo-50 border-indigo-200 text-indigo-800"
+                    }`}
+                  >
+                    <Clock className="w-3 h-3" />
                     <span>
                       {modalTimePreview.isOverdue
-                        ? `⚠️ ¡Tiempo Excedido por ${modalTimePreview.overdueHours} horas!`
-                        : `⏳ Quedan ${modalTimePreview.hoursRemaining} horas de plazo (48h)`}
+                        ? `Excedido (+${modalTimePreview.overdueHours}h)`
+                        : `Plazo: ${modalTimePreview.hoursRemaining}h restantes (48h)`}
                     </span>
                   </div>
-                  <span className="text-[11px] font-semibold opacity-90">
-                    {modalTimePreview.hoursElapsed > 0
-                      ? `Enviado hace ${modalTimePreview.hoursElapsed}h (${
-                          modalTimePreview.daysElapsed > 0 ? `${modalTimePreview.daysElapsed}d ` : ""
-                        })`
-                      : "Recién enviado (0h transcurridas)"}
-                  </span>
                 </div>
               </div>
 

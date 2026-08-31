@@ -84,7 +84,7 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
   const [customOrderId, setCustomOrderId] = useState("");
   const [customOrderId2, setCustomOrderId2] = useState("");
   const [idCountType, setIdCountType] = useState<"uno" | "dos">("uno");
-  const [status, setStatus] = useState<"en_proceso" | "completado" | "garantia_en_proceso" | "cancelado">("en_proceso");
+  const [status, setStatus] = useState<"en_proceso" | "completado" | "garantia_en_proceso" | "cancelado">("completado");
   const [internalNotes, setInternalNotes] = useState("");
 
   // Receipt items array
@@ -386,7 +386,7 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
       setClientName("");
       setClientPhone("");
       setAddedItems([]);
-      setStatus("en_proceso");
+      setStatus("completado");
       setInternalNotes("");
     } catch (err: any) {
       console.error(err);

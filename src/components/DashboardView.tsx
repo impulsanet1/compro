@@ -158,7 +158,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onViewChange, onSe
   const now = new Date();
   const [periodFilter, setPeriodFilter] = useState<
     "today" | "this_week" | "last_week" | "this_month" | "last_month" | "specific_month" | "custom" | "all"
-  >("this_month");
+  >("today");
 
   const [selectedMonth, setSelectedMonth] = useState<number>(now.getMonth());
   const [selectedYear, setSelectedYear] = useState<number>(now.getFullYear());

@@ -19,7 +19,6 @@ import {
   FileText,
   Users,
   Settings,
-  LogOut,
   UserCheck,
   RefreshCw,
   PlusCircle,
@@ -33,11 +32,12 @@ const Navigation: React.FC<{ activeTab: string; setActiveTab: (tab: string) => v
   activeTab,
   setActiveTab
 }) => {
-  const { logout, user, supplierWarranties, isDarkMode, toggleDarkMode } = useApp();
+  const { user, supplierWarranties, isDarkMode, toggleDarkMode } = useApp();
 
   // Count overdue or pending warranties for badge
   const overdueCount = React.useMemo(() => {
     return supplierWarranties.filter((w) => {
+      if (w.status === "resuelto") return false;
       const info = getSupplierWarrantyTimeStatus(w);
       return info.isOverdue;
     }).length;
@@ -59,11 +59,8 @@ const Navigation: React.FC<{ activeTab: string; setActiveTab: (tab: string) => v
       <div className="max-w-7xl mx-auto px-4 sm:px-6">
         <div className="flex justify-between h-16 items-center">
           {/* Logo and Brand */}
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center text-white font-bold text-base tracking-tighter shadow-sm">
-              I
-            </div>
-            <span className={`font-bold text-base tracking-tight hidden sm:block ${
+          <div className="flex items-center">
+            <span className={`font-bold text-base tracking-tight ${
               isDarkMode ? "text-white" : "text-gray-900"
             }`}>
               ImpulsaNet
@@ -137,16 +134,6 @@ const Navigation: React.FC<{ activeTab: string; setActiveTab: (tab: string) => v
               <UserCheck className="w-3.5 h-3.5 text-indigo-400" />
               <span className="truncate max-w-32 font-mono font-medium">{user?.email}</span>
             </div>
-            <button
-              id="btn-logout"
-              onClick={logout}
-              title="Cerrar Sesión"
-              className={`p-2 rounded-lg transition cursor-pointer ${
-                isDarkMode ? "text-slate-400 hover:text-red-400 hover:bg-red-950/40" : "text-gray-400 hover:text-red-600 hover:bg-red-50"
-              }`}
-            >
-              <LogOut className="w-4 h-4" />
-            </button>
           </div>
         </div>
       </div>

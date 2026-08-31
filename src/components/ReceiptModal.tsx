@@ -26,11 +26,11 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
   const receiptRef = useRef<HTMLDivElement>(null);
   
   // Format utility
-  const formatCOP = (val: number) => "$" + Math.round(val).toLocaleString("es-CO");
+  const formatCOP = (val?: number | null) => "$" + Math.round(Number(val) || 0).toLocaleString("es-CO");
 
   // Network Emoji Helper
-  const getNetworkEmoji = (networkName: string) => {
-    const net = networkName.trim().toLowerCase();
+  const getNetworkEmoji = (networkName?: string) => {
+    const net = (networkName || "").trim().toLowerCase();
     if (net.includes("instagram")) return "📸";
     if (net.includes("facebook")) return "👥";
     if (net.includes("tiktok") || net.includes("tik tok")) return "🎵";
@@ -57,7 +57,14 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
     }
 
     try {
-      const purchaseDate = new Date(receipt.date);
+      const purchaseDate = receipt.date ? new Date(receipt.date) : new Date();
+      if (isNaN(purchaseDate.getTime())) {
+        return (
+          <p className="text-xs text-gray-600 mt-0.5 leading-relaxed">
+            Este comprobante incluye una garantía de <strong>{daysStr}</strong>.
+          </p>
+        );
+      }
       const expirationDate = new Date(purchaseDate.getTime() + days * 24 * 60 * 60 * 1000);
       
       const formattedExpiration = expirationDate.toLocaleDateString("es-ES", {
@@ -116,18 +123,20 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
 
   // Recalculate totals in real time while editing
   const totals = useMemo(() => {
-    const items = isEditing ? editedServices : receipt.services || [];
-    const subtotal = items.reduce((acc, item) => acc + (item?.suggestedPrice || 0), 0);
+    const items = isEditing ? editedServices : (receipt.services || []);
+    const subtotal = items.reduce((acc, item) => acc + (Number(item?.suggestedPrice) || 0), 0);
     const totalCharged = items.reduce((acc, item) => acc + (Number(item?.chargedPrice) || 0), 0);
-    const totalProviderCost = items.reduce((acc, item) => acc + (item?.providerCostAtPurchase || 0), 0);
+    const totalProviderCost = items.reduce((acc, item) => acc + (Number(item?.providerCostAtPurchase) || 0), 0);
     const totalProfit = totalCharged - totalProviderCost;
     return { subtotal, totalCharged, totalProviderCost, totalProfit };
   }, [isEditing, editedServices, receipt.services]);
 
   // Format date to local string
-  const formatDate = (isoString: string) => {
+  const formatDate = (isoString?: string) => {
+    if (!isoString) return "";
     try {
       const d = new Date(isoString);
+      if (isNaN(d.getTime())) return isoString;
       return d.toLocaleDateString("es-ES", {
         year: "numeric",
         month: "long",
@@ -387,48 +396,48 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
   };
 
   const getWhatsAppLink = (type: "confirm" | "warranty" | "followup") => {
-    let rawDigits = (receipt.clientPhone || "").replace(/\D/g, "");
+    let rawDigits = (receipt?.clientPhone || "").replace(/\D/g, "");
     if (rawDigits.length === 10 && !rawDigits.startsWith("57")) {
       rawDigits = "57" + rawDigits;
     }
     
-    const clientFirstName = (receipt.clientName || "Cliente").split(" ")[0];
-    const servicesList = (receipt.services || [])
-      .map((s) => `• ${s.socialNetworkName} ${s.serviceName} (${s.quantity.toLocaleString()})`)
+    const clientFirstName = (receipt?.clientName || "Cliente").trim().split(" ")[0] || "Cliente";
+    const servicesList = (receipt?.services || [])
+      .filter(Boolean)
+      .map((s) => `• ${s?.socialNetworkName || 'Servicio'} ${s?.serviceName || ''} (${Number(s?.quantity || 0).toLocaleString()})`)
       .join("\n");
     const formattedTotal = formatCOP(totals.totalCharged);
 
     let text = "";
     if (type === "confirm") {
-      text = `Hola ${clientFirstName}! 👋 Gracias por elegir ImpulsaNet.\n\n*Resumen de tu Pedido #${receipt.consecutive || ''}:*\n${servicesList}\n\n*Total Pagado:* ${formattedTotal}\n*Garantía Activa:* ${receipt.warranty || "30 días"}\n\n¡Cualquier inquietud estamos aquí para atenderte! 🚀`;
+      text = `Hola ${clientFirstName}! 👋 Gracias por elegir ImpulsaNet.\n\n*Resumen de tu Pedido #${receipt?.consecutive || ''}:*\n${servicesList}\n\n*Total Pagado:* ${formattedTotal}\n*Garantía Activa:* ${receipt?.warranty || "30 días"}\n\n¡Cualquier inquietud estamos aquí para atenderte! 🚀`;
     } else if (type === "warranty") {
-      text = `Hola ${clientFirstName}! 👋 Esperamos te encuentres muy bien.\n\nTe escribimos de ImpulsaNet para recordarte que tu garantía de *${receipt.warranty || "30 días"}* para el pedido *#${receipt.consecutive || ''}* está próxima a vencer.\n\nSi deseas renovar este servicio o potenciar tus redes con nuevos paquetes, ¡cuéntanos por aquí y te daremos un precio especial! 🎯`;
+      text = `Hola ${clientFirstName}! 👋 Esperamos te encuentres muy bien.\n\nTe escribimos de ImpulsaNet para recordarte que tu garantía de *${receipt?.warranty || "30 días"}* para el pedido *#${receipt?.consecutive || ''}* está próxima a vencer.\n\nSi deseas renovar este servicio o potenciar tus redes con nuevos paquetes, ¡cuéntanos por aquí y te daremos un precio especial! 🎯`;
     } else if (type === "followup") {
-      text = `Hola ${clientFirstName}! 👋 ¿Cómo van los resultados con tus redes tras tu pedido *#${receipt.consecutive || ''}*?\n\nEn ImpulsaNet estamos a tu disposición para ayudarte a seguir creciendo. ¡Escríbenos si necesitas un nuevo paquete o asesoría! 📲`;
+      text = `Hola ${clientFirstName}! 👋 ¿Cómo van los resultados con tus redes tras tu pedido *#${receipt?.consecutive || ''}*?\n\nEn ImpulsaNet estamos a tu disposición para ayudarte a seguir creciendo. ¡Escríbenos si necesitas un nuevo paquete o asesoría! 📲`;
     }
 
     return `https://wa.me/${rawDigits}?text=${encodeURIComponent(text)}`;
   };
 
   return (
-    <AnimatePresence>
-      <div 
-        id="receipt-modal-overlay" 
-        className="fixed inset-0 bg-black/60 backdrop-blur-xs z-50 flex items-center justify-center p-1 sm:p-4 overflow-hidden cursor-pointer"
-        onClick={(e) => {
-          if (e.target === e.currentTarget) {
-            onClose();
-          }
-        }}
+    <div 
+      id="receipt-modal-overlay" 
+      className="fixed inset-0 bg-black/60 backdrop-blur-xs z-50 flex items-center justify-center p-1 sm:p-4 overflow-hidden cursor-pointer"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) {
+          onClose();
+        }
+      }}
+    >
+      <motion.div
+        initial={{ opacity: 0, scale: 0.95, y: 10 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.95, y: 10 }}
+        transition={{ duration: 0.2, ease: "easeOut" }}
+        onClick={(e) => e.stopPropagation()}
+        className="bg-white rounded-2xl shadow-2xl border border-gray-100 max-w-3xl w-full h-[95dvh] sm:h-auto sm:max-h-[90vh] flex flex-col my-auto cursor-default overflow-hidden relative"
       >
-        <motion.div
-          initial={{ opacity: 0, scale: 0.95, y: 10 }}
-          animate={{ opacity: 1, scale: 1, y: 0 }}
-          exit={{ opacity: 0, scale: 0.95, y: 10 }}
-          transition={{ duration: 0.2, ease: "easeOut" }}
-          onClick={(e) => e.stopPropagation()}
-          className="bg-white rounded-2xl shadow-2xl border border-gray-100 max-w-3xl w-full h-[95dvh] sm:h-auto sm:max-h-[90vh] flex flex-col my-auto cursor-default overflow-hidden relative"
-        >
           {/* Header Controls (Pinned Top No Print - Responsive Mobile First) */}
           <div className="no-print bg-white px-3 sm:px-6 py-2.5 border-b border-gray-100 flex flex-col sm:flex-row sm:items-center justify-between gap-2 z-30 shrink-0 shadow-2xs">
             {/* Top Bar: Status + Consecutive Title + Close Button for Mobile */}
@@ -541,7 +550,7 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                   <select
                     value={editedStatus}
                     onChange={async (e) => {
-                      const newStatus = e.target.value;
+                      const newStatus = e.target.value as "en_proceso" | "completado" | "garantia_en_proceso" | "cancelado";
                       setEditedStatus(newStatus);
                       try {
                         await updateReceipt(receipt.id, { status: newStatus });
@@ -591,10 +600,10 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                 <div className="bg-white p-2.5 rounded-lg border border-gray-200 space-y-1">
                   <span className="text-gray-400 font-semibold uppercase text-[9px] tracking-wider block">IDs de Pedido</span>
                   <div className="flex flex-wrap gap-1">
-                    {receipt.services.flatMap((s) => getItemOrderIds(s)).length === 0 ? (
+                    {(receipt?.services || []).flatMap((s) => getItemOrderIds(s)).length === 0 ? (
                       <span className="text-gray-400 italic">Ninguno</span>
                     ) : (
-                      receipt.services.flatMap((s) => getItemOrderIds(s)).map((id, index) => (
+                      (receipt?.services || []).flatMap((s) => getItemOrderIds(s)).map((id, index) => (
                         <span key={index} className="bg-indigo-50 text-indigo-700 font-mono font-bold text-[10px] px-1.5 py-0.5 rounded border border-indigo-100">
                           {id}
                         </span>
@@ -823,11 +832,11 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                         );
                       })
                       ) : (
-                        (receipt.services || []).map((item, index) => (
-                          <tr key={item.id || index} className="hover:bg-gray-50/30 transition">
+                        (receipt?.services || []).map((item, index) => (
+                          <tr key={item?.id || index} className="hover:bg-gray-50/30 transition">
                             <td className="py-3.5 px-4">
                               <div className="font-medium text-gray-900">
-                                {item.socialNetworkName} - {item.serviceName}
+                                {item?.socialNetworkName || 'Servicio'} - {item?.serviceName || ''}
                               </div>
                               {getItemOrderIds(item).length > 0 && (
                                 <div className="text-[10px] font-mono text-gray-400 mt-0.5">
@@ -836,10 +845,10 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                               )}
                             </td>
                             <td className="py-3.5 px-4 text-center font-mono text-gray-600">
-                              {item.quantity.toLocaleString()}
+                              {Number(item?.quantity || 0).toLocaleString()}
                             </td>
                             <td className="py-3.5 px-4 text-right font-mono font-medium text-gray-900">
-                              {formatCOP(item.chargedPrice)}
+                              {formatCOP(item?.chargedPrice)}
                             </td>
                           </tr>
                         ))
@@ -856,21 +865,22 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                     <span>Detalle del Pedido</span>
                   </div>
                   <div className="grid grid-cols-1 gap-3">
-                    {(receipt.services || []).flatMap((item, itemIdx) => {
+                    {(receipt?.services || []).flatMap((item, itemIdx) => {
+                      if (!item) return [];
                       const ids = getItemOrderIds(item);
                       
                       if (ids.length <= 1) {
                         return (
                           <div key={`single-${itemIdx}`} className="bg-gray-50/40 p-4 rounded-xl border border-gray-100 flex items-center justify-between text-xs">
                             <div className="flex items-center gap-3">
-                              <span className="text-xl">{getNetworkEmoji(item.socialNetworkName)}</span>
+                              <span className="text-xl">{getNetworkEmoji(item?.socialNetworkName)}</span>
                               <div>
-                                <div className="font-semibold text-gray-900">{item.socialNetworkName}</div>
-                                <div className="text-gray-400 text-[11px] mt-0.5">{item.serviceName}</div>
+                                <div className="font-semibold text-gray-900">{item?.socialNetworkName || 'Servicio'}</div>
+                                <div className="text-gray-400 text-[11px] mt-0.5">{item?.serviceName || ''}</div>
                               </div>
                             </div>
                             <div className="text-right">
-                              <div className="font-mono font-semibold text-gray-800">Cant: {item.quantity.toLocaleString()}</div>
+                              <div className="font-mono font-semibold text-gray-800">Cant: {Number(item?.quantity || 0).toLocaleString()}</div>
                               {ids[0] && (
                                 <div className="text-[10px] font-mono font-bold text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-sm mt-1 border border-indigo-100/30">
                                   ID: {ids[0]}
@@ -880,7 +890,7 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                           </div>
                         );
                       } else {
-                        const splitQty = Math.floor(item.quantity / ids.length);
+                        const splitQty = Math.floor(Number(item?.quantity || 0) / (ids.length || 1));
                         return ids.map((id, idIdx) => (
                           <div key={`split-${itemIdx}-${idIdx}`} className="bg-indigo-50/10 p-4 rounded-xl border border-indigo-100/30 relative overflow-hidden text-xs">
                             <div className="absolute top-0 right-0 bg-indigo-600 text-white text-[9px] font-bold px-2 py-0.5 rounded-bl-md">
@@ -888,14 +898,14 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                             </div>
                             <div className="flex items-center justify-between">
                               <div className="flex items-center gap-3">
-                                <span className="text-lg">{getNetworkEmoji(item.socialNetworkName)}</span>
+                                <span className="text-lg">{getNetworkEmoji(item?.socialNetworkName)}</span>
                                 <div>
-                                  <div className="font-bold text-indigo-950">{item.socialNetworkName}</div>
-                                  <div className="text-gray-400 text-[11px] mt-0.5">{item.serviceName}</div>
+                                  <div className="font-bold text-indigo-950">{item?.socialNetworkName || 'Servicio'}</div>
+                                  <div className="text-gray-400 text-[11px] mt-0.5">{item?.serviceName || ''}</div>
                                 </div>
                               </div>
                               <div className="text-right">
-                                <div className="font-mono font-semibold text-gray-800">Cant: {splitQty.toLocaleString()}</div>
+                                <div className="font-mono font-semibold text-gray-800">Cant: {Number(splitQty || 0).toLocaleString()}</div>
                                 <div className="text-[10px] font-mono font-bold text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-sm mt-1 border border-indigo-100/30 inline-block">
                                   ID: {id}
                                 </div>
@@ -987,6 +997,5 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
           </div>
         </motion.div>
       </div>
-    </AnimatePresence>
   );
 };

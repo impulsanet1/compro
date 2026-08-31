@@ -88,6 +88,25 @@ interface AppContextType {
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
+function cleanForFirestore<T>(data: T): T {
+  if (data === null || data === undefined) {
+    return data;
+  }
+  if (Array.isArray(data)) {
+    return data.map((item) => cleanForFirestore(item)) as unknown as T;
+  }
+  if (typeof data === "object") {
+    const cleanObj: Record<string, any> = {};
+    for (const [key, val] of Object.entries(data)) {
+      if (val !== undefined) {
+        cleanObj[key] = cleanForFirestore(val);
+      }
+    }
+    return cleanObj as T;
+  }
+  return data;
+}
+
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
   const [loadingAuth, setLoadingAuth] = useState(true);
@@ -540,7 +559,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       consecutive: nextConsecutive
     };
 
-    const docRef = await addDoc(receiptsRef, finalReceipt);
+    const sanitizedReceipt = cleanForFirestore(finalReceipt);
+    const docRef = await addDoc(receiptsRef, sanitizedReceipt);
     const receiptId = docRef.id;
 
     // Update or Create Client
@@ -561,14 +581,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         existingCode = String(maxCode + 1).padStart(4, "0");
       }
 
-      await setDoc(clientRef, {
+      await setDoc(clientRef, cleanForFirestore({
         ...currentClient,
         clientCode: existingCode,
         purchaseCount: (currentClient.purchaseCount || 0) + 1,
         totalSpent: (currentClient.totalSpent || 0) + receiptData.totalCharged,
         lastPurchaseDate: receiptData.date,
         receiptIds: [...(currentClient.receiptIds || []), receiptId]
-      });
+      }));
     } else {
       const existingCodes = clients
         .map((c) => parseInt(c.clientCode || "0", 10))
@@ -587,7 +607,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         receiptIds: [receiptId],
         createdAt: receiptData.date,
       };
-      await setDoc(clientRef, newClient);
+      await setDoc(clientRef, cleanForFirestore(newClient));
     }
 
     return {

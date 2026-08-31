@@ -244,7 +244,6 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
       // 1. Status Filter
       if (statusFilter === "overdue" && !record.timeInfo.isOverdue) return false;
       if (statusFilter === "pending" && (record.status === "rechazado" || record.timeInfo.isOverdue)) return false;
-      if (statusFilter === "resolved" && record.status !== "resuelto") return false;
 
       // 2. Search Term
       if (searchTerm.trim() !== "") {

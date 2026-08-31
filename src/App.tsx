@@ -13,6 +13,7 @@ import { ClientsView } from "./components/ClientsView";
 import { ConfigView } from "./components/ConfigView";
 import { SupplierWarrantyView } from "./components/SupplierWarrantyView";
 import { ReceiptModal } from "./components/ReceiptModal";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Receipt, getSupplierWarrantyTimeStatus } from "./types";
 import {
   TrendingUp,
@@ -194,28 +195,34 @@ const MainLayout: React.FC = () => {
       
       {/* View Wrapper */}
       <main className="flex-1 py-6 md:py-8">
-        <AnimatePresence mode="wait">
-          <motion.div
-            key={activeTab}
-            initial={{ opacity: 0, y: 5 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -5 }}
-            transition={{ duration: 0.15, ease: "easeInOut" }}
-          >
-            {renderActiveView()}
-          </motion.div>
-        </AnimatePresence>
+        <ErrorBoundary>
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={activeTab}
+              initial={{ opacity: 0, y: 5 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -5 }}
+              transition={{ duration: 0.15, ease: "easeInOut" }}
+            >
+              {renderActiveView()}
+            </motion.div>
+          </AnimatePresence>
+        </ErrorBoundary>
       </main>
 
       {/* Floating Receipt Viewing Modal */}
-      {activeSelectedReceipt && (
-        <ReceiptModal
-          receipt={activeSelectedReceipt}
-          onClose={() => setSelectedReceipt(null)}
-          businessName={businessConfig.businessName}
-          whatsapp={businessConfig.whatsapp}
-        />
-      )}
+      <AnimatePresence>
+        {activeSelectedReceipt && (
+          <ErrorBoundary>
+            <ReceiptModal
+              receipt={activeSelectedReceipt}
+              onClose={() => setSelectedReceipt(null)}
+              businessName={businessConfig.businessName}
+              whatsapp={businessConfig.whatsapp}
+            />
+          </ErrorBoundary>
+        )}
+      </AnimatePresence>
     </div>
   );
 };
@@ -242,13 +249,19 @@ const AppContent: React.FC = () => {
     return <LoginView />;
   }
 
-  return <MainLayout />;
+  return (
+    <ErrorBoundary>
+      <MainLayout />
+    </ErrorBoundary>
+  );
 };
 
 export default function App() {
   return (
-    <AppProvider>
-      <AppContent />
-    </AppProvider>
+    <ErrorBoundary>
+      <AppProvider>
+        <AppContent />
+      </AppProvider>
+    </ErrorBoundary>
   );
 }

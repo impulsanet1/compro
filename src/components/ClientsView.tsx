@@ -34,7 +34,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
   const formatCOP = (val: number) => "$" + Math.round(val).toLocaleString("es-CO");
 
   const [searchText, setSearchText] = useState("");
-  const [warrantyFilter, setWarrantyFilter] = useState<"all" | "eligible" | "eligible_10d" | "active_warranty" | "with_history">("all");
+  const [warrantyFilter, setWarrantyFilter] = useState<"all" | "eligible_10d" | "recent" | "active_warranty" | "with_history">("all");
   const [selectedClientId, setSelectedClientId] = useState<string | null>(null);
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
   const [showRepurchaseModal, setShowRepurchaseModal] = useState(false);
@@ -72,6 +72,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
       }
 
       const isEligibleByDays = daysSinceLastPurchase >= 10;
+      const isRecentPurchase = daysSinceLastPurchase >= 0 && daysSinceLastPurchase < 10;
 
       const sortedAscReceipts = [...actualReceipts].sort(
         (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()
@@ -106,8 +107,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
       const hasActiveWarranty = activeWarranties.length > 0 || receiptsInProcess.length > 0;
       const resolvedWarranties = matchedWarranties.filter((w) => w.status === "resuelto");
       const totalWarrantiesCount = matchedWarranties.length + (receiptsInProcess.length > 0 && activeWarranties.length === 0 ? receiptsInProcess.length : 0);
-      const isPromoEligible = !hasActiveWarranty;
-      const isPromoEligibleWith10Days = !hasActiveWarranty && isEligibleByDays;
+      const isPromoEligible = !hasActiveWarranty && isEligibleByDays;
 
       return {
         ...c,
@@ -117,6 +117,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
         actualLastPurchaseDate: lastDate,
         daysSinceLastPurchase,
         isEligibleByDays,
+        isRecentPurchase,
         actualFirstPurchaseDate: firstDate,
         actualProfitGenerated: profitGenerated,
         actualAveragePurchase: averagePurchase,
@@ -128,20 +129,19 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
         receiptsInProcess,
         hasActiveWarranty,
         totalWarrantiesCount,
-        isPromoEligible,
-        isPromoEligibleWith10Days
+        isPromoEligible
       };
     });
   }, [clients, receipts, supplierWarranties]);
 
-  // Filter clients by search query and warranty eligibility filter
+  // Filter clients by search query and warranty/promo eligibility filter
   const filteredClients = useMemo(() => {
     const filtered = enrichedClients.filter((c) => {
       if (c.actualPurchaseCount <= 0) return false;
 
       // Filter by warranty/promo eligibility tab
-      if (warrantyFilter === "eligible_10d" && !c.isPromoEligibleWith10Days) return false;
-      if (warrantyFilter === "eligible" && !c.isPromoEligible) return false;
+      if (warrantyFilter === "eligible_10d" && !c.isPromoEligible) return false;
+      if (warrantyFilter === "recent" && !c.isRecentPurchase) return false;
       if (warrantyFilter === "active_warranty" && !c.hasActiveWarranty) return false;
       if (warrantyFilter === "with_history" && c.totalWarrantiesCount === 0) return false;
 
@@ -167,20 +167,20 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
     });
   }, [enrichedClients, searchText, warrantyFilter]);
 
-  // Overall warranty stats for quick summary bar
+  // Overall warranty & promo stats for quick summary bar
   const clientsWarrantyStats = useMemo(() => {
     const totalBuyers = enrichedClients.filter((c) => c.actualPurchaseCount > 0);
     const withActiveWarranty = totalBuyers.filter((c) => c.hasActiveWarranty);
     const withWarrantyHistory = totalBuyers.filter((c) => c.totalWarrantiesCount > 0 && !c.hasActiveWarranty);
-    const cleanForPromos = totalBuyers.filter((c) => c.totalWarrantiesCount === 0);
-    const eligible10Days = totalBuyers.filter((c) => c.isPromoEligibleWith10Days);
+    const eligible10Days = totalBuyers.filter((c) => c.isPromoEligible);
+    const recentPurchases = totalBuyers.filter((c) => !c.hasActiveWarranty && c.isRecentPurchase);
 
     return {
       total: totalBuyers.length,
       withActiveWarranty: withActiveWarranty.length,
       withWarrantyHistory: withWarrantyHistory.length,
-      cleanForPromos: cleanForPromos.length,
-      eligible10Days: eligible10Days.length
+      eligible10Days: eligible10Days.length,
+      recentPurchases: recentPurchases.length
     };
   }, [enrichedClients]);
 
@@ -351,26 +351,26 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
                 ? "bg-emerald-950/60 text-emerald-300 border border-emerald-800 hover:bg-emerald-900/80"
                 : "bg-emerald-50 text-emerald-800 border border-emerald-200 hover:bg-emerald-100"
             }`}
-            title="Clientes que compraron hace 10 o más días y no tienen garantías activas"
+            title="Clientes que compraron hace 10 o más días y no tienen garantías activas (100% listos para promo de recompra)"
           >
-            <Clock className="w-3.5 h-3.5 text-emerald-400" />
-            <span>⏱️ Listos Recompra (≥10 días: {clientsWarrantyStats.eligible10Days})</span>
+            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+            <span>🟢 Listos Recompra (≥10d: {clientsWarrantyStats.eligible10Days})</span>
           </button>
 
           <button
             type="button"
-            onClick={() => setWarrantyFilter("eligible")}
+            onClick={() => setWarrantyFilter("recent")}
             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer ${
-              warrantyFilter === "eligible"
-                ? "bg-teal-600 text-white shadow-xs"
+              warrantyFilter === "recent"
+                ? "bg-sky-600 text-white shadow-xs"
                 : isDarkMode
-                ? "bg-teal-950/60 text-teal-300 border border-teal-800 hover:bg-teal-900/80"
-                : "bg-teal-50 text-teal-800 border border-teal-200 hover:bg-teal-100"
+                ? "bg-sky-950/60 text-sky-300 border border-sky-800 hover:bg-sky-900/80"
+                : "bg-sky-50 text-sky-800 border border-sky-200 hover:bg-sky-100"
             }`}
-            title="Todos los clientes sin reclamos activos (100% aptos para recibir ofertas)"
+            title="Clientes que compraron recientemente (hace menos de 10 días). En período de entrega/servicio."
           >
-            <ShieldCheck className="w-3.5 h-3.5" />
-            <span>🟢 Todos Aptos ({clientsWarrantyStats.cleanForPromos + clientsWarrantyStats.withWarrantyHistory})</span>
+            <Clock className="w-3.5 h-3.5 text-sky-400" />
+            <span>🔵 Compras Recientes (&lt;10d: {clientsWarrantyStats.recentPurchases})</span>
           </button>
 
           <button
@@ -399,7 +399,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
                 ? "bg-amber-950/60 text-amber-300 border border-amber-800 hover:bg-amber-900/80"
                 : "bg-amber-50 text-amber-800 border border-amber-200 hover:bg-amber-100"
             }`}
-            title="Clientes que han tenido garantías en el pasado"
+            title="Clientes que han tenido garantías resueltas en el pasado"
           >
             <Clock className="w-3.5 h-3.5" />
             <span>🟡 Con Historial ({clientsWarrantyStats.withWarrantyHistory})</span>
@@ -510,32 +510,33 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
                             <span className="w-1.5 h-1.5 rounded-full bg-rose-500 animate-pulse" />
                             Garantía Activa
                           </span>
-                        ) : client.totalWarrantiesCount > 0 ? (
+                        ) : client.isRecentPurchase ? (
+                          <span className={`inline-flex items-center gap-1 text-[9px] font-bold px-1.5 py-0.5 rounded border ${
+                            isDarkMode ? "bg-sky-950/60 text-sky-300 border-sky-800" : "bg-sky-50 text-sky-700 border-sky-200"
+                          }`}>
+                            <Clock className="w-2.5 h-2.5 text-sky-400" />
+                            <span>Compra Reciente ({client.daysSinceLastPurchase}d)</span>
+                          </span>
+                        ) : client.isPromoEligible ? (
+                          <span className={`inline-flex items-center gap-1 text-[9px] font-bold px-1.5 py-0.5 rounded border ${
+                            isDarkMode ? "bg-emerald-950/50 text-emerald-400 border-emerald-800/80" : "bg-emerald-50 text-emerald-700 border-emerald-200"
+                          }`}>
+                            <CheckCircle2 className="w-2.5 h-2.5 text-emerald-400" />
+                            <span>Listo Promo ({client.daysSinceLastPurchase}d)</span>
+                          </span>
+                        ) : (
+                          <span className={`inline-flex items-center gap-1 text-[9px] font-medium px-1.5 py-0.5 rounded border ${
+                            isDarkMode ? "bg-slate-800 text-slate-400 border-slate-700" : "bg-gray-100 text-gray-600 border-gray-200"
+                          }`}>
+                            Sin compras recientes
+                          </span>
+                        )}
+
+                        {client.totalWarrantiesCount > 0 && !client.hasActiveWarranty && (
                           <span className={`inline-flex items-center gap-1 text-[9px] font-bold px-1.5 py-0.5 rounded border ${
                             isDarkMode ? "bg-amber-950/70 text-amber-300 border-amber-800" : "bg-amber-50 text-amber-800 border-amber-200"
                           }`}>
                             🟡 {client.resolvedWarranties.length} Resuelta{client.resolvedWarranties.length !== 1 ? "s" : ""}
-                          </span>
-                        ) : (
-                          <span className={`inline-flex items-center gap-1 text-[9px] font-bold px-1.5 py-0.5 rounded border ${
-                            isDarkMode ? "bg-emerald-950/50 text-emerald-400 border-emerald-800/80" : "bg-emerald-50 text-emerald-700 border-emerald-200"
-                          }`}>
-                            🟢 Apto Promos
-                          </span>
-                        )}
-
-                        {client.daysSinceLastPurchase >= 0 && (
-                          <span className={`inline-flex items-center gap-1 text-[9px] font-bold px-1.5 py-0.5 rounded border ${
-                            client.isEligibleByDays
-                              ? isDarkMode
-                                ? "bg-emerald-950/60 text-emerald-300 border-emerald-800"
-                                : "bg-emerald-50 text-emerald-800 border-emerald-200"
-                              : isDarkMode
-                                ? "bg-slate-800 text-slate-400 border-slate-700"
-                                : "bg-gray-100 text-gray-600 border-gray-200"
-                          }`}>
-                            <Clock className="w-2.5 h-2.5" />
-                            <span>Hace {client.daysSinceLastPurchase}d {client.isEligibleByDays ? "(Listo)" : ""}</span>
                           </span>
                         )}
                       </div>
@@ -567,6 +568,10 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
                             ? isDarkMode
                               ? "bg-rose-950/70 hover:bg-rose-900 border-rose-800 text-rose-300"
                               : "bg-rose-50 hover:bg-rose-100 border-rose-200 text-rose-800"
+                            : client.isRecentPurchase
+                            ? isDarkMode
+                              ? "bg-sky-950/70 hover:bg-sky-900 border-sky-800 text-sky-300"
+                              : "bg-sky-50 hover:bg-sky-100 border-sky-200 text-sky-800"
                             : isDarkMode
                               ? "bg-emerald-950/70 hover:bg-emerald-900 border-emerald-800 text-emerald-300"
                               : "bg-emerald-50 hover:bg-emerald-100 border-emerald-200 text-emerald-800"
@@ -574,6 +579,8 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
                         title={
                           client.hasActiveWarranty
                             ? `Atención: ${client.name} tiene una garantía activa en curso`
+                            : client.isRecentPurchase
+                            ? `Compra reciente (${client.daysSinceLastPurchase} días). Crear oferta o seguimiento para ${client.name}`
                             : `Crear oferta de recompra para ${client.name}`
                         }
                       >
@@ -637,9 +644,17 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
                         className={`inline-flex items-center gap-1.5 text-xs font-extrabold px-3.5 py-1.5 rounded-lg transition active:scale-95 cursor-pointer shadow-sm ${
                           selectedClient.hasActiveWarranty
                             ? "bg-rose-600 hover:bg-rose-700 text-white"
+                            : selectedClient.isRecentPurchase
+                            ? "bg-sky-600 hover:bg-sky-700 text-white"
                             : "bg-emerald-600 hover:bg-emerald-500 text-white"
                         }`}
-                        title="Crear oferta promocional de recompra calculada sobre su última compra"
+                        title={
+                          selectedClient.hasActiveWarranty
+                            ? "Atención: este cliente tiene garantía activa"
+                            : selectedClient.isRecentPurchase
+                            ? `Compra reciente hace ${selectedClient.daysSinceLastPurchase} días (Recomendado esperar 10 días)`
+                            : "Crear oferta promocional de recompra"
+                        }
                       >
                         <Gift className="w-3.5 h-3.5" />
                         <span>Oferta de Recompra (Promo)</span>
@@ -731,22 +746,41 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
                       )}
                     </div>
                   </div>
+                ) : selectedClient.isRecentPurchase ? (
+                  <div className={`p-3.5 rounded-xl border flex items-start gap-3 transition ${
+                    isDarkMode ? "bg-sky-950/40 border-sky-800 text-sky-200" : "bg-sky-50 border-sky-200 text-sky-900"
+                  }`}>
+                    <Clock className="w-4 h-4 text-sky-400 shrink-0 mt-0.5" />
+                    <div className="space-y-0.5 text-xs">
+                      <div className="font-bold flex items-center gap-2 flex-wrap">
+                        <span>🔵 Compra Reciente (Hace {selectedClient.daysSinceLastPurchase} {selectedClient.daysSinceLastPurchase === 1 ? "día" : "días"})</span>
+                        <span className={`text-[10px] px-2 py-0.2 rounded-full font-bold border ${
+                          isDarkMode ? "bg-sky-900/80 text-sky-200 border-sky-700" : "bg-sky-100 text-sky-800 border-sky-200"
+                        }`}>
+                          ⏳ En período de servicio / Esperar
+                        </span>
+                      </div>
+                      <p className={`text-[11px] ${isDarkMode ? "text-sky-300" : "text-sky-700"}`}>
+                        Este cliente compró recientemente. Se sugiere esperar a que transcurran mínimo 10 días desde su compra para ofrecerle promociones de recompra y no saturarlo.
+                      </p>
+                    </div>
+                  </div>
                 ) : selectedClient.totalWarrantiesCount > 0 ? (
                   <div className={`p-3.5 rounded-xl border flex items-start gap-3 transition ${
                     isDarkMode ? "bg-amber-950/40 border-amber-800 text-amber-200" : "bg-amber-50 border-amber-200 text-amber-900"
                   }`}>
                     <Clock className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
                     <div className="space-y-0.5 text-xs">
-                      <div className="font-bold flex items-center gap-2">
-                        <span>🟡 Cliente con Antecedentes de Garantía ({selectedClient.resolvedWarranties.length} Resuelta{selectedClient.resolvedWarranties.length !== 1 ? "s" : ""})</span>
+                      <div className="font-bold flex items-center gap-2 flex-wrap">
+                        <span>🟡 Apto para Promos ({selectedClient.resolvedWarranties.length} Garantía{selectedClient.resolvedWarranties.length !== 1 ? "s" : ""} Resuelta{selectedClient.resolvedWarranties.length !== 1 ? "s" : ""})</span>
                         <span className={`text-[10px] px-2 py-0.2 rounded-full font-bold border ${
-                          isDarkMode ? "bg-amber-900/80 text-amber-200 border-amber-700" : "bg-amber-100 text-amber-800 border-amber-200"
+                          isDarkMode ? "bg-emerald-900/80 text-emerald-200 border-emerald-700" : "bg-emerald-100 text-emerald-800 border-emerald-200"
                         }`}>
-                          🟢 Apto para Promos (Sin reclamos pendientes)
+                          🟢 Cumple {selectedClient.daysSinceLastPurchase} días
                         </span>
                       </div>
                       <p className={`text-[11px] ${isDarkMode ? "text-amber-300" : "text-amber-700"}`}>
-                        Todas sus garantías previas fueron resueltas exitosamente. Es seguro enviarle ofertas o promociones de recompra.
+                        Todas sus garantías previas fueron resueltas y superó los 10 días desde su compra. Es seguro y oportuno enviarle ofertas de recompra.
                       </p>
                     </div>
                   </div>
@@ -756,9 +790,9 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
                   }`}>
                     <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
                     <div className="text-xs">
-                      <strong className="text-emerald-500 font-bold">🟢 Cliente 100% Óptimo para Promociones:</strong>
+                      <strong className="text-emerald-500 font-bold">🟢 Cliente 100% Óptimo para Recompra (Compró hace {selectedClient.daysSinceLastPurchase >= 0 ? `${selectedClient.daysSinceLastPurchase} días` : 'más de 10 días'}):</strong>
                       <span className={`ml-1 text-[11px] ${isDarkMode ? "text-emerald-300" : "text-emerald-800"}`}>
-                        Sin reclamos de garantía registrados. Candidato prioritario para campañas y ofertas de recompra.
+                        Cumple con el tiempo ideal (≥10 días) y no tiene reclamos de garantía. Candidato prioritario para campañas y ofertas de recompra.
                       </span>
                     </div>
                   </div>

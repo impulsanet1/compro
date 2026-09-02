@@ -1011,8 +1011,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onViewChange, onSe
             <h3 className={`text-2xl font-bold tracking-tight ${isDarkMode ? "text-indigo-300" : "text-indigo-700"}`}>
               {formatCOP(periodStats.averageSale)}
             </h3>
-            <p className={`text-[10px] mt-1 ${isDarkMode ? "text-slate-400" : "text-gray-400"}`}>
-              Ganancia media: {formatCOP(periodStats.averageProfit)}
+            <p className={`text-[10px] mt-1 flex items-center gap-1 ${isDarkMode ? "text-slate-400" : "text-gray-400"}`}>
+              <span>Ganancia media:</span>
+              <span className="font-semibold">{formatCOP(periodStats.averageProfit)}</span>
             </p>
           </div>
           <div className="absolute bottom-0 inset-x-0 h-1 bg-indigo-600"></div>
@@ -1032,10 +1033,13 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onViewChange, onSe
               <h3 className={`text-sm font-bold ${isDarkMode ? "text-white" : "text-gray-950"}`}>
                 Comportamiento de Ventas & Ganancias
               </h3>
-              <p className={`text-[11px] mt-0.5 ${isDarkMode ? "text-slate-400" : "text-gray-500"}`}>
-                Desglose para: <strong className="font-semibold">{periodLabel}</strong> • Total gráfico:{" "}
-                <span className="text-indigo-400 font-mono font-bold">{formatCOP(totalPeriodSalesInChart)}</span> en ventas (
-                <span className="text-emerald-400 font-mono font-bold">{formatCOP(totalPeriodProfitInChart)}</span> ganancia)
+              <p className={`text-[11px] mt-0.5 flex items-center gap-1 flex-wrap ${isDarkMode ? "text-slate-400" : "text-gray-500"}`}>
+                <span>Desglose para:</span>
+                <strong className="font-semibold">{periodLabel}</strong>
+                <span>• Total gráfico:</span>
+                <span className="text-indigo-400 font-mono font-bold">{formatCOP(totalPeriodSalesInChart)}</span>
+                <span>en ventas</span>
+                <span className="text-emerald-400 font-mono font-bold">({formatCOP(totalPeriodProfitInChart)} ganancia)</span>
               </p>
             </div>
             <div className="flex items-center gap-4 text-xs font-semibold self-start sm:self-auto">

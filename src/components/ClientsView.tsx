@@ -20,13 +20,14 @@ import {
   ShieldAlert,
   AlertTriangle,
   CheckCircle2,
-  Clock
+  Clock,
+  Edit3
 } from "lucide-react";
 import { Receipt, getClientCode, getNormalizedStatus, isReceiptForClient, isWarrantyForClient } from "../types";
 import { RepurchaseModal } from "./RepurchaseModal";
 
 interface ClientsViewProps {
-  onSelectReceipt: (receipt: Receipt) => void;
+  onSelectReceipt: (receipt: Receipt, editMode?: boolean) => void;
 }
 
 export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => {
@@ -866,20 +867,34 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
                           </div>
                         </div>
 
-                        <div className="flex items-center gap-4">
+                        <div className="flex items-center gap-2 sm:gap-3">
                           <span className={`text-xs font-bold ${isDarkMode ? "text-indigo-400" : "text-indigo-600"}`}>
                             {formatCOP(receipt.totalCharged)}
                           </span>
                           <button
                             id={`btn-view-client-receipt-${receipt.consecutive}`}
-                            onClick={() => onSelectReceipt(receipt)}
+                            onClick={() => onSelectReceipt(receipt, false)}
                             className={`text-xs font-semibold border transition px-2.5 py-1.5 rounded-lg shadow-2xs cursor-pointer ${
                               isDarkMode
                                 ? "bg-slate-800 border-indigo-500/50 text-indigo-300 hover:bg-slate-750"
                                 : "bg-white border-indigo-200 text-indigo-700 hover:bg-indigo-50 hover:text-indigo-900"
                             }`}
+                            title="Ver Comprobante"
                           >
                             Ver
+                          </button>
+                          <button
+                            id={`btn-edit-client-receipt-${receipt.consecutive}`}
+                            onClick={() => onSelectReceipt(receipt, true)}
+                            className={`inline-flex items-center gap-1 text-xs font-semibold border transition px-2.5 py-1.5 rounded-lg shadow-2xs cursor-pointer ${
+                              isDarkMode
+                                ? "bg-indigo-950/80 border-indigo-700 text-indigo-200 hover:bg-indigo-900"
+                                : "bg-indigo-50 border-indigo-200 text-indigo-700 hover:bg-indigo-100"
+                            }`}
+                            title="Editar Comprobante o Cambiar Precios"
+                          >
+                            <Edit3 className="w-3 h-3 text-indigo-500" />
+                            <span>Editar</span>
                           </button>
                         </div>
                       </div>

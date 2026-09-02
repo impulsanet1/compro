@@ -10,6 +10,7 @@ import {
   Calendar,
   FileText,
   Eye,
+  Edit3,
   Trash2,
   Inbox,
   MessageSquare,
@@ -20,7 +21,7 @@ import {
 import { Receipt, getNormalizedStatus, getItemOrderIds, isReceiptForClient } from "../types";
 
 interface HistoryViewProps {
-  onSelectReceipt: (receipt: Receipt) => void;
+  onSelectReceipt: (receipt: Receipt, editMode?: boolean) => void;
 }
 
 export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => {
@@ -698,15 +699,29 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => 
                           <div className="flex items-center justify-center gap-1.5">
                             <button
                               id={`btn-view-receipt-${r.consecutive}`}
-                              onClick={() => onSelectReceipt(r)}
+                              onClick={() => onSelectReceipt(r, false)}
                               className={`inline-flex items-center gap-1 text-[11px] font-bold transition px-2 py-1 rounded-md shadow-2xs cursor-pointer border ${
                                 isDarkMode
                                   ? "bg-slate-800 border-indigo-500/50 text-indigo-300 hover:bg-slate-750"
                                   : "bg-white border-indigo-200 text-indigo-700 hover:bg-indigo-50"
                               }`}
+                              title="Ver Comprobante"
                             >
                               <Eye className="w-3 h-3" />
                               Ver
+                            </button>
+                            <button
+                              id={`btn-edit-receipt-${r.consecutive}`}
+                              onClick={() => onSelectReceipt(r, true)}
+                              className={`inline-flex items-center gap-1 text-[11px] font-bold transition px-2 py-1 rounded-md shadow-2xs cursor-pointer border ${
+                                isDarkMode
+                                  ? "bg-indigo-950/80 border-indigo-700 text-indigo-200 hover:bg-indigo-900"
+                                  : "bg-indigo-50 border-indigo-200 text-indigo-700 hover:bg-indigo-100"
+                              }`}
+                              title="Editar pedido o cambiar precios"
+                            >
+                              <Edit3 className="w-3 h-3 text-indigo-500" />
+                              Editar
                             </button>
                             <button
                               type="button"

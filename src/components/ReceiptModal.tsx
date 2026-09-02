@@ -4,7 +4,7 @@
  */
 
 import React, { useRef, useState, useEffect, useMemo } from "react";
-import { X, ShieldCheck, Edit3, Save, Trash2, ShieldAlert, Calendar, ChevronDown, ChevronUp, MessageSquare, Send, PhoneCall, ExternalLink, Bell } from "lucide-react";
+import { X, ShieldCheck, Edit3, Save, Trash2, ShieldAlert, Calendar, ChevronDown, ChevronUp, MessageSquare, Send, PhoneCall, ExternalLink, Bell, Plus, DollarSign, Layers } from "lucide-react";
 import { Receipt, ReceiptItem, getNormalizedStatus, getItemOrderIds, getItemOrderIdDisplay } from "../types";
 import { motion, AnimatePresence } from "motion/react";
 import { useApp } from "../context/AppContext";
@@ -14,6 +14,7 @@ interface ReceiptModalProps {
   onClose: () => void;
   businessName: string;
   whatsapp: string;
+  initialIsEditing?: boolean;
 }
 
 export const ReceiptModal: React.FC<ReceiptModalProps> = ({
@@ -21,8 +22,9 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
   onClose,
   businessName,
   whatsapp,
+  initialIsEditing = false,
 }) => {
-  const { updateReceipt } = useApp();
+  const { updateReceipt, socialNetworks, services } = useApp();
   const receiptRef = useRef<HTMLDivElement>(null);
   
   // Format utility
@@ -95,7 +97,7 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
   };
 
   // State for Editing Mode
-  const [isEditing, setIsEditing] = useState(false);
+  const [isEditing, setIsEditing] = useState(initialIsEditing);
   const [editedClientName, setEditedClientName] = useState(receipt.clientName || "");
   const [editedClientPhone, setEditedClientPhone] = useState(receipt.clientPhone || "");
   const [editedWarranty, setEditedWarranty] = useState(receipt.warranty || "30 días");
@@ -117,9 +119,9 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
     setEditedServices(receipt.services || []);
     setEditedStatus(getNormalizedStatus(receipt.status));
     setEditedInternalNotes(receipt.internalNotes || "");
-    setIsEditing(false);
+    setIsEditing(initialIsEditing);
     setError(null);
-  }, [receipt.id]);
+  }, [receipt.id, initialIsEditing]);
 
   // Recalculate totals in real time while editing
   const totals = useMemo(() => {
@@ -749,16 +751,23 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
 
               {/* Services Table */}
               <div className="space-y-3">
-                <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider px-1">
-                  Servicios Adquiridos
+                <div className="flex items-center justify-between px-1">
+                  <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">
+                    Servicios Adquiridos
+                  </div>
+                  {isEditing && (
+                    <span className="text-[11px] font-medium text-indigo-600">
+                      Modo edición: Puedes modificar nombres, cantidades, IDs y precios
+                    </span>
+                  )}
                 </div>
                 <div className="border border-gray-100 rounded-xl overflow-hidden shadow-2xs bg-white">
                   <table className="w-full text-left border-collapse">
                     <thead>
                       <tr className="bg-gray-50/75 border-b border-gray-100">
-                        <th className="py-3 px-4 text-xs font-semibold text-gray-600">Servicio</th>
+                        <th className="py-3 px-4 text-xs font-semibold text-gray-600">Servicio y Detalles</th>
                         <th className="py-3 px-4 text-xs font-semibold text-gray-600 text-center">Cantidad</th>
-                        <th className="py-3 px-4 text-xs font-semibold text-gray-600 text-right">Precio</th>
+                        <th className="py-3 px-4 text-xs font-semibold text-gray-600 text-right">Precio Cobrado</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100 text-sm">
@@ -766,16 +775,48 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                         editedServices.map((item, index) => {
                           if (!item) return null;
                           return (
-                            <tr key={item.id || index} className="hover:bg-gray-50/30 transition">
-                              <td className="py-3 px-2 sm:py-3.5 sm:px-4">
-                                <div className="font-semibold text-gray-900 text-xs">
-                                  {item.socialNetworkName || "Red Social"} - {item.serviceName || "Servicio"}
+                            <tr key={item.id || index} className="hover:bg-gray-50/30 transition bg-indigo-50/10">
+                              <td className="py-3 px-2 sm:py-3.5 sm:px-4 space-y-2">
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                  <div>
+                                    <label className="block text-[9px] font-bold text-gray-400 uppercase">Red Social</label>
+                                    <input
+                                      type="text"
+                                      value={item.socialNetworkName || ""}
+                                      onFocus={(e) => e.target.select()}
+                                      onChange={(e) => {
+                                        const updatedVal = e.target.value;
+                                        setEditedServices((prev) =>
+                                          prev.map((it, idx) => (idx === index ? { ...it, socialNetworkName: updatedVal } : it))
+                                        );
+                                      }}
+                                      className="mt-0.5 block w-full px-2.5 py-1 border border-gray-200 rounded-md text-xs font-semibold text-gray-900 bg-white focus:outline-hidden focus:ring-1 focus:ring-indigo-500"
+                                      placeholder="Ej: Instagram"
+                                    />
+                                  </div>
+                                  <div>
+                                    <label className="block text-[9px] font-bold text-gray-400 uppercase">Servicio / Paquete</label>
+                                    <input
+                                      type="text"
+                                      value={item.serviceName || ""}
+                                      onFocus={(e) => e.target.select()}
+                                      onChange={(e) => {
+                                        const updatedVal = e.target.value;
+                                        setEditedServices((prev) =>
+                                          prev.map((it, idx) => (idx === index ? { ...it, serviceName: updatedVal } : it))
+                                        );
+                                      }}
+                                      className="mt-0.5 block w-full px-2.5 py-1 border border-gray-200 rounded-md text-xs text-gray-800 bg-white focus:outline-hidden focus:ring-1 focus:ring-indigo-500"
+                                      placeholder="Ej: Seguidores Latinos"
+                                    />
+                                  </div>
                                 </div>
-                                <div className="mt-2">
-                                  <label className="block text-[9px] font-bold text-gray-400 uppercase">ID de Pedido</label>
+                                <div>
+                                  <label className="block text-[9px] font-bold text-gray-400 uppercase">ID de Pedido Proveedor</label>
                                   <input
                                     type="text"
                                     value={item.orderId || ""}
+                                    onFocus={(e) => e.target.select()}
                                     onChange={(e) => {
                                       const updatedVal = e.target.value;
                                       const cleanIds = updatedVal.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
@@ -783,54 +824,63 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                                         prev.map((it, idx) => (idx === index ? { ...it, orderId: updatedVal, orderIds: cleanIds } : it))
                                       );
                                     }}
-                                    className="mt-0.5 block w-full max-w-xs px-2.5 py-1 border border-gray-200 rounded-md text-xs font-mono bg-white focus:outline-hidden focus:ring-1 focus:ring-indigo-500"
+                                    placeholder="Ej: 142095, 142096"
+                                    className="mt-0.5 block w-full px-2.5 py-1 border border-gray-200 rounded-md text-xs font-mono bg-white focus:outline-hidden focus:ring-1 focus:ring-indigo-500"
                                   />
                                 </div>
                               </td>
-                              <td className="py-3 px-2 sm:py-3.5 sm:px-4 text-center">
+                              <td className="py-3 px-2 sm:py-3.5 sm:px-4 text-center align-top pt-5">
+                                <label className="block text-[9px] font-bold text-gray-400 uppercase mb-1">Cantidad</label>
                                 <input
                                   type="number"
-                                  value={item.quantity ?? 0}
+                                  value={item.quantity === undefined || isNaN(item.quantity) ? "" : item.quantity}
+                                  onFocus={(e) => e.target.select()}
                                   onChange={(e) => {
-                                    const updatedVal = parseInt(e.target.value) || 0;
+                                    const valStr = e.target.value;
+                                    const updatedVal = valStr === "" ? 0 : parseInt(valStr, 10);
                                     setEditedServices((prev) =>
-                                      prev.map((it, idx) => (idx === index ? { ...it, quantity: updatedVal } : it))
+                                      prev.map((it, idx) => (idx === index ? { ...it, quantity: isNaN(updatedVal) ? 0 : updatedVal } : it))
                                     );
                                   }}
-                                  className="w-16 sm:w-20 px-1.5 py-1 border border-gray-200 rounded-md text-xs font-mono text-center bg-white focus:outline-hidden focus:ring-1 focus:ring-indigo-500"
+                                  className="w-20 px-2 py-1.5 border border-gray-300 rounded-md text-xs font-mono text-center font-bold text-gray-800 bg-white focus:outline-hidden focus:ring-2 focus:ring-indigo-500"
                                 />
                               </td>
-                              <td className="py-3 px-2 sm:py-3.5 sm:px-4 text-right">
-                                <div className="flex flex-col items-end gap-1.5">
-                                  <div className="relative rounded-md w-20 sm:w-24">
-                                    <span className="absolute inset-y-0 left-0 pl-1.5 flex items-center text-[10px] text-gray-400 font-mono">$</span>
+                              <td className="py-3 px-2 sm:py-3.5 sm:px-4 text-right align-top pt-5">
+                                <div className="flex flex-col items-end gap-2">
+                                  <label className="block text-[9px] font-bold text-gray-400 uppercase">Precio ($ COP)</label>
+                                  <div className="relative rounded-md w-28 sm:w-32">
+                                    <span className="absolute inset-y-0 left-0 pl-2 flex items-center text-xs text-indigo-500 font-mono font-bold">$</span>
                                     <input
                                       type="number"
-                                      value={item.chargedPrice ?? 0}
+                                      value={item.chargedPrice === undefined || isNaN(item.chargedPrice) ? "" : item.chargedPrice}
+                                      onFocus={(e) => e.target.select()}
                                       onChange={(e) => {
-                                        const updatedVal = parseFloat(e.target.value) || 0;
+                                        const valStr = e.target.value;
+                                        const updatedVal = valStr === "" ? 0 : parseFloat(valStr);
                                         setEditedServices((prev) =>
-                                          prev.map((it, idx) => (idx === index ? { ...it, chargedPrice: updatedVal } : it))
+                                          prev.map((it, idx) => (idx === index ? { ...it, chargedPrice: isNaN(updatedVal) ? 0 : updatedVal } : it))
                                         );
                                       }}
-                                      className="block w-full pl-4 pr-1 py-1 border border-gray-200 rounded-md text-xs font-mono text-right bg-white focus:outline-hidden focus:ring-1 focus:ring-indigo-500"
+                                      className="block w-full pl-5 pr-2 py-1.5 border-2 border-indigo-300 rounded-lg text-xs font-mono font-bold text-right text-indigo-900 bg-white focus:outline-hidden focus:ring-2 focus:ring-indigo-500 shadow-2xs"
+                                      placeholder="0"
                                     />
                                   </div>
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setEditedServices((prev) => prev.filter((_, idx) => idx !== index));
-                                  }}
-                                  className="text-red-500 hover:text-red-700 hover:bg-red-50 p-1.5 rounded-md transition cursor-pointer"
-                                  title="Remover servicio"
-                                >
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                </button>
-                              </div>
-                            </td>
-                          </tr>
-                        );
-                      })
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setEditedServices((prev) => prev.filter((_, idx) => idx !== index));
+                                    }}
+                                    className="inline-flex items-center gap-1 text-[11px] text-red-500 hover:text-red-700 hover:bg-red-50 px-2 py-1 rounded-md transition cursor-pointer"
+                                    title="Remover servicio de este comprobante"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                    <span>Eliminar fila</span>
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })
                       ) : (
                         (receipt?.services || []).map((item, index) => (
                           <tr key={item?.id || index} className="hover:bg-gray-50/30 transition">
@@ -856,6 +906,34 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                     </tbody>
                   </table>
                 </div>
+
+                {isEditing && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditedServices((prev) => [
+                        ...prev,
+                        {
+                          id: `item-${Date.now()}`,
+                          serviceId: "custom",
+                          serviceName: "Servicio Adicional",
+                          socialNetworkId: "custom",
+                          socialNetworkName: "Red Social",
+                          quantity: 1000,
+                          suggestedPrice: 0,
+                          chargedPrice: 0,
+                          providerCostAtPurchase: 0,
+                          orderId: "",
+                          orderIds: []
+                        }
+                      ]);
+                    }}
+                    className="w-full flex items-center justify-center gap-1.5 py-2.5 px-3 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-bold rounded-xl border border-dashed border-indigo-300 transition cursor-pointer"
+                  >
+                    <Plus className="w-4 h-4" />
+                    <span>+ Agregar otro servicio al comprobante</span>
+                  </button>
+                )}
               </div>
 
               {/* Detalle del Pedido Section */}

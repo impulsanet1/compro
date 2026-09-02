@@ -146,6 +146,13 @@ const MainLayout: React.FC = () => {
   const { loadingData, businessConfig, receipts, isDarkMode } = useApp();
   const [activeTab, setActiveTab] = useState("dashboard");
   const [selectedReceipt, setSelectedReceipt] = useState<Receipt | null>(null);
+  const [isEditModeModal, setIsEditModeModal] = useState<boolean>(false);
+
+  // Handler to open receipt in view or edit mode
+  const handleOpenReceipt = (receipt: Receipt, editMode: boolean = false) => {
+    setSelectedReceipt(receipt);
+    setIsEditModeModal(editMode);
+  };
 
   // Sync selectedReceipt with latest data in receipts collection
   const activeSelectedReceipt = React.useMemo(() => {
@@ -171,15 +178,15 @@ const MainLayout: React.FC = () => {
   const renderActiveView = () => {
     switch (activeTab) {
       case "dashboard":
-        return <DashboardView onViewChange={setActiveTab} onSelectReceipt={setSelectedReceipt} />;
+        return <DashboardView onViewChange={setActiveTab} onSelectReceipt={handleOpenReceipt} />;
       case "generator":
-        return <GeneratorView onReceiptGenerated={setSelectedReceipt} />;
+        return <GeneratorView onReceiptGenerated={(r) => handleOpenReceipt(r, false)} />;
       case "history":
-        return <HistoryView onSelectReceipt={setSelectedReceipt} />;
+        return <HistoryView onSelectReceipt={handleOpenReceipt} />;
       case "warranties":
-        return <SupplierWarrantyView onSelectReceipt={setSelectedReceipt} />;
+        return <SupplierWarrantyView onSelectReceipt={handleOpenReceipt} />;
       case "clients":
-        return <ClientsView onSelectReceipt={setSelectedReceipt} />;
+        return <ClientsView onSelectReceipt={handleOpenReceipt} />;
       case "config":
         return <ConfigView />;
       default:
@@ -195,7 +202,7 @@ const MainLayout: React.FC = () => {
       
       {/* View Wrapper */}
       <main className="flex-1 py-6 md:py-8">
-        <ErrorBoundary>
+        <ErrorBoundary key={activeTab}>
           <AnimatePresence mode="wait">
             <motion.div
               key={activeTab}
@@ -213,10 +220,14 @@ const MainLayout: React.FC = () => {
       {/* Floating Receipt Viewing Modal */}
       <AnimatePresence>
         {activeSelectedReceipt && (
-          <ErrorBoundary>
+          <ErrorBoundary key={activeSelectedReceipt.id}>
             <ReceiptModal
               receipt={activeSelectedReceipt}
-              onClose={() => setSelectedReceipt(null)}
+              initialIsEditing={isEditModeModal}
+              onClose={() => {
+                setSelectedReceipt(null);
+                setIsEditModeModal(false);
+              }}
               businessName={businessConfig.businessName}
               whatsapp={businessConfig.whatsapp}
             />

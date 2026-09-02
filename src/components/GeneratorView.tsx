@@ -31,9 +31,10 @@ import { motion } from "motion/react";
 
 interface GeneratorViewProps {
   onReceiptGenerated: (receipt: Receipt) => void;
+  initialItems?: Partial<ReceiptItem>[];
 }
 
-export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated }) => {
+export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated, initialItems }) => {
   const { socialNetworks, services, createReceipt, businessConfig, clients, trmState, fetchTRM, isDarkMode } = useApp();
   const formatCOP = (val: number) => "$" + Math.round(val).toLocaleString("es-CO");
 
@@ -88,7 +89,26 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
   const [internalNotes, setInternalNotes] = useState("");
 
   // Receipt items array
-  const [addedItems, setAddedItems] = useState<ReceiptItem[]>([]);
+  const [addedItems, setAddedItems] = useState<ReceiptItem[]>(() => {
+    if (initialItems && initialItems.length > 0) {
+      return initialItems.map((item, idx) => ({
+        id: "item_quote_" + Date.now() + "_" + idx,
+        socialNetworkId: item.socialNetworkId || "instagram",
+        socialNetworkName: item.socialNetworkName || "Instagram",
+        serviceId: item.serviceId || "",
+        serviceName: item.serviceName || "Servicio",
+        quantity: item.quantity || 1000,
+        suggestedPrice: item.suggestedPrice || 0,
+        chargedPrice: item.chargedPrice || 0,
+        providerCostAtPurchase: item.providerCostAtPurchase || 0,
+        providerCostUSD: item.providerCostUSD || null,
+        orderId: item.orderId || "",
+        orderIds: item.orderIds || [],
+        trmUsed: item.trmUsed || null,
+      }));
+    }
+    return [];
+  });
 
   // Toggle for hiding admin data (sensitive provider cost/profit)
   const [hideAdminData, setHideAdminData] = useState(false);

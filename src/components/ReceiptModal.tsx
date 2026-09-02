@@ -4,7 +4,7 @@
  */
 
 import React, { useRef, useState, useEffect, useMemo } from "react";
-import { X, ShieldCheck, Edit3, Save, Trash2, ShieldAlert, Calendar, ChevronDown, ChevronUp, MessageSquare, Send, PhoneCall, ExternalLink, Bell, Plus, DollarSign, Layers } from "lucide-react";
+import { X, ShieldCheck, Edit3, Save, Trash2, ShieldAlert, Calendar, ChevronDown, ChevronUp, MessageSquare, Send, PhoneCall, ExternalLink, Bell, Plus, DollarSign, Layers, Download, Check } from "lucide-react";
 import { Receipt, ReceiptItem, getNormalizedStatus, getItemOrderIds, getItemOrderIdDisplay } from "../types";
 import { motion, AnimatePresence } from "motion/react";
 import { useApp } from "../context/AppContext";
@@ -108,7 +108,41 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
   const [showAdminPanel, setShowAdminPanel] = useState(false);
   
   const [isSaving, setIsSaving] = useState(false);
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [downloadSuccess, setDownloadSuccess] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const handleDownloadPNG = async () => {
+    if (!receiptRef.current || isDownloading) return;
+    setIsDownloading(true);
+    try {
+      const html2canvasModule = await import("html2canvas");
+      const html2canvas = (html2canvasModule.default || html2canvasModule) as (
+        element: HTMLElement,
+        options?: any
+      ) => Promise<HTMLCanvasElement>;
+      const canvas = await html2canvas(receiptRef.current, {
+        scale: 2,
+        useCORS: true,
+        backgroundColor: "#ffffff",
+        logging: false,
+      });
+      const link = document.createElement("a");
+      const fileName = `comprobante_${receipt.consecutive || receipt.id.slice(0, 6)}.png`;
+      link.download = fileName;
+      link.href = canvas.toDataURL("image/png");
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      setDownloadSuccess(true);
+      setTimeout(() => setDownloadSuccess(false), 2500);
+    } catch (err: any) {
+      console.error("Error generating receipt image:", err);
+      setError("No se pudo descargar la imagen directamente. Puede abrirlo en 'Pestaña' para guardarlo.");
+    } finally {
+      setIsDownloading(false);
+    }
+  };
 
   // Sync state with prop changes ONLY when opening a different receipt
   useEffect(() => {
@@ -494,6 +528,31 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                 </>
               ) : (
                 <>
+                  <button
+                    id="btn-download-receipt-png"
+                    type="button"
+                    onClick={handleDownloadPNG}
+                    disabled={isDownloading}
+                    className="flex-1 sm:flex-none flex items-center justify-center gap-1.5 text-xs font-bold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 transition px-3 py-2 rounded-xl shadow-2xs cursor-pointer touch-manipulation active:scale-95 disabled:opacity-60"
+                    title="Descargar imagen PNG del comprobante"
+                  >
+                    {isDownloading ? (
+                      <>
+                        <span className="w-3.5 h-3.5 border-2 border-emerald-600 border-t-transparent rounded-full animate-spin"></span>
+                        <span>Descargando...</span>
+                      </>
+                    ) : downloadSuccess ? (
+                      <>
+                        <Check className="w-3.5 h-3.5 text-emerald-600" />
+                        <span>¡Descargado!</span>
+                      </>
+                    ) : (
+                      <>
+                        <Download className="w-3.5 h-3.5 text-emerald-700" />
+                        <span>Descargar</span>
+                      </>
+                    )}
+                  </button>
                   <button
                     id="btn-open-receipt-new-tab"
                     type="button"

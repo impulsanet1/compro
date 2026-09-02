@@ -12,20 +12,21 @@ import { HistoryView } from "./components/HistoryView";
 import { ClientsView } from "./components/ClientsView";
 import { ConfigView } from "./components/ConfigView";
 import { SupplierWarrantyView } from "./components/SupplierWarrantyView";
+import { QuoteCalculatorView } from "./components/QuoteCalculatorView";
 import { ReceiptModal } from "./components/ReceiptModal";
 import { ErrorBoundary } from "./components/ErrorBoundary";
-import { Receipt, getSupplierWarrantyTimeStatus } from "./types";
+import { Receipt, ReceiptItem, getSupplierWarrantyTimeStatus } from "./types";
 import {
   TrendingUp,
   FileText,
   Users,
   Settings,
-  UserCheck,
-  RefreshCw,
   PlusCircle,
   ShieldAlert,
   Sun,
-  Moon
+  Moon,
+  Calculator,
+  RefreshCw
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
@@ -33,7 +34,7 @@ const Navigation: React.FC<{ activeTab: string; setActiveTab: (tab: string) => v
   activeTab,
   setActiveTab
 }) => {
-  const { user, supplierWarranties, isDarkMode, toggleDarkMode } = useApp();
+  const { supplierWarranties, isDarkMode, toggleDarkMode } = useApp();
 
   // Count overdue or pending warranties for badge
   const overdueCount = React.useMemo(() => {
@@ -46,7 +47,8 @@ const Navigation: React.FC<{ activeTab: string; setActiveTab: (tab: string) => v
 
   const navItems = [
     { id: "dashboard", label: "Dashboard", icon: TrendingUp },
-    { id: "generator", label: "Emitir Comprobante", icon: PlusCircle },
+    { id: "calculator", label: "Cotizador", icon: Calculator },
+    { id: "generator", label: "Emitir", icon: PlusCircle },
     { id: "history", label: "Historial", icon: FileText },
     { id: "warranties", label: "Garantías", icon: ShieldAlert, badge: overdueCount > 0 ? overdueCount : undefined },
     { id: "clients", label: "Clientes", icon: Users },
@@ -54,22 +56,22 @@ const Navigation: React.FC<{ activeTab: string; setActiveTab: (tab: string) => v
   ];
 
   return (
-    <header className={`border-b sticky top-0 z-40 no-print transition-colors duration-200 shadow-[0_1px_2px_0_rgba(0,0,0,0.02)] ${
+    <header className={`border-b sticky top-0 z-40 no-print transition-colors duration-200 shadow-2xs ${
       isDarkMode ? "bg-slate-900/95 border-slate-800 backdrop-blur-md" : "bg-white border-gray-200"
     }`}>
-      <div className="max-w-7xl mx-auto px-4 sm:px-6">
-        <div className="flex justify-between h-16 items-center">
+      <div className="max-w-7xl mx-auto px-3 sm:px-5">
+        <div className="flex justify-between h-13 sm:h-14 items-center">
           {/* Logo and Brand */}
-          <div className="flex items-center">
-            <span className={`font-bold text-base tracking-tight ${
+          <div className="flex items-center gap-1.5 shrink-0">
+            <span className={`font-black text-sm sm:text-base tracking-tight ${
               isDarkMode ? "text-white" : "text-gray-900"
             }`}>
-              ImpulsaNet
+              Impulsa<span className="text-indigo-500">Net</span>
             </span>
           </div>
 
           {/* Core Tabs Navigation */}
-          <nav className="flex space-x-1 md:space-x-1.5">
+          <nav className="flex space-x-1 sm:space-x-1.5 overflow-x-auto py-1">
             {navItems.map((item) => {
               const Icon = item.icon;
               const isActive = activeTab === item.id;
@@ -78,7 +80,7 @@ const Navigation: React.FC<{ activeTab: string; setActiveTab: (tab: string) => v
                   key={item.id}
                   id={`nav-tab-${item.id}`}
                   onClick={() => setActiveTab(item.id)}
-                  className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-2 rounded-lg text-xs font-semibold transition relative cursor-pointer ${
+                  className={`flex items-center gap-1 sm:gap-1.5 px-2 sm:px-2.5 py-1.5 rounded-lg text-xs font-semibold transition relative cursor-pointer whitespace-nowrap touch-manipulation active:scale-95 ${
                     isActive
                       ? isDarkMode
                         ? "bg-indigo-950/90 text-indigo-300 font-bold border border-indigo-800/60 shadow-xs"
@@ -88,7 +90,7 @@ const Navigation: React.FC<{ activeTab: string; setActiveTab: (tab: string) => v
                       : "text-gray-500 hover:text-gray-900 hover:bg-gray-50"
                   }`}
                 >
-                  <Icon className="w-4 h-4 shrink-0 text-indigo-500" />
+                  <Icon className="w-3.5 h-3.5 shrink-0 text-indigo-500" />
                   <span className="hidden md:inline">{item.label}</span>
                   {item.badge !== undefined && (
                     <span className="ml-0.5 px-1.5 py-0.2 bg-red-600 text-white text-[10px] font-bold rounded-full animate-pulse">
@@ -100,41 +102,25 @@ const Navigation: React.FC<{ activeTab: string; setActiveTab: (tab: string) => v
             })}
           </nav>
 
-          {/* User Status, Day/Night Toggle & Log Out */}
-          <div className="flex items-center gap-1.5 sm:gap-2.5">
-            {/* Global Day / Night Mode Toggle */}
+          {/* Minimalist Theme Toggle Icon */}
+          <div className="flex items-center shrink-0">
             <button
               id="btn-global-theme-toggle"
               type="button"
               onClick={toggleDarkMode}
-              className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-bold transition border cursor-pointer ${
+              className={`p-2 rounded-lg text-xs font-bold transition border cursor-pointer touch-manipulation active:scale-90 ${
                 isDarkMode
                   ? "bg-slate-800 hover:bg-slate-700 border-slate-700 text-amber-300 shadow-xs"
-                  : "bg-gray-50 hover:bg-gray-100 border-gray-200 text-gray-700 shadow-2xs"
+                  : "bg-gray-50 hover:bg-gray-100 border-gray-200 text-slate-700 shadow-2xs"
               }`}
-              title={isDarkMode ? "Cambiar a Modo Día (Luz)" : "Cambiar a Modo Noche (Oscuro)"}
+              title={isDarkMode ? "Cambiar a Modo Día" : "Cambiar a Modo Noche"}
             >
               {isDarkMode ? (
-                <>
-                  <Sun className="w-3.5 h-3.5 text-amber-300" />
-                  <span className="hidden sm:inline text-[11px]">Día</span>
-                </>
+                <Sun className="w-4 h-4 text-amber-300" />
               ) : (
-                <>
-                  <Moon className="w-3.5 h-3.5 text-slate-700" />
-                  <span className="hidden sm:inline text-[11px]">Noche</span>
-                </>
+                <Moon className="w-4 h-4 text-slate-700" />
               )}
             </button>
-
-            <div className={`hidden lg:flex items-center gap-1.5 text-[11px] px-2.5 py-1.5 rounded-lg border ${
-              isDarkMode
-                ? "bg-slate-800/90 border-slate-700 text-slate-300"
-                : "bg-gray-50 text-gray-500 border-gray-150"
-            }`}>
-              <UserCheck className="w-3.5 h-3.5 text-indigo-400" />
-              <span className="truncate max-w-32 font-mono font-medium">{user?.email}</span>
-            </div>
           </div>
         </div>
       </div>
@@ -147,11 +133,18 @@ const MainLayout: React.FC = () => {
   const [activeTab, setActiveTab] = useState("dashboard");
   const [selectedReceipt, setSelectedReceipt] = useState<Receipt | null>(null);
   const [isEditModeModal, setIsEditModeModal] = useState<boolean>(false);
+  const [transferredItemsFromQuote, setTransferredItemsFromQuote] = useState<Partial<ReceiptItem>[] | undefined>(undefined);
 
   // Handler to open receipt in view or edit mode
   const handleOpenReceipt = (receipt: Receipt, editMode: boolean = false) => {
     setSelectedReceipt(receipt);
     setIsEditModeModal(editMode);
+  };
+
+  // Handler to transfer quote items to Generator
+  const handleTransferQuoteToReceipt = (items: Partial<ReceiptItem>[]) => {
+    setTransferredItemsFromQuote(items);
+    setActiveTab("generator");
   };
 
   // Sync selectedReceipt with latest data in receipts collection
@@ -179,8 +172,19 @@ const MainLayout: React.FC = () => {
     switch (activeTab) {
       case "dashboard":
         return <DashboardView onViewChange={setActiveTab} onSelectReceipt={handleOpenReceipt} />;
+      case "calculator":
+        return <QuoteCalculatorView />;
       case "generator":
-        return <GeneratorView onReceiptGenerated={(r) => handleOpenReceipt(r, false)} />;
+        return (
+          <GeneratorView
+            key={transferredItemsFromQuote ? "transferred_" + transferredItemsFromQuote.length : "normal"}
+            initialItems={transferredItemsFromQuote}
+            onReceiptGenerated={(r) => {
+              setTransferredItemsFromQuote(undefined);
+              handleOpenReceipt(r, false);
+            }}
+          />
+        );
       case "history":
         return <HistoryView onSelectReceipt={handleOpenReceipt} />;
       case "warranties":

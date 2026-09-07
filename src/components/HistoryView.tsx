@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import { useApp } from "../context/AppContext";
 import {
   Search,
@@ -16,9 +16,11 @@ import {
   MessageSquare,
   CheckCircle2,
   Check,
-  Copy
+  Copy,
+  ChevronLeft,
+  ChevronRight
 } from "lucide-react";
-import { Receipt, getNormalizedStatus, getItemOrderIds, isReceiptForClient } from "../types";
+import { Receipt, getNormalizedStatus, getItemOrderIds, buildReceiptsClientIndex } from "../types";
 
 interface HistoryViewProps {
   onSelectReceipt: (receipt: Receipt, editMode?: boolean) => void;
@@ -37,6 +39,18 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => 
   const [isUpdatingAll, setIsUpdatingAll] = useState(false);
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
   const [bulkSuccessMessage, setBulkSuccessMessage] = useState<string | null>(null);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(25);
+
+  // Fast O(N + M) index mapping receipts to clients
+  const { receiptToClient } = useMemo(() => {
+    return buildReceiptsClientIndex(clients, receipts);
+  }, [clients, receipts]);
+
+  // Reset page when filters change
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchText, selectedMonth, selectedYear, selectedStatus, selectedWarranty]);
 
   // Month Names translation helper
   const monthNames = [
@@ -203,6 +217,15 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => 
       return (b.consecutive || 0) - (a.consecutive || 0);
     });
   }, [receipts, searchText, selectedMonth, selectedYear, selectedStatus, selectedWarranty]);
+
+  // Pagination for high-volume receipt lists
+  const totalPages = Math.max(1, Math.ceil(filteredReceipts.length / pageSize));
+  const safeCurrentPage = Math.min(currentPage, totalPages);
+  const paginatedReceipts = useMemo(() => {
+    if (pageSize >= 99999) return filteredReceipts;
+    const start = (safeCurrentPage - 1) * pageSize;
+    return filteredReceipts.slice(start, start + pageSize);
+  }, [filteredReceipts, safeCurrentPage, pageSize]);
 
   // Compute WhatsApp Client Code tracking (only the last used code)
   const whatsappCodeStats = useMemo(() => {
@@ -539,8 +562,8 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => 
               <tbody className={`divide-y text-xs ${
                 isDarkMode ? "divide-slate-800" : "divide-gray-150"
               }`}>
-                {filteredReceipts.map((r) => {
-                  const clientObj = clients.find((c) => isReceiptForClient(c, r));
+                {paginatedReceipts.map((r) => {
+                  const clientObj = receiptToClient.get(r.id);
                   const clientTag = clientObj?.tag;
 
                   // Tag style class
@@ -744,6 +767,73 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => 
               </tbody>
             </table>
           </div>
+
+          {/* Pagination Footer */}
+          {filteredReceipts.length > 0 && (
+            <div className={`px-5 py-3 border-t flex flex-wrap items-center justify-between gap-3 text-xs select-none ${
+              isDarkMode ? "bg-slate-900 border-slate-800 text-slate-300" : "bg-gray-50/70 border-gray-150 text-gray-600"
+            }`}>
+              <div className="flex items-center gap-2">
+                <span>Página</span>
+                <span className="font-bold">{safeCurrentPage}</span>
+                <span>de</span>
+                <span className="font-bold">{totalPages}</span>
+                <span className={`text-[11px] ml-1 ${isDarkMode ? "text-slate-500" : "text-gray-400"}`}>
+                  (Mostrando {Math.min((safeCurrentPage - 1) * pageSize + 1, filteredReceipts.length)} - {Math.min(safeCurrentPage * pageSize, filteredReceipts.length)} de {filteredReceipts.length} comprobantes)
+                </span>
+              </div>
+
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[11px]">Por página:</span>
+                  <select
+                    value={pageSize}
+                    onChange={(e) => {
+                      setPageSize(Number(e.target.value));
+                      setCurrentPage(1);
+                    }}
+                    className={`text-xs py-1 px-2 rounded-lg border focus:outline-hidden ${
+                      isDarkMode ? "bg-slate-800 border-slate-700 text-slate-200" : "bg-white border-gray-200 text-gray-700"
+                    }`}
+                  >
+                    <option value={25}>25</option>
+                    <option value={50}>50</option>
+                    <option value={100}>100</option>
+                    <option value={99999}>Todos</option>
+                  </select>
+                </div>
+
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    disabled={safeCurrentPage <= 1}
+                    onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                    className={`p-1.5 rounded-lg border transition disabled:opacity-30 disabled:cursor-not-allowed ${
+                      isDarkMode
+                        ? "bg-slate-800 border-slate-700 hover:bg-slate-700 text-slate-200"
+                        : "bg-white border-gray-200 hover:bg-gray-100 text-gray-700"
+                    }`}
+                    title="Página anterior"
+                  >
+                    <ChevronLeft className="w-4 h-4" />
+                  </button>
+                  <button
+                    type="button"
+                    disabled={safeCurrentPage >= totalPages}
+                    onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                    className={`p-1.5 rounded-lg border transition disabled:opacity-30 disabled:cursor-not-allowed ${
+                      isDarkMode
+                        ? "bg-slate-800 border-slate-700 hover:bg-slate-700 text-slate-200"
+                        : "bg-white border-gray-200 hover:bg-gray-100 text-gray-700"
+                    }`}
+                    title="Página siguiente"
+                  >
+                    <ChevronRight className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>

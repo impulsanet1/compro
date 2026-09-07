@@ -48,6 +48,7 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
   const matchingClients = useMemo(() => {
     if (!clientSearchQuery.trim()) return [];
     const query = clientSearchQuery.trim().toLowerCase();
+    const queryClean = query.replace(/^@+/, "");
     return clients
       .map((c, idx) => ({ ...c, code: getClientCode(c, idx) }))
       .filter((c) => {
@@ -55,7 +56,10 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
           c.code.toLowerCase().includes(query) ||
           (c.clientCode && c.clientCode.toLowerCase().includes(query)) ||
           c.name.toLowerCase().includes(query) ||
-          c.phone.includes(query)
+          c.name.toLowerCase().includes(queryClean) ||
+          (c.phone && c.phone.toLowerCase().includes(query)) ||
+          (c.phone && c.phone.toLowerCase().replace(/^@+/, "").includes(queryClean)) ||
+          (c.id && c.id.toLowerCase().includes(queryClean))
         );
       })
       .slice(0, 5);

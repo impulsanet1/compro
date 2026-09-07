@@ -24,7 +24,7 @@ import {
   ShieldCheck,
   Award
 } from "lucide-react";
-import { Receipt, getNormalizedStatus } from "../types";
+import { Receipt, getNormalizedStatus, normalizeContact, getClientCode } from "../types";
 import { motion } from "motion/react";
 
 interface DashboardViewProps {
@@ -383,16 +383,16 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onViewChange, onSe
       .sort((a, b) => b.total - a.total)
       .slice(0, 5);
 
-    // Top clients in period (keyed by normalized phone if available, or clean name)
+    // Top clients in period (keyed by normalized contact if available, or clean name)
     const clientAggMap: Record<
       string,
-      { name: string; phone: string; spent: number; count: number; lastDate: string; tag?: string; id?: string }
+      { name: string; phone: string; spent: number; count: number; lastDate: string; tag?: string; id?: string; code?: string }
     > = {};
 
     inPeriodActive.forEach((r) => {
-      const cleanPhone = (r.clientPhone || "").replace(/\D/g, "");
+      const norm = normalizeContact(r.clientPhone);
       const cleanName = (r.clientName || "Cliente").trim().toLowerCase();
-      const key = cleanPhone.length >= 7 ? `phone_${cleanPhone.slice(-10)}` : `name_${cleanName}`;
+      const key = norm.key ? `${norm.type}_${norm.key}` : `name_${cleanName}`;
 
       if (!clientAggMap[key]) {
         clientAggMap[key] = {
@@ -413,15 +413,16 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onViewChange, onSe
       }
     });
 
-    // Tag and ID from registered clients list if available
-    clients.forEach((c) => {
-      const cPhone = (c.phone || "").replace(/\D/g, "");
+    // Tag, code and ID from registered clients list if available
+    clients.forEach((c, index) => {
+      const cNorm = normalizeContact(c.phone);
       const cName = (c.name || "").trim().toLowerCase();
-      const key = cPhone.length >= 7 ? `phone_${cPhone.slice(-10)}` : `name_${cName}`;
+      const key = cNorm.key ? `${cNorm.type}_${cNorm.key}` : `name_${cName}`;
 
       if (clientAggMap[key]) {
         clientAggMap[key].tag = c.tag;
         clientAggMap[key].id = c.id;
+        clientAggMap[key].code = getClientCode(c, index);
         if (!clientAggMap[key].phone && c.phone) {
           clientAggMap[key].phone = c.phone;
         }

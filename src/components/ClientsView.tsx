@@ -21,9 +21,11 @@ import {
   AlertTriangle,
   CheckCircle2,
   Clock,
-  Edit3
+  Edit3,
+  ChevronLeft,
+  ChevronRight
 } from "lucide-react";
-import { Receipt, getClientCode, getNormalizedStatus, isReceiptForClient, isWarrantyForClient } from "../types";
+import { Receipt, getClientCode, getNormalizedStatus, isWarrantyForClient, buildReceiptsClientIndex } from "../types";
 import { RepurchaseModal } from "./RepurchaseModal";
 
 interface ClientsViewProps {
@@ -39,14 +41,24 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
   const [selectedClientId, setSelectedClientId] = useState<string | null>(null);
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
   const [showRepurchaseModal, setShowRepurchaseModal] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(25);
 
-  // Search and enrich clients logic with complete warranty tracking
+  // Fast O(N + M) index mapping clients to receipts
+  const { clientToReceipts } = useMemo(() => {
+    return buildReceiptsClientIndex(clients, receipts);
+  }, [clients, receipts]);
+
+  // Reset page when search or filters change
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchText, warrantyFilter]);
+
+  // Search and enrich clients logic with fast O(1) receipt lookups
   const enrichedClients = useMemo(() => {
     return clients.map((c, index) => {
       const code = getClientCode(c, index);
-
-      // Strictly match receipts belonging ONLY to this specific client
-      const actualReceipts = receipts.filter((r) => isReceiptForClient(c, r));
+      const actualReceipts = clientToReceipts.get(c.id) || [];
       
       const sortedReceipts = [...actualReceipts].sort(
         (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()
@@ -80,7 +92,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
       const averagePurchase = actualReceipts.length > 0 ? totalSpent / actualReceipts.length : 0;
       const numServicesAcquired = actualReceipts.reduce((sum, r) => sum + (r.services?.length || 0), 0);
 
-      // Match warranties for this client strictly
+      // Match warranties for this client
       const matchedWarranties = supplierWarranties.filter((w) => isWarrantyForClient(c, w, actualReceipts));
 
       // Check active warranties (either in supplierWarranties active or receipts marked as garantia_en_proceso)
@@ -119,7 +131,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
         isPromoEligible
       };
     });
-  }, [clients, receipts, supplierWarranties]);
+  }, [clients, clientToReceipts, supplierWarranties]);
 
   // Filter clients by search query and warranty/promo eligibility filter
   const filteredClients = useMemo(() => {
@@ -133,12 +145,16 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
       if (warrantyFilter === "with_history" && c.totalWarrantiesCount === 0) return false;
 
       const search = searchText.toLowerCase().trim();
+      const searchClean = search.replace(/^@+/, "");
       return (
         search === "" ||
         c.computedCode.toLowerCase().includes(search) ||
         (c.clientCode && c.clientCode.toLowerCase().includes(search)) ||
         c.name.toLowerCase().includes(search) ||
-        c.phone.includes(search)
+        c.name.toLowerCase().includes(searchClean) ||
+        (c.phone && c.phone.toLowerCase().includes(search)) ||
+        (c.phone && c.phone.toLowerCase().replace(/^@+/, "").includes(searchClean)) ||
+        (c.id && c.id.toLowerCase().includes(searchClean))
       );
     });
 
@@ -153,6 +169,15 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
       return numB - numA;
     });
   }, [enrichedClients, searchText, warrantyFilter]);
+
+  // Pagination for clients list to handle hundreds or thousands of clients smoothly
+  const totalPages = Math.max(1, Math.ceil(filteredClients.length / pageSize));
+  const safeCurrentPage = Math.min(currentPage, totalPages);
+  const paginatedClients = useMemo(() => {
+    if (pageSize >= 9999) return filteredClients;
+    const start = (safeCurrentPage - 1) * pageSize;
+    return filteredClients.slice(start, start + pageSize);
+  }, [filteredClients, safeCurrentPage, pageSize]);
 
   // Overall warranty & promo stats for quick summary bar
   const clientsWarrantyStats = useMemo(() => {
@@ -431,7 +456,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
                 No se encontraron clientes con este filtro.
               </div>
             ) : (
-              filteredClients.map((client) => {
+              paginatedClients.map((client) => {
                 const isSelected = selectedClientId === client.id;
                 return (
                   <div
@@ -579,6 +604,71 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
               })
             )}
           </div>
+
+          {/* Pagination Footer */}
+          {filteredClients.length > 0 && (
+            <div className={`px-4 py-2.5 border-t flex items-center justify-between text-xs select-none ${
+              isDarkMode ? "bg-slate-850 border-slate-800 text-slate-300" : "bg-gray-50 border-gray-150 text-gray-600"
+            }`}>
+              <div className="flex items-center gap-1.5 text-[11px]">
+                <span>Pág.</span>
+                <span className="font-bold">{safeCurrentPage}</span>
+                <span>de</span>
+                <span className="font-bold">{totalPages}</span>
+                <span className={`text-[10px] ml-1 ${isDarkMode ? "text-slate-500" : "text-gray-400"}`}>
+                  ({filteredClients.length} clientes)
+                </span>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <select
+                  value={pageSize}
+                  onChange={(e) => {
+                    setPageSize(Number(e.target.value));
+                    setCurrentPage(1);
+                  }}
+                  className={`text-[11px] py-0.5 px-1.5 rounded border focus:outline-hidden ${
+                    isDarkMode ? "bg-slate-800 border-slate-700 text-slate-200" : "bg-white border-gray-200 text-gray-700"
+                  }`}
+                  title="Clientes por página"
+                >
+                  <option value={25}>25 / pág</option>
+                  <option value={50}>50 / pág</option>
+                  <option value={100}>100 / pág</option>
+                  <option value={99999}>Todos</option>
+                </select>
+
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    disabled={safeCurrentPage <= 1}
+                    onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                    className={`p-1 rounded border transition disabled:opacity-30 disabled:cursor-not-allowed ${
+                      isDarkMode
+                        ? "bg-slate-800 border-slate-700 hover:bg-slate-700 text-slate-200"
+                        : "bg-white border-gray-200 hover:bg-gray-100 text-gray-700"
+                    }`}
+                    title="Página anterior"
+                  >
+                    <ChevronLeft className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    disabled={safeCurrentPage >= totalPages}
+                    onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                    className={`p-1 rounded border transition disabled:opacity-30 disabled:cursor-not-allowed ${
+                      isDarkMode
+                        ? "bg-slate-800 border-slate-700 hover:bg-slate-700 text-slate-200"
+                        : "bg-white border-gray-200 hover:bg-gray-100 text-gray-700"
+                    }`}
+                    title="Página siguiente"
+                  >
+                    <ChevronRight className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Right Column: Client details and order history */}

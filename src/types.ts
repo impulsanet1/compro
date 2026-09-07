@@ -195,16 +195,113 @@ export function matchPhones(phoneA?: string | null, phoneB?: string | null): boo
   return false;
 }
 
+export type ContactType = "phone" | "handle" | "none";
+
+export interface NormalizedContact {
+  type: ContactType;
+  key: string;
+  raw: string;
+  display: string;
+}
+
+/**
+ * Normalizes contact string to distinguish between phone numbers, social media handles (e.g. @luisgimont), and empty contacts.
+ */
+export function normalizeContact(contact?: string | null): NormalizedContact {
+  if (!contact) {
+    return { type: "none", key: "no-contact", raw: "", display: "" };
+  }
+  const raw = String(contact).trim();
+  const lower = raw.toLowerCase();
+  if (
+    !raw ||
+    lower === "n/a" ||
+    lower === "ninguno" ||
+    lower === "ninguna" ||
+    lower === "no-phone" ||
+    lower === "no-contact"
+  ) {
+    return { type: "none", key: "no-contact", raw, display: "" };
+  }
+
+  // 1. Social handle: starts with @ or contains letters (e.g. @luisgimont, @LuisVillotaMejia, @BototaPickup)
+  if (raw.startsWith("@") || /[a-zA-Z]/.test(raw)) {
+    const handleClean = lower.replace(/^@+/, "").replace(/[^a-z0-9_.-]/g, "");
+    if (handleClean) {
+      return {
+        type: "handle",
+        key: `handle:${handleClean}`,
+        raw,
+        display: `@${handleClean}`,
+      };
+    }
+  }
+
+  // 2. Telephone number: extract digits
+  const digits = raw.replace(/\D/g, "");
+  if (digits.length >= 7) {
+    const last10 = digits.length >= 10 ? digits.slice(-10) : digits;
+    return {
+      type: "phone",
+      key: `phone:${last10}`,
+      raw,
+      display: raw,
+    };
+  }
+
+  if (digits.length > 0) {
+    return {
+      type: "phone",
+      key: `phone:${digits}`,
+      raw,
+      display: raw,
+    };
+  }
+
+  return { type: "none", key: "no-contact", raw, display: "" };
+}
+
+/**
+ * Checks if two contact strings refer to the exact same channel/identity.
+ */
+export function matchContacts(contactA?: string | null, contactB?: string | null): boolean {
+  if (!contactA || !contactB) return false;
+  const normA = normalizeContact(contactA);
+  const normB = normalizeContact(contactB);
+
+  if (normA.type === "none" || normB.type === "none") return false;
+  if (normA.type !== normB.type) return false;
+
+  if (normA.type === "handle") {
+    return normA.key === normB.key;
+  }
+
+  if (normA.type === "phone") {
+    return matchPhones(contactA, contactB);
+  }
+
+  return false;
+}
+
+/**
+ * Generates a stable, unique client ID from client name and contact info (phone or social handle).
+ */
+export function generateClientId(name: string, contact?: string | null): string {
+  const cleanName = (name || "").trim().toLowerCase().replace(/[^a-z0-9]/g, "-").replace(/-+/g, "-") || "cliente";
+  const norm = normalizeContact(contact);
+  const contactPart = norm.key.replace(":", "-");
+  return `${cleanName}-${contactPart}`;
+}
+
 /**
  * Checks if a receipt strictly belongs to a given client:
- * 1. If BOTH have valid phone numbers (>= 7 digits):
- *    - They match IF AND ONLY IF their phone numbers match.
- *    - If their phone numbers differ, THEY DO NOT MATCH UNDER ANY CIRCUMSTANCES.
- *      (Prevents mixing clients 0019, 0046, 0061, etc. even if they have same name or corrupted receiptIds).
- * 2. If ONE has phone and the other has a different/missing phone:
- *    - If both have partial non-empty phones that conflict: DO NOT MATCH.
- *    - If one is completely missing a phone: match ONLY if clean names match exactly and are non-generic.
- * 3. If NEITHER has phone:
+ * 1. If BOTH have contacts (phone or handle):
+ *    - If both are handles (e.g. @luisgimont vs @LuisVillotaMejia): they match ONLY if identical handle.
+ *    - If both are phones: match via matchPhones.
+ *    - If one is handle and other is phone: DO NOT MATCH.
+ * 2. If ONE has a contact and the other has none:
+ *    - Match ONLY if client explicitly lists this receipt ID or clean specific name matches.
+ * 3. If NEITHER has contact:
  *    - Match strictly by exact clean non-generic name.
  */
 export function isReceiptForClient(
@@ -213,57 +310,137 @@ export function isReceiptForClient(
 ): boolean {
   if (!client || !receipt) return false;
 
-  const clientPhone = (client.phone || "").trim();
-  const receiptPhone = (receipt.clientPhone || "").trim();
-  const clientPhoneDigits = getPhoneDigits(clientPhone);
-  const receiptPhoneDigits = getPhoneDigits(receiptPhone);
+  const clientContact = normalizeContact(client.phone);
+  const receiptContact = normalizeContact(receipt.clientPhone);
 
-  const clientHasValidPhone = clientPhoneDigits.length >= 7;
-  const receiptHasValidPhone = receiptPhoneDigits.length >= 7;
+  const clientNameClean = (client.name || "").trim().toLowerCase().replace(/^@+/, "");
+  const receiptNameClean = (receipt.clientName || "").trim().toLowerCase().replace(/^@+/, "");
 
-  // 1. Strict Phone Match Rule (Highest Priority Authority):
-  // When both parties have telephone numbers, the phone number is the definitive identity.
-  if (clientHasValidPhone && receiptHasValidPhone) {
-    return matchPhones(clientPhone, receiptPhone);
-  }
-
-  // If both have phones with digits but < 7 digits:
-  if (clientPhoneDigits.length > 0 && receiptPhoneDigits.length > 0) {
-    if (clientPhoneDigits !== receiptPhoneDigits) {
-      return false; // Conflicting phone numbers
-    }
-  }
-
-  // 2. One has phone, the other is completely empty:
-  const clientNameClean = (client.name || "").trim().toLowerCase();
-  const receiptNameClean = (receipt.clientName || "").trim().toLowerCase();
-
-  if (clientHasValidPhone !== receiptHasValidPhone) {
-    // If one has a valid 10-digit phone and the other has a different phone number:
-    if (clientPhoneDigits.length > 0 && receiptPhoneDigits.length > 0) {
-      return false;
-    }
-
-    // If names match cleanly and are not a generic placeholder
-    if (clientNameClean && receiptNameClean && clientNameClean === receiptNameClean) {
-      if (clientNameClean !== "cliente" && clientNameClean.length >= 3) {
-        // If client specifically lists this receipt ID, allow match
-        if (receipt.id && client.receiptIds && client.receiptIds.includes(receipt.id)) {
-          return true;
-        }
+  // 1. Both have contacts (handle or phone):
+  if (clientContact.type !== "none" && receiptContact.type !== "none") {
+    if (clientContact.type === receiptContact.type) {
+      if (clientContact.type === "handle") {
+        return clientContact.key === receiptContact.key;
+      }
+      if (clientContact.type === "phone") {
+        return matchPhones(client.phone, receipt.clientPhone);
       }
     }
+    // Different contact types (e.g. handle vs phone) -> do not match
     return false;
   }
 
-  // 3. Neither has a phone number:
+  // 2. Direct receipt ID list check when one party has contact and other has none:
+  if (receipt.id && client.receiptIds && client.receiptIds.includes(receipt.id)) {
+    // If both have contacts, they must not conflict
+    if (clientContact.type !== "none" && receiptContact.type !== "none") {
+      return matchContacts(client.phone, receipt.clientPhone);
+    }
+    return true;
+  }
+
+  // 3. Neither has a contact:
+  if (clientContact.type === "none" && receiptContact.type === "none") {
+    if (clientNameClean && receiptNameClean && clientNameClean === receiptNameClean) {
+      return clientNameClean !== "cliente" && clientNameClean.length >= 2;
+    }
+  }
+
+  // 4. One has contact and other does not, but specific clean names match
   if (clientNameClean && receiptNameClean && clientNameClean === receiptNameClean) {
-    if (clientNameClean !== "cliente" && clientNameClean.length >= 2) {
-      return true;
+    if (clientNameClean !== "cliente" && clientNameClean.length >= 3) {
+      if (receipt.id && client.receiptIds && client.receiptIds.includes(receipt.id)) {
+        return true;
+      }
     }
   }
 
   return false;
+}
+
+export interface ReceiptsClientIndex {
+  clientToReceipts: Map<string, Receipt[]>;
+  receiptToClient: Map<string, Client>;
+}
+
+/**
+ * Builds a fast O(N + M) index mapping:
+ * - clientId -> Receipt[]
+ * - receiptId -> Client
+ * This prevents O(N * M) nested loops across thousands of receipts and clients.
+ */
+export function buildReceiptsClientIndex(clients: Client[], receipts: Receipt[]): ReceiptsClientIndex {
+  const receiptMap = new Map<string, Receipt>();
+  receipts.forEach((r) => {
+    if (r.id) receiptMap.set(r.id, r);
+  });
+
+  const clientToReceipts = new Map<string, Receipt[]>();
+  const receiptToClient = new Map<string, Client>();
+  const assignedReceiptIds = new Set<string>();
+
+  // 1. Initial direct lookup via client.receiptIds
+  clients.forEach((c) => {
+    const list: Receipt[] = [];
+    if (c.receiptIds && Array.isArray(c.receiptIds)) {
+      c.receiptIds.forEach((rId) => {
+        const r = receiptMap.get(rId);
+        if (r && isReceiptForClient(c, r)) {
+          list.push(r);
+          receiptToClient.set(r.id, c);
+          assignedReceiptIds.add(r.id);
+        }
+      });
+    }
+    clientToReceipts.set(c.id, list);
+  });
+
+  // 2. Map remaining unassigned receipts by contact/name in O(N + M)
+  const remainingReceipts = receipts.filter((r) => !assignedReceiptIds.has(r.id));
+  if (remainingReceipts.length > 0) {
+    const handleMap = new Map<string, Client>();
+    const phoneMap = new Map<string, Client>();
+    const nameMap = new Map<string, Client>();
+
+    clients.forEach((c) => {
+      const norm = normalizeContact(c.phone);
+      if (norm.type === "handle") handleMap.set(norm.key, c);
+      else if (norm.type === "phone") phoneMap.set(norm.key, c);
+
+      const cleanName = (c.name || "").trim().toLowerCase().replace(/^@+/, "");
+      if (cleanName && cleanName !== "cliente" && cleanName.length >= 2) {
+        if (!nameMap.has(cleanName)) nameMap.set(cleanName, c);
+      }
+    });
+
+    remainingReceipts.forEach((r) => {
+      let matchedClient: Client | undefined;
+      const rNorm = normalizeContact(r.clientPhone);
+
+      if (rNorm.type === "handle") {
+        matchedClient = handleMap.get(rNorm.key);
+      } else if (rNorm.type === "phone") {
+        matchedClient = phoneMap.get(rNorm.key);
+      }
+
+      if (!matchedClient) {
+        const rCleanName = (r.clientName || "").trim().toLowerCase().replace(/^@+/, "");
+        if (rNorm.type === "none" && rCleanName && nameMap.has(rCleanName)) {
+          matchedClient = nameMap.get(rCleanName);
+        }
+      }
+
+      if (matchedClient) {
+        const cur = clientToReceipts.get(matchedClient.id) || [];
+        cur.push(r);
+        clientToReceipts.set(matchedClient.id, cur);
+        receiptToClient.set(r.id, matchedClient);
+        assignedReceiptIds.add(r.id);
+      }
+    });
+  }
+
+  return { clientToReceipts, receiptToClient };
 }
 
 /**

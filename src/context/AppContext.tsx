@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { createContext, useContext, useState, useEffect } from "react";
+import React, { createContext, useContext, useState, useEffect, useRef } from "react";
 import { User, onAuthStateChanged, signOut, sendPasswordResetEmail, signInWithEmailAndPassword, GoogleAuthProvider, signInWithPopup } from "firebase/auth";
 import {
   collection,
@@ -26,7 +26,11 @@ import {
   TrmState,
   getNormalizedStatus,
   SupplierWarrantyRecord,
-  isReceiptForClient
+  isReceiptForClient,
+  generateClientId,
+  normalizeContact,
+  matchContacts,
+  buildReceiptsClientIndex
 } from "../types";
 import { DEFAULT_BUSINESS_CONFIG, DEFAULT_SOCIAL_NETWORKS, DEFAULT_SERVICES } from "../defaultData";
 
@@ -119,6 +123,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [receipts, setReceipts] = useState<Receipt[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
   const [supplierWarranties, setSupplierWarranties] = useState<SupplierWarrantyRecord[]>([]);
+
+  // Guards to prevent runaway loops under large client/receipt volume
+  const isSyncingRef = useRef(false);
+  const lastSyncFingerprintRef = useRef("");
 
   // TRM Colombia State
   const [trmState, setTrmState] = useState<TrmState>({
@@ -362,44 +370,58 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   }, [user]);
 
-  // 3. Keep client stats and unique 4-digit client IDs synced
+  // 3. Keep client stats, unique 4-digit client IDs, and auto-sync clients from receipts
   useEffect(() => {
     if (!user || loadingData || clients.length === 0) return;
 
+    // Build quick fingerprint to avoid running sync when nothing structurally changed
+    const currentFingerprint = `${clients.length}_${receipts.length}_${clients.filter((c) => !c.clientCode).length}`;
+    if (lastSyncFingerprintRef.current === currentFingerprint) {
+      return;
+    }
+
     const syncClientStats = async () => {
-      // Step 1: Map existing assigned numeric codes
-      const usedCodes = new Set<number>();
-      clients.forEach((c) => {
-        if (c.clientCode) {
-          const num = parseInt(c.clientCode, 10);
-          if (!isNaN(num) && num > 0) usedCodes.add(num);
-        }
-      });
+      if (isSyncingRef.current) return;
+      isSyncingRef.current = true;
 
-      let currentAutoId = 1;
+      try {
+        // Build fast O(N + M) index mapping clients to receipts
+        const { clientToReceipts } = buildReceiptsClientIndex(clients, receipts);
 
-      // Sort clients deterministically for consistent code assignment if missing
-      const sortedClients = [...clients].sort((a, b) => {
-        const dateA = a.lastPurchaseDate ? new Date(a.lastPurchaseDate).getTime() : 0;
-        const dateB = b.lastPurchaseDate ? new Date(b.lastPurchaseDate).getTime() : 0;
-        return dateA - dateB;
-      });
-
-      for (const client of sortedClients) {
-        const updatePayload: Record<string, any> = {};
-
-        if (!client.clientCode) {
-          while (usedCodes.has(currentAutoId)) {
-            currentAutoId++;
+        // Map existing assigned numeric codes
+        const usedCodes = new Set<number>();
+        clients.forEach((c) => {
+          if (c.clientCode) {
+            const num = parseInt(c.clientCode, 10);
+            if (!isNaN(num) && num > 0) usedCodes.add(num);
           }
-          const assignedCode = String(currentAutoId).padStart(4, "0");
-          usedCodes.add(currentAutoId);
-          updatePayload.clientCode = assignedCode;
-        }
+        });
 
-        if (receipts.length > 0) {
-          const matchingReceipts = receipts.filter((r) => isReceiptForClient(client, r));
+        let currentAutoId = 1;
 
+        // Sort clients deterministically for consistent code assignment if missing
+        const sortedClients = [...clients].sort((a, b) => {
+          const dateA = a.lastPurchaseDate ? new Date(a.lastPurchaseDate).getTime() : 0;
+          const dateB = b.lastPurchaseDate ? new Date(b.lastPurchaseDate).getTime() : 0;
+          return dateA - dateB;
+        });
+
+        // Check which clients genuinely need document updates
+        const updatesQueue: Array<{ id: string; payload: Record<string, any> }> = [];
+
+        for (const client of sortedClients) {
+          const updatePayload: Record<string, any> = {};
+
+          if (!client.clientCode) {
+            while (usedCodes.has(currentAutoId)) {
+              currentAutoId++;
+            }
+            const assignedCode = String(currentAutoId).padStart(4, "0");
+            usedCodes.add(currentAutoId);
+            updatePayload.clientCode = assignedCode;
+          }
+
+          const matchingReceipts = clientToReceipts.get(client.id) || [];
           if (matchingReceipts.length > 0) {
             const actualCount = matchingReceipts.length;
             const actualSpent = matchingReceipts.reduce((sum, r) => sum + (r.totalCharged || 0), 0);
@@ -409,7 +431,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             const actualLastDate = sortedRecs[0].date;
 
             if (client.purchaseCount !== actualCount) updatePayload.purchaseCount = actualCount;
-            if (client.totalSpent !== actualSpent) updatePayload.totalSpent = actualSpent;
+            if (Math.abs((client.totalSpent || 0) - actualSpent) > 0.01) updatePayload.totalSpent = actualSpent;
             if (client.lastPurchaseDate !== actualLastDate) updatePayload.lastPurchaseDate = actualLastDate;
 
             const actualReceiptIds = matchingReceipts.map((r) => r.id).filter(Boolean);
@@ -421,24 +443,87 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               updatePayload.receiptIds = actualReceiptIds;
             }
           }
-        }
 
-        if (Object.keys(updatePayload).length > 0) {
-          try {
-            await updateDoc(doc(db, "clients", client.id), updatePayload);
-          } catch (e) {
-            console.error("Failed to sync client doc:", e);
+          if (Object.keys(updatePayload).length > 0) {
+            updatesQueue.push({ id: client.id, payload: updatePayload });
           }
         }
+
+        // Apply any needed client doc updates in small controlled batches
+        for (const item of updatesQueue.slice(0, 10)) {
+          try {
+            await updateDoc(doc(db, "clients", item.id), item.payload);
+          } catch (e) {
+            console.warn("Failed to sync client doc:", e);
+          }
+        }
+
+        // Step 2: Discover receipts not belonging to any known client
+        if (receipts.length > 0) {
+          const allAssignedReceiptIds = new Set<string>();
+          clientToReceipts.forEach((list) => {
+            list.forEach((r) => allAssignedReceiptIds.add(r.id));
+          });
+
+          const unmappedReceipts = receipts.filter((r) => !allAssignedReceiptIds.has(r.id));
+
+          if (unmappedReceipts.length > 0) {
+            const groupedByClient = new Map<string, Receipt[]>();
+            unmappedReceipts.forEach((r) => {
+              const cId = generateClientId(r.clientName, r.clientPhone);
+              if (!groupedByClient.has(cId)) groupedByClient.set(cId, []);
+              groupedByClient.get(cId)!.push(r);
+            });
+
+            for (const [cId, recList] of groupedByClient.entries()) {
+              // Ensure we do not overwrite an existing client
+              if (clients.some((c) => c.id === cId)) continue;
+
+              while (usedCodes.has(currentAutoId)) {
+                currentAutoId++;
+              }
+              const assignedCode = String(currentAutoId).padStart(4, "0");
+              usedCodes.add(currentAutoId);
+
+              const sample = recList[0];
+              const sortedRecs = [...recList].sort(
+                (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()
+              );
+              const totalSpent = recList.reduce((sum, r) => sum + (r.totalCharged || 0), 0);
+
+              const newClientDoc: Client = {
+                id: cId,
+                clientCode: assignedCode,
+                name: sample.clientName.trim(),
+                phone: sample.clientPhone.trim(),
+                purchaseCount: recList.length,
+                totalSpent,
+                lastPurchaseDate: sortedRecs[0].date,
+                receiptIds: recList.map((r) => r.id),
+                createdAt: sortedRecs[sortedRecs.length - 1].date,
+              };
+
+              try {
+                await setDoc(doc(db, "clients", cId), cleanForFirestore(newClientDoc));
+              } catch (err) {
+                console.warn("Failed to auto-create client for unmapped receipts:", err);
+              }
+            }
+          }
+        }
+
+        lastSyncFingerprintRef.current = currentFingerprint;
+      } finally {
+        isSyncingRef.current = false;
       }
     };
 
     const timeoutId = setTimeout(() => {
       syncClientStats();
-    }, 2000);
+    }, 1200);
 
     return () => clearTimeout(timeoutId);
-  }, [user, loadingData, receipts, clients]);
+  }, [user, loadingData, receipts.length, clients.length]);
 
   // Auth Operations
   const login = async (email: string, password: string) => {
@@ -570,9 +655,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const receiptId = docRef.id;
 
     // Update or Create Client
-    // Normalize client name + phone to find unique identifier
-    const normalizedPhone = (receiptData.clientPhone || "").trim().replace(/\D/g, "");
-    const clientId = `${receiptData.clientName.trim().toLowerCase().replace(/\s+/g, "-")}-${normalizedPhone || "no-phone"}`;
+    // Generate stable unique client ID based on name + contact (phone or handle)
+    const clientId = generateClientId(receiptData.clientName, receiptData.clientPhone);
     const clientRef = doc(db, "clients", clientId);
     const clientSnap = await getDoc(clientRef);
 
@@ -634,8 +718,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const receiptData = receiptSnap.data() as Receipt;
 
     // 2. Generate the client ID
-    const normalizedPhone = (receiptData.clientPhone || "").trim().replace(/\D/g, "");
-    const clientId = `${receiptData.clientName.trim().toLowerCase().replace(/\s+/g, "-")}-${normalizedPhone || "no-phone"}`;
+    const clientId = generateClientId(receiptData.clientName, receiptData.clientPhone);
     const clientRef = doc(db, "clients", clientId);
     const clientSnap = await getDoc(clientRef);
 
@@ -697,11 +780,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const newPhone = updatedData.clientPhone !== undefined ? updatedData.clientPhone : oldPhone;
     const newTotalCharged = updatedData.totalCharged !== undefined ? updatedData.totalCharged : oldTotalCharged;
 
-    const oldNormalizedPhone = oldPhone.trim().replace(/\D/g, "");
-    const oldClientId = `${oldName.trim().toLowerCase().replace(/\s+/g, "-")}-${oldNormalizedPhone || "no-phone"}`;
-
-    const newNormalizedPhone = newPhone.trim().replace(/\D/g, "");
-    const newClientId = `${newName.trim().toLowerCase().replace(/\s+/g, "-")}-${newNormalizedPhone || "no-phone"}`;
+    const oldClientId = generateClientId(oldName, oldPhone);
+    const newClientId = generateClientId(newName, newPhone);
 
     if (oldClientId === newClientId) {
       // Client did not change, but maybe totalCharged did!
@@ -754,16 +834,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           receiptIds: [...(newClientData.receiptIds || []).filter((rId) => rId !== id), id]
         });
       } else {
+        const existingCodes = clients
+          .map((c) => parseInt(c.clientCode || "0", 10))
+          .filter((n) => !isNaN(n) && n > 0);
+        const maxCode = existingCodes.length > 0 ? Math.max(...existingCodes) : 0;
+        const newCode = String(maxCode + 1).padStart(4, "0");
+
         const newClient: Client = {
           id: newClientId,
+          clientCode: newCode,
           name: newName.trim(),
           phone: newPhone.trim(),
           purchaseCount: 1,
           totalSpent: newTotalCharged,
           lastPurchaseDate: finalDate,
-          receiptIds: [id]
+          receiptIds: [id],
+          createdAt: finalDate,
         };
-        await setDoc(newClientRef, newClient);
+        await setDoc(newClientRef, cleanForFirestore(newClient));
       }
     }
   };

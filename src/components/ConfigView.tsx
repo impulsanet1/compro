@@ -28,7 +28,10 @@ import {
   Sparkles,
   X,
   DollarSign,
-  RefreshCw
+  RefreshCw,
+  CreditCard,
+  Smartphone,
+  Globe
 } from "lucide-react";
 import { BusinessConfig, SocialNetwork, Service, getServiceBaseCosts, calculateServicePrices } from "../types";
 import { motion, AnimatePresence } from "motion/react";
@@ -331,6 +334,14 @@ export const ConfigView: React.FC = () => {
         return <AtSign className={className} />;
       case "Video":
         return <Video className={className} />;
+      case "CreditCard":
+        return <CreditCard className={className} />;
+      case "Smartphone":
+        return <Smartphone className={className} />;
+      case "Globe":
+        return <Globe className={className} />;
+      case "Sparkles":
+        return <Sparkles className={className} />;
       default:
         return <Share2 className={className} />;
     }
@@ -580,7 +591,7 @@ export const ConfigView: React.FC = () => {
                   isDarkMode ? "text-slate-400" : "text-gray-400"
                 }`}>
                   <Share2 className="w-4 h-4 text-indigo-400" />
-                  Redes Sociales de Venta
+                  Redes Sociales y Categorías de Venta
                 </h3>
                 <button
                   onClick={() => {
@@ -592,7 +603,7 @@ export const ConfigView: React.FC = () => {
                   className="text-xs font-semibold text-indigo-400 hover:text-indigo-300 flex items-center gap-1 cursor-pointer"
                 >
                   <Plus className="w-3.5 h-3.5" />
-                  Agregar Red
+                  Agregar Red o Categoría
                 </button>
               </div>
 
@@ -608,18 +619,18 @@ export const ConfigView: React.FC = () => {
                     }`}
                   >
                     <h4 className={`text-xs font-bold ${isDarkMode ? "text-slate-200" : "text-gray-700"}`}>
-                      {editingSnId ? "Editar Red Social" : "Nueva Red Social"}
+                      {editingSnId ? "Editar Red o Categoría" : "Nueva Red o Categoría"}
                     </h4>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
                       <div>
                         <label className={`block text-[10px] font-semibold uppercase ${isDarkMode ? "text-slate-400" : "text-gray-500"}`}>
-                          Nombre
+                          Nombre (Ej. Tarjetas Digitales, Instagram)
                         </label>
                         <input
                           type="text"
                           value={snNameInput}
                           onChange={(e) => setSnNameInput(e.target.value)}
-                          placeholder="Ej. Instagram"
+                          placeholder="Ej. Tarjetas Digitales"
                           className={`mt-1 block w-full px-3 py-1.5 border rounded-lg transition focus:outline-hidden focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 ${
                             isDarkMode
                               ? "bg-slate-900 border-slate-700 text-white placeholder-slate-500"
@@ -647,6 +658,10 @@ export const ConfigView: React.FC = () => {
                           <option value="Send">Telegram</option>
                           <option value="AtSign">Threads</option>
                           <option value="Video">TikTok</option>
+                          <option value="CreditCard">💳 Tarjeta Digital (NFC/Virtual)</option>
+                          <option value="Globe">🌐 Web / Dominio</option>
+                          <option value="Smartphone">📱 App / Móvil</option>
+                          <option value="Sparkles">✨ Servicios Especiales</option>
                         </select>
                       </div>
                     </div>

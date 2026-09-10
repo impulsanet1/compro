@@ -754,3 +754,77 @@ export function getSupplierWarrantyTimeStatus(record: SupplierWarrantyRecord): {
   };
 }
 
+/**
+ * Prefix determination for custom/differentiated services
+ * (Tarjetas Digitales, Alertas Digitales, Diseño, Web, etc.)
+ * Completely distinct from standard SMM follower order IDs.
+ */
+export function getCustomServicePrefix(category: string = "", serviceName: string = ""): string {
+  const text = `${category} ${serviceName}`.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  
+  if (text.includes("alerta") || text.includes("notificacion")) {
+    return "ALRT"; // Alertas Digitales
+  }
+  if (text.includes("tarjeta") || text.includes("card") || text.includes("nfc") || text.includes("perfil")) {
+    return "TDIG"; // Tarjetas Digitales
+  }
+  if (text.includes("diseno") || text.includes("logo") || text.includes("banner") || text.includes("flyer")) {
+    return "DSGN"; // Diseño Gráfico
+  }
+  if (text.includes("web") || text.includes("dominio") || text.includes("hosting") || text.includes("landing")) {
+    return "WEB"; // Páginas Web
+  }
+  if (text.includes("app") || text.includes("software") || text.includes("bot")) {
+    return "SOFT"; // Software / App
+  }
+  if (text.includes("servicio digital") || text.includes("digital")) {
+    return "SDIG"; // Servicios Digitales
+  }
+  return "ESP"; // Servicios Especiales / Otros
+}
+
+/**
+ * Generates an automatic, unique, differentiated code for custom services.
+ * Format: PREFIX-XXXXX (e.g. TDIG-48201, ALRT-93821)
+ * Never overlaps or collides with SMM follower order numbers.
+ */
+export function generateCustomServiceCode(category: string = "", serviceName: string = ""): string {
+  const prefix = getCustomServicePrefix(category, serviceName);
+  const randomNum = Math.floor(10000 + Math.random() * 90000); // 5 digits
+  return `${prefix}-${randomNum}`;
+}
+
+/**
+ * Checks if a given code or item belongs to a custom/differentiated service.
+ */
+export function isCustomServiceCode(code: string = ""): boolean {
+  if (!code) return false;
+  const upper = code.trim().toUpperCase();
+  return (
+    upper.startsWith("TDIG-") ||
+    upper.startsWith("ALRT-") ||
+    upper.startsWith("DSGN-") ||
+    upper.startsWith("WEB-") ||
+    upper.startsWith("SOFT-") ||
+    upper.startsWith("SDIG-") ||
+    upper.startsWith("ESP-") ||
+    upper.startsWith("SRV-")
+  );
+}
+
+/**
+ * Returns human-readable label for the code (e.g., Cód. Tarjeta Digital, Cód. Alerta Digital, ID Pedido)
+ */
+export function getOrderIdTypeLabel(code: string = "", isCustomItem?: boolean): string {
+  if (isCustomItem || isCustomServiceCode(code)) {
+    const upper = code.trim().toUpperCase();
+    if (upper.startsWith("TDIG-")) return "Cód. Tarjeta Digital";
+    if (upper.startsWith("ALRT-")) return "Cód. Alerta Digital";
+    if (upper.startsWith("WEB-")) return "Cód. Servicio Web";
+    if (upper.startsWith("DSGN-")) return "Cód. Diseño";
+    if (upper.startsWith("SDIG-")) return "Cód. Servicio Digital";
+    return "Cód. Servicio";
+  }
+  return "ID Pedido";
+}
+

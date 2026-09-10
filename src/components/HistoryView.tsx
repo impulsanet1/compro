@@ -20,7 +20,7 @@ import {
   ChevronLeft,
   ChevronRight
 } from "lucide-react";
-import { Receipt, getNormalizedStatus, getItemOrderIds, buildReceiptsClientIndex } from "../types";
+import { Receipt, getNormalizedStatus, getItemOrderIds, buildReceiptsClientIndex, isCustomServiceCode } from "../types";
 
 interface HistoryViewProps {
   onSelectReceipt: (receipt: Receipt, editMode?: boolean) => void;
@@ -641,19 +641,26 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => 
                           {providerIds.length === 0 ? (
                             <span className={`italic text-[10px] ${isDarkMode ? "text-slate-600" : "text-gray-400"}`}>Ninguno</span>
                           ) : (
-                            providerIds.map((id, idx) => (
-                              <span
-                                key={idx}
-                                className={`font-mono font-bold text-[9px] px-1 py-0.5 rounded border truncate ${
-                                  isDarkMode
-                                    ? "bg-slate-800 text-slate-300 border-slate-700"
-                                    : "bg-slate-100 text-slate-700 border-slate-200"
-                                }`}
-                                title={id}
-                              >
-                                {id}
-                              </span>
-                            ))
+                            providerIds.map((id, idx) => {
+                              const isCustom = isCustomServiceCode(id);
+                              return (
+                                <span
+                                  key={idx}
+                                  className={`font-mono font-bold text-[9px] px-1 py-0.5 rounded border truncate ${
+                                    isCustom
+                                      ? isDarkMode
+                                        ? "bg-amber-950/60 text-amber-300 border-amber-800/80"
+                                        : "bg-amber-50 text-amber-800 border-amber-200"
+                                      : isDarkMode
+                                      ? "bg-slate-800 text-slate-300 border-slate-700"
+                                      : "bg-slate-100 text-slate-700 border-slate-200"
+                                  }`}
+                                  title={isCustom ? `Código Servicio Especial: ${id}` : `ID Pedido Proveedor: ${id}`}
+                                >
+                                  {id}
+                                </span>
+                              );
+                            })
                           )}
                         </div>
                       </td>

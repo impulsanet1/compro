@@ -24,9 +24,25 @@ import {
   Sparkles,
   Layers,
   Calculator,
-  MessageSquare
+  MessageSquare,
+  CreditCard,
+  Hash
 } from "lucide-react";
-import { ReceiptItem, Receipt, Client, getServiceBaseCosts, calculateServicePrices, getClientCode, calculateSupplierCostUSD, calculateSupplierCostCOP, getItemOrderIds } from "../types";
+import {
+  ReceiptItem,
+  Receipt,
+  Client,
+  getServiceBaseCosts,
+  calculateServicePrices,
+  getClientCode,
+  calculateSupplierCostUSD,
+  calculateSupplierCostCOP,
+  getItemOrderIds,
+  generateCustomServiceCode,
+  isCustomServiceCode,
+  getOrderIdTypeLabel,
+  getCustomServicePrefix
+} from "../types";
 import { motion } from "motion/react";
 
 interface GeneratorViewProps {
@@ -71,6 +87,16 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
     setSelectedClientObj(client);
     setClientSearchQuery("");
   };
+
+  // Entry mode: "catalog" (redes sociales predeterminadas) vs "custom" (tarjetas digitales, alertas digitales, diseño, etc.)
+  const [serviceEntryMode, setServiceEntryMode] = useState<"catalog" | "custom">("catalog");
+  const [customItemCategory, setCustomItemCategory] = useState("Tarjetas Digitales");
+  const [customItemName, setCustomItemName] = useState("");
+  const [customItemQty, setCustomItemQty] = useState("1");
+  const [customItemChargedPrice, setCustomItemChargedPrice] = useState("");
+  const [customItemProviderCost, setCustomItemProviderCost] = useState("0");
+  const [autoServiceCode, setAutoServiceCode] = useState<string>(() => generateCustomServiceCode("Tarjetas Digitales", ""));
+  const [useAutoServiceCode, setUseAutoServiceCode] = useState<boolean>(true);
 
   // Current adding item state
   const [selectedSocialId, setSelectedSocialId] = useState("");
@@ -227,6 +253,75 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
   const handleAddItem = (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+
+    // Custom Service Flow (e.g. Tarjetas Digitales, Diseño, Desarrollo, etc.)
+    if (serviceEntryMode === "custom") {
+      if (!customItemName.trim()) {
+        setError("Por favor ingrese el nombre del servicio o producto (ej. Tarjeta Digital NFC).");
+        return;
+      }
+      const qtyNum = parseFloat(customItemQty);
+      if (isNaN(qtyNum) || qtyNum <= 0) {
+        setError("Por favor ingrese una cantidad válida mayor a 0.");
+        return;
+      }
+      const chargedPrice = parseFloat(customItemChargedPrice);
+      if (isNaN(chargedPrice) || chargedPrice < 0) {
+        setError("Por favor ingrese el precio cobrado al cliente.");
+        return;
+      }
+
+      const provCostNum = parseFloat(customItemProviderCost);
+      const providerCostToSave = !isNaN(provCostNum) && provCostNum >= 0 ? provCostNum : 0;
+
+      let finalOrderIds: string[] = [];
+      const autoCode = autoServiceCode || generateCustomServiceCode(customItemCategory, customItemName);
+
+      if (useAutoServiceCode) {
+        // Automatic mode: uses the dedicated differentiated code (e.g. TDIG-48291, ALRT-29184)
+        finalOrderIds = [autoCode];
+      } else {
+        // Manual mode: if user provided something, use it; otherwise fallback to autoCode
+        const raw = customOrderId.trim();
+        if (raw) {
+          const split = raw.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+          finalOrderIds = split.length > 0 ? split : [raw];
+        } else {
+          finalOrderIds = [autoCode];
+        }
+      }
+      const primaryOrderId = finalOrderIds.join(", ");
+      const categoryName = customItemCategory.trim() || "Servicio Digital";
+
+      const newItem: ReceiptItem = {
+        id: `${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+        socialNetworkId: "custom",
+        socialNetworkName: categoryName,
+        serviceId: `custom_${Date.now()}`,
+        serviceName: customItemName.trim(),
+        quantity: Math.round(qtyNum),
+        suggestedPrice: chargedPrice,
+        chargedPrice: chargedPrice,
+        providerCostAtPurchase: providerCostToSave,
+        providerCostUSD: null,
+        providerCostCOP: providerCostToSave,
+        trmUsed: trmState.valor || undefined,
+        trmDate: trmState.fecha || undefined,
+        orderId: primaryOrderId,
+        orderIds: finalOrderIds,
+      };
+
+      setAddedItems((prev) => [...prev, newItem]);
+      setCustomItemName("");
+      setCustomItemChargedPrice("");
+      setCustomItemProviderCost("0");
+      setCustomItemQty("1");
+      setCustomOrderId("");
+      setCustomOrderId2("");
+      // Generate a fresh unique code for the next custom item
+      setAutoServiceCode(generateCustomServiceCode(customItemCategory, ""));
+      return;
+    }
 
     if (!selectedSocialId || !selectedServiceId || !selectedQtyMode) {
       setError("Por favor seleccione la Red Social, el Servicio y la Cantidad.");
@@ -742,12 +837,329 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
           <div className={`rounded-xl border p-6 shadow-[0_1px_3px_rgba(0,0,0,0.05)] ${
             isDarkMode ? "bg-slate-900/95 border-slate-800 text-slate-100" : "bg-white border-gray-200 text-gray-900"
           }`}>
-            <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider flex items-center gap-1.5 mb-4">
-              <PlusCircle className="w-4 h-4 text-indigo-500" />
-              Agregar Servicio al Borrador
-            </h3>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider flex items-center gap-1.5">
+                <PlusCircle className="w-4 h-4 text-indigo-500" />
+                Agregar Servicio al Borrador
+              </h3>
+            </div>
 
-            <form onSubmit={handleAddItem} className="space-y-4">
+            {/* Mode Switcher: Catálogo vs Servicio Personalizado / Otro */}
+            <div className={`grid grid-cols-2 p-1 rounded-xl mb-4 text-xs font-semibold ${
+              isDarkMode ? "bg-slate-800 text-slate-400" : "bg-gray-100 text-gray-600"
+            }`}>
+              <button
+                type="button"
+                onClick={() => {
+                  setServiceEntryMode("catalog");
+                  setError(null);
+                }}
+                className={`py-2 px-3 rounded-lg transition text-center cursor-pointer flex items-center justify-center gap-1.5 ${
+                  serviceEntryMode === "catalog"
+                    ? isDarkMode
+                      ? "bg-indigo-600 text-white shadow-xs font-bold"
+                      : "bg-white text-indigo-900 shadow-xs font-bold"
+                    : "hover:text-gray-900 dark:hover:text-white"
+                }`}
+              >
+                <Layers className="w-3.5 h-3.5" />
+                <span>Catálogo Redes</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setServiceEntryMode("custom");
+                  setError(null);
+                }}
+                className={`py-2 px-3 rounded-lg transition text-center cursor-pointer flex items-center justify-center gap-1.5 ${
+                  serviceEntryMode === "custom"
+                    ? isDarkMode
+                      ? "bg-indigo-600 text-white shadow-xs font-bold"
+                      : "bg-white text-indigo-900 shadow-xs font-bold"
+                    : "hover:text-gray-900 dark:hover:text-white"
+                }`}
+              >
+                <CreditCard className="w-3.5 h-3.5 text-amber-400" />
+                <span>Personalizado / Otro</span>
+              </button>
+            </div>
+
+            {serviceEntryMode === "custom" ? (
+              /* Freeform Custom / Other Service Form (Tarjetas Digitales, Diseño, etc.) */
+              <form onSubmit={handleAddItem} className="space-y-4">
+                {/* Category selector / quick pills */}
+                <div>
+                  <div className="flex justify-between items-center mb-1">
+                    <label className={`block text-[11px] font-semibold uppercase ${
+                      isDarkMode ? "text-slate-400" : "text-gray-600"
+                    }`}>
+                      Categoría / Tipo de Servicio
+                    </label>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5 mb-2">
+                    {["Tarjetas Digitales", "Alertas Digitales", "Diseño Gráfico", "Servicios Digitales", "Páginas Web", "Otro"].map((cat) => (
+                      <button
+                        key={cat}
+                        type="button"
+                        onClick={() => {
+                          setCustomItemCategory(cat);
+                          if (useAutoServiceCode) {
+                            setAutoServiceCode(generateCustomServiceCode(cat, customItemName));
+                          }
+                        }}
+                        className={`text-[11px] px-2.5 py-1 rounded-md transition cursor-pointer border font-medium ${
+                          customItemCategory === cat
+                            ? isDarkMode
+                              ? "bg-indigo-950/70 text-indigo-300 border-indigo-700"
+                              : "bg-indigo-50 text-indigo-700 border-indigo-200"
+                            : isDarkMode
+                            ? "bg-slate-800 text-slate-400 border-slate-700 hover:text-slate-200"
+                            : "bg-gray-50 text-gray-600 border-gray-200 hover:bg-gray-100"
+                        }`}
+                      >
+                        {cat}
+                      </button>
+                    ))}
+                  </div>
+                  <input
+                    type="text"
+                    required
+                    value={customItemCategory}
+                    onChange={(e) => {
+                      const newCat = e.target.value;
+                      setCustomItemCategory(newCat);
+                      if (useAutoServiceCode) {
+                        setAutoServiceCode(generateCustomServiceCode(newCat, customItemName));
+                      }
+                    }}
+                    placeholder="Ej. Tarjetas Digitales o Alertas Digitales"
+                    className={`block w-full px-3.5 py-2 border rounded-lg text-sm transition focus:outline-hidden focus:ring-2 focus:ring-indigo-500/20 ${
+                      isDarkMode
+                        ? "bg-slate-800 border-slate-700 text-white placeholder-slate-500 focus:border-indigo-400"
+                        : "bg-white border-gray-200 text-gray-800 placeholder-gray-400 focus:border-indigo-500"
+                    }`}
+                  />
+                </div>
+
+                {/* Service / Product Name */}
+                <div>
+                  <label className={`block text-[11px] font-semibold uppercase ${
+                    isDarkMode ? "text-slate-400" : "text-gray-600"
+                  }`}>
+                    Nombre del Servicio o Producto
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={customItemName}
+                    onChange={(e) => setCustomItemName(e.target.value)}
+                    placeholder="Ej. Tarjeta Digital NFC con Código QR y Perfil Web"
+                    className={`mt-1 block w-full px-3.5 py-2 border rounded-lg text-sm transition focus:outline-hidden focus:ring-2 focus:ring-indigo-500/20 ${
+                      isDarkMode
+                        ? "bg-slate-800 border-slate-700 text-white placeholder-slate-500 focus:border-indigo-400"
+                        : "bg-white border-gray-200 text-gray-800 placeholder-gray-400 focus:border-indigo-500"
+                    }`}
+                  />
+                </div>
+
+                {/* Quantity & Price Charged */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className={`block text-[11px] font-semibold uppercase ${
+                      isDarkMode ? "text-slate-400" : "text-gray-600"
+                    }`}>
+                      Cantidad
+                    </label>
+                    <input
+                      type="number"
+                      min="1"
+                      required
+                      value={customItemQty}
+                      onChange={(e) => setCustomItemQty(e.target.value)}
+                      placeholder="1"
+                      className={`mt-1 block w-full px-3.5 py-2 border rounded-lg text-sm font-medium transition focus:outline-hidden focus:ring-2 focus:ring-indigo-500/20 ${
+                        isDarkMode
+                          ? "bg-slate-800 border-slate-700 text-white focus:border-indigo-400"
+                          : "bg-white border-gray-200 text-gray-800 focus:border-indigo-500"
+                      }`}
+                    />
+                  </div>
+
+                  <div>
+                    <label className={`block text-[11px] font-semibold uppercase ${
+                      isDarkMode ? "text-slate-400" : "text-gray-600"
+                    }`}>
+                      Precio Cobrado (COP)
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      required
+                      value={customItemChargedPrice}
+                      onChange={(e) => setCustomItemChargedPrice(e.target.value)}
+                      placeholder="Ej. 65000"
+                      className={`mt-1 block w-full px-3.5 py-2 border rounded-lg text-sm font-bold transition focus:outline-hidden focus:ring-2 focus:ring-indigo-500/20 ${
+                        isDarkMode
+                          ? "bg-slate-800 border-slate-700 text-emerald-400 placeholder-slate-500 focus:border-indigo-400"
+                          : "bg-white border-gray-200 text-emerald-600 placeholder-gray-400 focus:border-indigo-500"
+                      }`}
+                    />
+                  </div>
+                </div>
+
+                {/* Provider / Supplier Cost */}
+                <div>
+                  <div className="flex justify-between items-center">
+                    <label className={`block text-[11px] font-semibold uppercase ${
+                      isDarkMode ? "text-slate-400" : "text-gray-600"
+                    }`}>
+                      Costo Inversión / Proveedor (COP)
+                    </label>
+                    <span className={`text-[10px] ${isDarkMode ? "text-slate-500" : "text-gray-400"}`}>
+                      (0 si es ganancia pura)
+                    </span>
+                  </div>
+                  <input
+                    type="number"
+                    min="0"
+                    value={customItemProviderCost}
+                    onChange={(e) => setCustomItemProviderCost(e.target.value)}
+                    placeholder="0"
+                    className={`mt-1 block w-full px-3.5 py-2 border rounded-lg text-sm font-medium transition focus:outline-hidden focus:ring-2 focus:ring-indigo-500/20 ${
+                      isDarkMode
+                        ? "bg-slate-800 border-slate-700 text-slate-200 placeholder-slate-500 focus:border-indigo-400"
+                        : "bg-white border-gray-200 text-gray-800 placeholder-gray-400 focus:border-indigo-500"
+                    }`}
+                  />
+                  {/* Real-time Profit Preview */}
+                  {parseFloat(customItemChargedPrice) > 0 && (
+                    <div className={`mt-2 p-2.5 rounded-lg border text-xs flex justify-between items-center ${
+                      isDarkMode ? "bg-emerald-950/30 border-emerald-900/50 text-emerald-300" : "bg-emerald-50 border-emerald-200 text-emerald-800"
+                    }`}>
+                      <span>Ganancia estimada:</span>
+                      <span className="font-bold font-mono">
+                        {formatCOP((parseFloat(customItemChargedPrice) || 0) - (parseFloat(customItemProviderCost) || 0))}
+                        {" "}
+                        ({Math.round((((parseFloat(customItemChargedPrice) || 0) - (parseFloat(customItemProviderCost) || 0)) / (parseFloat(customItemChargedPrice) || 1)) * 100)}% margen)
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Automatic Differentiated Service Code Section */}
+                <div className={`p-3.5 rounded-xl border transition-all ${
+                  isDarkMode ? "bg-slate-850/80 border-slate-700/80" : "bg-slate-50/80 border-slate-200"
+                }`}>
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-1.5">
+                      <Hash className={`w-3.5 h-3.5 ${isDarkMode ? "text-amber-400" : "text-amber-600"}`} />
+                      <label className={`text-[11px] font-bold uppercase tracking-wider ${
+                        isDarkMode ? "text-slate-300" : "text-gray-700"
+                      }`}>
+                        Código Automático de Servicio
+                      </label>
+                    </div>
+                    {/* Mode switcher: Auto vs Manual */}
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setUseAutoServiceCode(true);
+                          setCustomOrderId("");
+                        }}
+                        className={`text-[10px] px-2 py-0.5 rounded font-bold transition cursor-pointer ${
+                          useAutoServiceCode
+                            ? isDarkMode
+                              ? "bg-amber-400/20 text-amber-300 border border-amber-400/40 shadow-2xs"
+                              : "bg-amber-100 text-amber-800 border border-amber-300 shadow-2xs"
+                            : isDarkMode
+                            ? "text-slate-400 hover:text-slate-200"
+                            : "text-gray-400 hover:text-gray-600"
+                        }`}
+                      >
+                        Automático
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setUseAutoServiceCode(false)}
+                        className={`text-[10px] px-2 py-0.5 rounded font-bold transition cursor-pointer ${
+                          !useAutoServiceCode
+                            ? isDarkMode
+                              ? "bg-indigo-900/50 text-indigo-300 border border-indigo-700"
+                              : "bg-indigo-100 text-indigo-800 border border-indigo-200"
+                            : isDarkMode
+                            ? "text-slate-400 hover:text-slate-200"
+                            : "text-gray-400 hover:text-gray-600"
+                        }`}
+                      >
+                        Manual
+                      </button>
+                    </div>
+                  </div>
+
+                  {useAutoServiceCode ? (
+                    <div className="flex items-center gap-2">
+                      <div className={`flex-1 flex items-center justify-between px-3.5 py-2 rounded-lg border font-mono text-sm font-bold shadow-2xs ${
+                        isDarkMode
+                          ? "bg-slate-900 border-slate-700 text-amber-300"
+                          : "bg-white border-amber-200/90 text-amber-900"
+                      }`}>
+                        <span>{autoServiceCode}</span>
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded font-sans font-semibold uppercase tracking-wider ${
+                          isDarkMode ? "bg-amber-400/10 text-amber-400" : "bg-amber-50 text-amber-700 border border-amber-200/50"
+                        }`}>
+                          {getCustomServicePrefix(customItemCategory, customItemName)}
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setAutoServiceCode(generateCustomServiceCode(customItemCategory, customItemName))}
+                        title="Generar otro código"
+                        className={`p-2 rounded-lg border transition cursor-pointer flex items-center gap-1 text-xs font-semibold ${
+                          isDarkMode
+                            ? "bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-750 hover:text-white"
+                            : "bg-white border-gray-200 text-gray-700 hover:bg-gray-100"
+                        }`}
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                        <span className="text-[11px] hidden sm:inline">Nuevo</span>
+                      </button>
+                    </div>
+                  ) : (
+                    <div>
+                      <input
+                        type="text"
+                        value={customOrderId}
+                        onChange={(e) => setCustomOrderId(e.target.value)}
+                        placeholder={`Ej. ${autoServiceCode}`}
+                        className={`block w-full px-3.5 py-2 border rounded-lg text-sm font-mono transition focus:outline-hidden focus:ring-2 focus:ring-indigo-500/20 ${
+                          isDarkMode
+                            ? "bg-slate-800 border-slate-700 text-white placeholder-slate-500 focus:border-indigo-400"
+                            : "bg-white border-gray-200 text-gray-800 placeholder-gray-400 focus:border-indigo-500"
+                        }`}
+                      />
+                    </div>
+                  )}
+
+                  <p className={`text-[10px] mt-1.5 ${isDarkMode ? "text-slate-400" : "text-gray-500"}`}>
+                    {useAutoServiceCode
+                      ? `Código único automático (${getCustomServicePrefix(customItemCategory, customItemName)}-XXXXX). Exclusivo para este servicio, sin mezclarse nunca con seguidores ni redes.`
+                      : "Modo manual activo: puede escribir su propia referencia o volver a Automático."}
+                  </p>
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={!customItemName.trim() || !customItemChargedPrice || parseFloat(customItemChargedPrice) < 0}
+                  className="w-full flex justify-center items-center py-2.5 px-4 border border-transparent rounded-lg shadow-sm text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-hidden disabled:opacity-40 transition mt-2 cursor-pointer active:scale-[0.99]"
+                >
+                  <Plus className="w-4 h-4 mr-1.5" />
+                  Agregar al Comprobante
+                </button>
+              </form>
+            ) : (
+              /* Standard Catalog Form */
+              <form onSubmit={handleAddItem} className="space-y-4">
               {/* Select Social Network */}
               <div>
                 <label className={`block text-[11px] font-semibold uppercase ${
@@ -1091,6 +1503,7 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
                 Agregar al Comprobante
               </button>
             </form>
+          )}
           </div>
         </div>
 
@@ -1176,7 +1589,9 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
                         <div className="flex justify-between items-start">
                           <div>
                             <div className={`text-xs font-bold ${isDarkMode ? "text-white" : "text-gray-900"}`}>
-                              {item.socialNetworkName} - {item.serviceName}
+                              {item.socialNetworkName && item.socialNetworkName.toLowerCase() !== item.serviceName.toLowerCase()
+                                ? `${item.socialNetworkName} - ${item.serviceName}`
+                                : (item.serviceName || item.socialNetworkName)}
                             </div>
                             <div className={`text-[11px] font-mono font-bold mt-0.5 ${
                               isDarkMode ? "text-indigo-400" : "text-indigo-700"
@@ -1246,10 +1661,10 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
                           )}
 
                           <div>
-                            <label className={`block text-[9px] font-bold uppercase ${
+                            <label className={`block text-[9px] font-bold uppercase truncate ${
                               isDarkMode ? "text-slate-400" : "text-gray-400"
                             }`}>
-                              ID Pedido
+                              {getOrderIdTypeLabel(item.orderId, item.socialNetworkId === "custom")}
                             </label>
                             <input
                               type="text"

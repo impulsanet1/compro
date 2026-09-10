@@ -5,7 +5,7 @@
 
 import React, { useRef, useState, useEffect, useMemo } from "react";
 import { X, ShieldCheck, Edit3, Save, Trash2, ShieldAlert, Calendar, ChevronDown, ChevronUp, MessageSquare, Send, PhoneCall, ExternalLink, Bell, Plus, DollarSign, Layers, Download, Check } from "lucide-react";
-import { Receipt, ReceiptItem, getNormalizedStatus, getItemOrderIds, getItemOrderIdDisplay } from "../types";
+import { Receipt, ReceiptItem, getNormalizedStatus, getItemOrderIds, getItemOrderIdDisplay, getOrderIdTypeLabel, isCustomServiceCode } from "../types";
 import { motion, AnimatePresence } from "motion/react";
 import { useApp } from "../context/AppContext";
 
@@ -205,11 +205,14 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
 
     const itemsHtml = (receiptData.services || []).map((item) => {
       const orderIdsStr = getItemOrderIdDisplay(item);
+      const title = item.socialNetworkName && item.socialNetworkName.toLowerCase() !== (item.serviceName || '').toLowerCase()
+        ? `${item.socialNetworkName} - ${item.serviceName || ''}`
+        : (item.serviceName || item.socialNetworkName || 'Servicio');
       return `
         <tr>
           <td style="padding: 12px 16px; border-bottom: 1px solid #f1f5f9; font-weight: 600; color: #0f172a;">
-            ${item.socialNetworkName || ''} - ${item.serviceName || ''}
-            ${orderIdsStr ? `<div style="font-size: 12px; font-weight: 400; color: #64748b; margin-top: 3px;">ID Pedido: ${orderIdsStr}</div>` : ''}
+            ${title}
+            ${orderIdsStr ? `<div style="font-size: 12px; font-weight: 400; color: #64748b; margin-top: 3px;">${getOrderIdTypeLabel(orderIdsStr, item.socialNetworkId === 'custom')}: ${orderIdsStr}</div>` : ''}
           </td>
           <td style="padding: 12px 16px; border-bottom: 1px solid #f1f5f9; text-align: center; color: #334155; font-weight: 500;">
             ${(item.quantity || 0).toLocaleString()}
@@ -440,7 +443,12 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
     const clientFirstName = (receipt?.clientName || "Cliente").trim().split(" ")[0] || "Cliente";
     const servicesList = (receipt?.services || [])
       .filter(Boolean)
-      .map((s) => `• ${s?.socialNetworkName || 'Servicio'} ${s?.serviceName || ''} (${Number(s?.quantity || 0).toLocaleString()})`)
+      .map((s) => {
+        const title = s?.socialNetworkName && s.socialNetworkName.toLowerCase() !== (s?.serviceName || '').toLowerCase()
+          ? `${s.socialNetworkName} - ${s.serviceName}`
+          : (s?.serviceName || s?.socialNetworkName || 'Servicio');
+        return `• ${title} (${Number(s?.quantity || 0).toLocaleString()})`;
+      })
       .join("\n");
     const formattedTotal = formatCOP(totals.totalCharged);
 
@@ -945,11 +953,13 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                           <tr key={item?.id || index} className="hover:bg-gray-50/30 transition">
                             <td className="py-3.5 px-4">
                               <div className="font-medium text-gray-900">
-                                {item?.socialNetworkName || 'Servicio'} - {item?.serviceName || ''}
+                                {item?.socialNetworkName && item.socialNetworkName.toLowerCase() !== (item?.serviceName || '').toLowerCase()
+                                  ? `${item.socialNetworkName} - ${item.serviceName}`
+                                  : (item?.serviceName || item?.socialNetworkName || 'Servicio')}
                               </div>
                               {getItemOrderIds(item).length > 0 && (
                                 <div className="text-[10px] font-mono text-gray-400 mt-0.5">
-                                  ID Pedido: {getItemOrderIdDisplay(item)}
+                                  {getOrderIdTypeLabel(getItemOrderIdDisplay(item), item?.socialNetworkId === "custom")}: {getItemOrderIdDisplay(item)}
                                 </div>
                               )}
                             </td>

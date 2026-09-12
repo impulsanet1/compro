@@ -30,6 +30,7 @@ import {
   generateClientId,
   normalizeContact,
   matchContacts,
+  matchPhones,
   buildReceiptsClientIndex
 } from "../types";
 import { DEFAULT_BUSINESS_CONFIG, DEFAULT_SOCIAL_NETWORKS, DEFAULT_SERVICES } from "../defaultData";
@@ -81,11 +82,13 @@ interface AppContextType {
   deleteService: (id: string) => Promise<void>;
   
   // Receipts actions
-  createReceipt: (receiptData: Omit<Receipt, "id" | "consecutive">) => Promise<Receipt>;
+  createReceipt: (receiptData: Omit<Receipt, "id" | "consecutive"> & { clientId?: string; forceNewClient?: boolean }) => Promise<Receipt>;
   deleteReceipt: (id: string) => Promise<void>;
   updateReceipt: (id: string, updatedData: Partial<Receipt>) => Promise<void>;
   markAllInProcessAsCompleted: () => Promise<{ updatedCount: number }>;
   updateClientTag: (clientId: string, tag: string) => Promise<void>;
+  updateClient: (clientId: string, updates: Partial<Client>) => Promise<void>;
+  separateReceiptToNewClient: (receiptId: string, fromClientId?: string, newClientName?: string, newClientPhone?: string) => Promise<string>;
   
   // System Maintenance
   restoreDefaults: () => Promise<void>;
@@ -458,6 +461,37 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           }
         }
 
+        // Step 1.5: Auto-separate mistakenly merged clients
+        // If a client has multiple receipts where one is for a Tarjeta Digital / base service
+        // and another is for social media (TikTok/Instagram/etc.), separate the tarjeta receipt into its own client!
+        for (const client of clients) {
+          const clientRecs = clientToReceipts.get(client.id) || [];
+          if (clientRecs.length > 1) {
+            const tarjetaRec = clientRecs.find((r) => {
+              return (r.services || []).some((s) => {
+                const sName = (s.serviceName || "").toLowerCase();
+                const sCat = (s.customCategory || "").toLowerCase();
+                const sCode = (s.serviceCode || "").toUpperCase();
+                return sName.includes("tarjeta") || sName.includes("nfc") || sCat.includes("tarjeta") || sCode.startsWith("TDIG");
+              });
+            });
+
+            const socialRec = clientRecs.find((r) => {
+              if (tarjetaRec && r.id === tarjetaRec.id) return false;
+              return (r.services || []).some((s) => {
+                const sName = (s.serviceName || "").toLowerCase();
+                return sName.includes("tiktok") || sName.includes("instagram") || sName.includes("facebook") || sName.includes("seguidor");
+              });
+            });
+
+            if (tarjetaRec && socialRec) {
+              console.log("Auto-separating erroneously merged tarjeta order into independent client:", tarjetaRec.id);
+              await separateReceiptToNewClient(tarjetaRec.id, client.id);
+              return; // Allow the database change to trigger the next clean sync cycle
+            }
+          }
+        }
+
         // Step 2: Discover receipts not belonging to any known client
         if (receipts.length > 0) {
           const allAssignedReceiptIds = new Set<string>();
@@ -501,6 +535,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 lastPurchaseDate: sortedRecs[0].date,
                 receiptIds: recList.map((r) => r.id),
                 createdAt: sortedRecs[sortedRecs.length - 1].date,
+                tag: "Nuevo",
               };
 
               try {
@@ -632,7 +667,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   // Receipt & Client Generation
-  const createReceipt = async (receiptData: Omit<Receipt, "id" | "consecutive">) => {
+  const createReceipt = async (
+    receiptData: Omit<Receipt, "id" | "consecutive"> & { clientId?: string; forceNewClient?: boolean }
+  ) => {
     // Calculate consecutive number: safely filter out invalid/NaN consecutives in existing receipts
     const validConsecutives = receipts
       .map((r) => Number(r.consecutive))
@@ -642,11 +679,57 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       ? Math.max(...validConsecutives) + 1 
       : 1001;
 
-    // Create receipt document reference (with auto id)
+    // Find if client already exists in our client list or by exact ID / contact match
+    let targetClientId = receiptData.clientId;
+    let existingClient: Client | undefined;
+
+    if (!receiptData.forceNewClient) {
+      if (targetClientId) {
+        existingClient = clients.find((c) => c.id === targetClientId);
+      } else {
+        const normInput = normalizeContact(receiptData.clientPhone);
+        if (normInput.type !== "none") {
+          existingClient = clients.find((c) => {
+            const normC = normalizeContact(c.phone);
+            if (normC.type === normInput.type) {
+              if (normInput.type === "handle") return normC.key === normInput.key;
+              if (normInput.type === "phone") {
+                if (matchPhones(c.phone, receiptData.clientPhone)) {
+                  // Ensure name isn't completely distinct person on shared phone
+                  const cClean = (c.name || "").trim().toLowerCase();
+                  const rClean = (receiptData.clientName || "").trim().toLowerCase();
+                  if (cClean && rClean && cClean !== "cliente" && rClean !== "cliente") {
+                    const cWords = cClean.split(/\s+/).filter((w) => w.length >= 3);
+                    const rWords = rClean.split(/\s+/).filter((w) => w.length >= 3);
+                    if (cWords.length > 0 && rWords.length > 0) {
+                      return cWords.some((cw) => rWords.some((rw) => cw === rw || cw.includes(rw) || rw.includes(cw)));
+                    }
+                  }
+                  return true;
+                }
+              }
+            }
+            return false;
+          });
+        }
+      }
+    }
+
+    // Determine final clientId:
+    // If existingClient found: reuse its verified document ID
+    // If new client: force a unique ID so it never overwrites another client
+    const clientId = existingClient 
+      ? existingClient.id 
+      : generateClientId(receiptData.clientName, receiptData.clientPhone, true);
+
+    const clientRef = doc(db, "clients", clientId);
+
+    // Create receipt document reference with auto ID and linked clientId
     const receiptsRef = collection(db, "receipts");
     
-    const finalReceipt = {
+    const finalReceipt: Omit<Receipt, "id"> = {
       ...receiptData,
+      clientId,
       consecutive: nextConsecutive
     };
 
@@ -654,15 +737,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const docRef = await addDoc(receiptsRef, sanitizedReceipt);
     const receiptId = docRef.id;
 
-    // Update or Create Client
-    // Generate stable unique client ID based on name + contact (phone or handle)
-    const clientId = generateClientId(receiptData.clientName, receiptData.clientPhone);
-    const clientRef = doc(db, "clients", clientId);
-    const clientSnap = await getDoc(clientRef);
-
-    if (clientSnap.exists()) {
-      const currentClient = clientSnap.data() as Client;
-      let existingCode = currentClient.clientCode;
+    if (existingClient) {
+      let existingCode = existingClient.clientCode;
       if (!existingCode) {
         const existingCodes = clients
           .map((c) => parseInt(c.clientCode || "0", 10))
@@ -672,12 +748,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
 
       await setDoc(clientRef, cleanForFirestore({
-        ...currentClient,
+        ...existingClient,
         clientCode: existingCode,
-        purchaseCount: (currentClient.purchaseCount || 0) + 1,
-        totalSpent: (currentClient.totalSpent || 0) + receiptData.totalCharged,
+        purchaseCount: (existingClient.purchaseCount || 0) + 1,
+        totalSpent: (existingClient.totalSpent || 0) + receiptData.totalCharged,
         lastPurchaseDate: receiptData.date,
-        receiptIds: [...(currentClient.receiptIds || []), receiptId]
+        receiptIds: [...(existingClient.receiptIds || []).filter((rId) => rId !== receiptId), receiptId]
       }));
     } else {
       const existingCodes = clients
@@ -696,6 +772,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         lastPurchaseDate: receiptData.date,
         receiptIds: [receiptId],
         createdAt: receiptData.date,
+        tag: "Nuevo",
       };
       await setDoc(clientRef, cleanForFirestore(newClient));
     }
@@ -704,6 +781,120 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       ...finalReceipt,
       id: receiptId
     };
+  };
+
+  /**
+   * Separates a mistakenly merged receipt into its own brand new independent client document.
+   */
+  const separateReceiptToNewClient = async (
+    receiptId: string,
+    fromClientId?: string,
+    newClientName?: string,
+    newClientPhone?: string
+  ): Promise<string> => {
+    const targetReceipt = receipts.find((r) => r.id === receiptId);
+    if (!targetReceipt) throw new Error("Recibo no encontrado");
+
+    const clientName = (newClientName || targetReceipt.clientName || "Cliente").trim();
+    const clientPhone = (newClientPhone || targetReceipt.clientPhone || "").trim();
+    const newClientId = generateClientId(clientName, clientPhone, true);
+
+    const existingCodes = clients
+      .map((c) => parseInt(c.clientCode || "0", 10))
+      .filter((n) => !isNaN(n) && n > 0);
+    const maxCode = existingCodes.length > 0 ? Math.max(...existingCodes) : 0;
+    const newCode = String(maxCode + 1).padStart(4, "0");
+
+    const newClientDoc: Client = {
+      id: newClientId,
+      clientCode: newCode,
+      name: clientName,
+      phone: clientPhone,
+      purchaseCount: 1,
+      totalSpent: targetReceipt.totalCharged || 0,
+      lastPurchaseDate: targetReceipt.date,
+      receiptIds: [targetReceipt.id],
+      createdAt: targetReceipt.date,
+      tag: "Nuevo",
+    };
+
+    await setDoc(doc(db, "clients", newClientId), cleanForFirestore(newClientDoc));
+
+    await updateDoc(doc(db, "receipts", targetReceipt.id), {
+      clientId: newClientId,
+      clientName: clientName,
+      clientPhone: clientPhone,
+    });
+
+    const prevClients = clients.filter(
+      (c) => (fromClientId && c.id === fromClientId) || (c.receiptIds && c.receiptIds.includes(receiptId))
+    );
+
+    for (const prev of prevClients) {
+      if (prev.id === newClientId) continue;
+      const remainingReceiptIds = (prev.receiptIds || []).filter((id) => id !== receiptId);
+      const remainingReceipts = receipts.filter((r) => r.id !== receiptId && remainingReceiptIds.includes(r.id));
+      const newPurchaseCount = remainingReceipts.length;
+      const newTotalSpent = remainingReceipts.reduce((sum, r) => sum + (r.totalCharged || 0), 0);
+      const sortedRecs = [...remainingReceipts].sort(
+        (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()
+      );
+      const newLastDate = sortedRecs.length > 0 ? sortedRecs[0].date : prev.lastPurchaseDate;
+
+      await updateDoc(doc(db, "clients", prev.id), cleanForFirestore({
+        receiptIds: remainingReceiptIds,
+        purchaseCount: newPurchaseCount,
+        totalSpent: newTotalSpent,
+        lastPurchaseDate: newLastDate,
+      }));
+    }
+
+    return newClientId;
+  };
+
+  const updateClient = async (clientId: string, updates: Partial<Client>) => {
+    const clientRef = doc(db, "clients", clientId);
+    await updateDoc(clientRef, cleanForFirestore(updates));
+
+    const cleanName = updates.name !== undefined ? updates.name.trim() : undefined;
+    const cleanPhone = updates.phone !== undefined ? updates.phone.trim() : undefined;
+
+    // If name or phone was updated, propagate to all associated receipts in Firestore so that HistoryView and Invoices stay 100% in sync
+    if (cleanName !== undefined || cleanPhone !== undefined) {
+      const currentClient = clients.find((c) => c.id === clientId);
+
+      // Find all receipts belonging to this client
+      const matchingReceipts = receipts.filter((r) => {
+        if (r.clientId && r.clientId === clientId) return true;
+        if (currentClient?.receiptIds && currentClient.receiptIds.includes(r.id)) return true;
+        if (currentClient && isReceiptForClient(currentClient, r)) return true;
+        return false;
+      });
+
+      if (matchingReceipts.length > 0) {
+        const updatePromises = matchingReceipts.map(async (r) => {
+          const receiptDocRef = doc(db, "receipts", r.id);
+          const patch: Partial<Receipt> = {
+            clientId: clientId,
+          };
+          if (cleanName !== undefined) {
+            patch.clientName = cleanName;
+          }
+          if (cleanPhone !== undefined) {
+            patch.clientPhone = cleanPhone;
+          }
+          await updateDoc(receiptDocRef, cleanForFirestore(patch));
+        });
+
+        // Ensure all associated receipt IDs are saved in the client's receiptIds array
+        const allReceiptIds = Array.from(
+          new Set([...(currentClient?.receiptIds || []), ...matchingReceipts.map((r) => r.id)])
+        );
+        updatePromises.push(updateDoc(clientRef, { receiptIds: allReceiptIds }));
+
+        await Promise.all(updatePromises);
+      }
+    }
   };
 
   const deleteReceipt = async (id: string) => {
@@ -717,8 +908,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
     const receiptData = receiptSnap.data() as Receipt;
 
-    // 2. Generate the client ID
-    const clientId = generateClientId(receiptData.clientName, receiptData.clientPhone);
+    // 2. Find the client document (by receipt.clientId or fallback receiptIds)
+    const matchingClient = clients.find((c) => c.id === receiptData.clientId || (c.receiptIds && c.receiptIds.includes(id)));
+    const clientId = matchingClient ? matchingClient.id : generateClientId(receiptData.clientName, receiptData.clientPhone);
     const clientRef = doc(db, "clients", clientId);
     const clientSnap = await getDoc(clientRef);
 
@@ -763,75 +955,91 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const receiptDocRef = doc(db, "receipts", id);
     const receiptSnap = await getDoc(receiptDocRef);
     if (!receiptSnap.exists()) {
-      await updateDoc(receiptDocRef, updatedData);
+      await updateDoc(receiptDocRef, cleanForFirestore(updatedData));
       return;
     }
     const oldReceipt = receiptSnap.data() as Receipt;
 
     // 2. Perform the update on the receipt
-    await updateDoc(receiptDocRef, updatedData);
+    await updateDoc(receiptDocRef, cleanForFirestore(updatedData));
 
-    // 3. Determine old and new client details
-    const oldName = oldReceipt.clientName || "";
-    const oldPhone = oldReceipt.clientPhone || "";
+    // 3. Find the client associated with this receipt
+    const linkedClient = clients.find((c) =>
+      (oldReceipt.clientId && c.id === oldReceipt.clientId) ||
+      (c.receiptIds && c.receiptIds.includes(id)) ||
+      isReceiptForClient(c, oldReceipt)
+    );
+
+    const cleanNewName = updatedData.clientName !== undefined ? updatedData.clientName.trim() : undefined;
+    const cleanNewPhone = updatedData.clientPhone !== undefined ? updatedData.clientPhone.trim() : undefined;
     const oldTotalCharged = oldReceipt.totalCharged || 0;
-
-    const newName = updatedData.clientName !== undefined ? updatedData.clientName : oldName;
-    const newPhone = updatedData.clientPhone !== undefined ? updatedData.clientPhone : oldPhone;
     const newTotalCharged = updatedData.totalCharged !== undefined ? updatedData.totalCharged : oldTotalCharged;
+    const totalDiff = newTotalCharged - oldTotalCharged;
 
-    const oldClientId = generateClientId(oldName, oldPhone);
-    const newClientId = generateClientId(newName, newPhone);
+    if (linkedClient) {
+      const clientRef = doc(db, "clients", linkedClient.id);
+      const clientPatch: Partial<Client> = {};
 
-    if (oldClientId === newClientId) {
-      // Client did not change, but maybe totalCharged did!
-      const clientRef = doc(db, "clients", oldClientId);
-      const clientSnap = await getDoc(clientRef);
-      if (clientSnap.exists()) {
-        const clientData = clientSnap.data() as Client;
-        const totalSpentDiff = newTotalCharged - oldTotalCharged;
-        await setDoc(clientRef, {
-          ...clientData,
-          totalSpent: Math.max(0, (clientData.totalSpent || 0) + totalSpentDiff),
-          lastPurchaseDate: updatedData.date || oldReceipt.date || clientData.lastPurchaseDate
-        });
+      if (cleanNewName !== undefined && cleanNewName !== "") {
+        clientPatch.name = cleanNewName;
       }
-    } else {
-      // Client changed! We need to subtract from old client and add to new client.
-      
-      // Adjust old client
-      const oldClientRef = doc(db, "clients", oldClientId);
-      const oldClientSnap = await getDoc(oldClientRef);
-      if (oldClientSnap.exists()) {
-        const oldClientData = oldClientSnap.data() as Client;
-        const updatedReceiptIds = (oldClientData.receiptIds || []).filter((rId) => rId !== id);
-        const newPurchaseCount = Math.max(0, (oldClientData.purchaseCount || 1) - 1);
-        
-        if (updatedReceiptIds.length === 0 || newPurchaseCount <= 0 || (oldClientData.purchaseCount || 1) <= 1) {
-          await deleteDoc(oldClientRef);
-        } else {
-          const newTotalSpent = Math.max(0, (oldClientData.totalSpent || 0) - oldTotalCharged);
-          await setDoc(oldClientRef, {
-            ...oldClientData,
-            purchaseCount: newPurchaseCount,
-            totalSpent: newTotalSpent,
-            receiptIds: updatedReceiptIds
-          });
+      if (cleanNewPhone !== undefined && cleanNewPhone !== "") {
+        clientPatch.phone = cleanNewPhone;
+      }
+      if (totalDiff !== 0) {
+        clientPatch.totalSpent = Math.max(0, (linkedClient.totalSpent || 0) + totalDiff);
+      }
+      if (updatedData.date || oldReceipt.date) {
+        clientPatch.lastPurchaseDate = updatedData.date || oldReceipt.date;
+      }
+      // Ensure this receipt ID is tracked in client's receiptIds
+      const clientReceiptIds = Array.from(new Set([...(linkedClient.receiptIds || []), id]));
+      clientPatch.receiptIds = clientReceiptIds;
+
+      await updateDoc(clientRef, cleanForFirestore(clientPatch));
+
+      // Also ensure receipt document explicitly stores clientId foreign key
+      await updateDoc(receiptDocRef, { clientId: linkedClient.id });
+
+      // If name or phone changed, also propagate to any other receipts of this client
+      if (cleanNewName !== undefined || cleanNewPhone !== undefined) {
+        const otherReceipts = receipts.filter(
+          (r) =>
+            r.id !== id &&
+            (r.clientId === linkedClient.id ||
+              (linkedClient.receiptIds && linkedClient.receiptIds.includes(r.id)) ||
+              isReceiptForClient(linkedClient, r))
+        );
+
+        if (otherReceipts.length > 0) {
+          await Promise.all(
+            otherReceipts.map(async (other) => {
+              const otherPatch: Partial<Receipt> = { clientId: linkedClient.id };
+              if (cleanNewName !== undefined) otherPatch.clientName = cleanNewName;
+              if (cleanNewPhone !== undefined) otherPatch.clientPhone = cleanNewPhone;
+              await updateDoc(doc(db, "receipts", other.id), cleanForFirestore(otherPatch));
+            })
+          );
         }
       }
-
-      // Add to new client
-      const newClientRef = doc(db, "clients", newClientId);
+    } else {
+      // Receipt has no matching client yet; create one and link it
+      const targetName = (cleanNewName !== undefined ? cleanNewName : oldReceipt.clientName || "").trim();
+      const targetPhone = (cleanNewPhone !== undefined ? cleanNewPhone : oldReceipt.clientPhone || "").trim();
+      const targetClientId = generateClientId(targetName, targetPhone);
+      const newClientRef = doc(db, "clients", targetClientId);
       const newClientSnap = await getDoc(newClientRef);
-      const finalDate = updatedData.date || oldReceipt.date;
+      const finalDate = updatedData.date || oldReceipt.date || new Date().toISOString();
+
       if (newClientSnap.exists()) {
-        const newClientData = newClientSnap.data() as Client;
-        await setDoc(newClientRef, {
-          ...newClientData,
-          purchaseCount: (newClientData.purchaseCount || 0) + 1,
-          totalSpent: (newClientData.totalSpent || 0) + newTotalCharged,
+        const existingData = newClientSnap.data() as Client;
+        await updateDoc(newClientRef, {
+          name: targetName,
+          phone: targetPhone,
+          totalSpent: Math.max(0, (existingData.totalSpent || 0) + newTotalCharged),
+          purchaseCount: (existingData.purchaseCount || 0) + 1,
           lastPurchaseDate: finalDate,
-          receiptIds: [...(newClientData.receiptIds || []).filter((rId) => rId !== id), id]
+          receiptIds: Array.from(new Set([...(existingData.receiptIds || []), id])),
         });
       } else {
         const existingCodes = clients
@@ -841,18 +1049,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const newCode = String(maxCode + 1).padStart(4, "0");
 
         const newClient: Client = {
-          id: newClientId,
+          id: targetClientId,
           clientCode: newCode,
-          name: newName.trim(),
-          phone: newPhone.trim(),
+          name: targetName,
+          phone: targetPhone,
           purchaseCount: 1,
           totalSpent: newTotalCharged,
           lastPurchaseDate: finalDate,
           receiptIds: [id],
           createdAt: finalDate,
+          tag: "Nuevo",
         };
         await setDoc(newClientRef, cleanForFirestore(newClient));
       }
+      await updateDoc(receiptDocRef, { clientId: targetClientId });
     }
   };
 
@@ -1068,6 +1278,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updateReceipt,
         markAllInProcessAsCompleted,
         updateClientTag,
+        updateClient,
+        separateReceiptToNewClient,
         restoreDefaults
       }}
     >

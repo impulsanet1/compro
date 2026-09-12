@@ -41,7 +41,10 @@ import {
   generateCustomServiceCode,
   isCustomServiceCode,
   getOrderIdTypeLabel,
-  getCustomServicePrefix
+  getCustomServicePrefix,
+  normalizeContact,
+  matchPhones,
+  isTarjetaDigitalService
 } from "../types";
 import { motion } from "motion/react";
 
@@ -146,6 +149,13 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
 
+  // Force new client independence toggle
+  const [forceNewClient, setForceNewClient] = useState(false);
+
+  // Warranty options: standard days from config, none (for base services like tarjetas), or custom
+  const [warrantyOption, setWarrantyOption] = useState<"standard" | "none" | "custom">("standard");
+  const [customWarrantyDays, setCustomWarrantyDays] = useState<number>(30);
+
   // Calculate WhatsApp Client Code tracking (only the last used code)
   const whatsappCodeStats = useMemo(() => {
     let maxCodeNum = 0;
@@ -158,8 +168,35 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
     });
 
     const lastCodeStr = maxCodeNum > 0 ? String(maxCodeNum).padStart(4, "0") : "0000";
-    return { lastCodeStr };
+    const nextCodeStr = String(maxCodeNum + 1).padStart(4, "0");
+    return { lastCodeStr, nextCodeStr };
   }, [clients]);
+
+  // Real-time client matching indicator
+  const detectedClient = useMemo(() => {
+    if (selectedClientObj) return selectedClientObj;
+    if (!clientName.trim() && !clientPhone.trim()) return null;
+    const normInput = normalizeContact(clientPhone);
+    return clients.find((c) => {
+      const normC = normalizeContact(c.phone);
+      if (normInput.type !== "none" && normC.type === normInput.type) {
+        if (normInput.type === "handle") return normC.key === normInput.key;
+        if (normInput.type === "phone" && matchPhones(c.phone, clientPhone)) {
+          const cClean = (c.name || "").trim().toLowerCase();
+          const rClean = clientName.trim().toLowerCase();
+          if (cClean && rClean && cClean !== "cliente" && rClean !== "cliente") {
+            const cWords = cClean.split(/\s+/).filter((w) => w.length >= 3);
+            const rWords = rClean.split(/\s+/).filter((w) => w.length >= 3);
+            if (cWords.length > 0 && rWords.length > 0) {
+              return cWords.some((cw) => rWords.some((rw) => cw === rw || cw.includes(rw) || rw.includes(cw)));
+            }
+          }
+          return true;
+        }
+      }
+      return false;
+    }) || null;
+  }, [selectedClientObj, clientName, clientPhone, clients]);
 
   // Filtered services for selected social network
   const availableServices = useMemo(() => {
@@ -226,6 +263,26 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
     setCustomQtyValue("");
     setIsOverridingCost(false);
   }, [selectedServiceId]);
+
+  // Auto-set warranty:
+  // - If only Tarjetas Digitales / NFC are in draft: auto-set to 'none' (Sin garantía).
+  // - If ANY social media service (seguidores, likes, vistas, comentarios, etc.) is in draft:
+  //   auto-set to 'standard' (30 días).
+  useEffect(() => {
+    if (addedItems.length > 0) {
+      const isOnlyCards = addedItems.every(isTarjetaDigitalService);
+      if (isOnlyCards) {
+        setWarrantyOption("none");
+      } else {
+        // If it was 'none', restore to 'standard' because this order contains social media services with warranty
+        if (warrantyOption === "none") {
+          setWarrantyOption("standard");
+        }
+      }
+    } else {
+      setWarrantyOption("standard");
+    }
+  }, [addedItems]);
 
   // Totals calculations
   const totals = useMemo(() => {
@@ -476,7 +533,23 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
         };
       });
 
+      const isOnlyCards = addedItems.length > 0 && addedItems.every(isTarjetaDigitalService);
+      let chosenWarranty: string;
+      if (warrantyOption === "custom") {
+        chosenWarranty = `${customWarrantyDays} días`;
+      } else if (warrantyOption === "none" && isOnlyCards) {
+        chosenWarranty = "Sin garantía";
+      } else {
+        chosenWarranty = `${businessConfig.warrantyDays || 30} días`;
+      }
+
+      const targetClientId = forceNewClient
+        ? undefined
+        : (selectedClientObj?.id || detectedClient?.id);
+
       const receiptData = {
+        clientId: targetClientId,
+        forceNewClient: forceNewClient,
         clientName: clientName.trim(),
         clientPhone: clientPhone.trim(),
         date: new Date().toISOString(),
@@ -490,7 +563,7 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
         providerCostCOP: totals.totalProviderCost,
         salePrice: totals.totalCharged,
         profit: totals.totalProfit,
-        warranty: `${businessConfig.warrantyDays} días`,
+        warranty: chosenWarranty,
         thankYouMessage: "¡Gracias por confiar en ImpulsaNet para potenciar sus redes!",
         status: status,
         internalNotes: internalNotes.trim(),
@@ -504,9 +577,11 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
       // Reset form entirely
       setClientName("");
       setClientPhone("");
+      setForceNewClient(false);
       setAddedItems([]);
       setStatus("completado");
       setInternalNotes("");
+      setWarrantyOption("standard");
     } catch (err: any) {
       console.error(err);
       setError(err.message || "No se pudo emitir el comprobante en Firebase.");
@@ -776,6 +851,93 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
                       : "bg-white border-gray-200 text-gray-800 placeholder-gray-400 focus:border-indigo-500"
                   }`}
                 />
+
+                {/* Live Client Status Indicator */}
+                {(clientName.trim() || clientPhone.trim()) && (
+                  <div className={`mt-2.5 p-3 rounded-xl border text-xs transition space-y-2.5 ${
+                    detectedClient && !forceNewClient
+                      ? isDarkMode
+                        ? "bg-indigo-950/40 border-indigo-800 text-indigo-200"
+                        : "bg-indigo-50/70 border-indigo-200 text-indigo-900"
+                      : isDarkMode
+                      ? "bg-emerald-950/40 border-emerald-800 text-emerald-200"
+                      : "bg-emerald-50/80 border-emerald-200 text-emerald-900"
+                  }`}>
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        {detectedClient && !forceNewClient ? (
+                          <User className="w-4 h-4 text-indigo-400 shrink-0" />
+                        ) : (
+                          <Sparkles className="w-4 h-4 text-emerald-500 shrink-0" />
+                        )}
+                        <div>
+                          <div className="font-bold flex items-center gap-1.5 flex-wrap">
+                            <span>
+                              {detectedClient && !forceNewClient
+                                ? `Cliente Encontrado: ${detectedClient.name}`
+                                : forceNewClient
+                                ? `Nuevo Cliente Independiente: ${clientName || "Nuevo Cliente"}`
+                                : "Nuevo Cliente"}
+                            </span>
+                            <span className={`text-[10px] px-1.5 py-0.2 rounded font-mono font-bold border ${
+                              detectedClient && !forceNewClient
+                                ? isDarkMode
+                                  ? "bg-indigo-900/80 border-indigo-700 text-indigo-200"
+                                  : "bg-white border-indigo-200 text-indigo-800"
+                                : isDarkMode
+                                ? "bg-emerald-900/80 border-emerald-700 text-emerald-200"
+                                : "bg-white border-emerald-200 text-emerald-800"
+                            }`}>
+                              ID: #{detectedClient && !forceNewClient ? getClientCode(detectedClient) : whatsappCodeStats.nextCodeStr}
+                            </span>
+                          </div>
+                          <div className={`text-[10px] mt-0.5 ${isDarkMode ? "text-slate-400" : "text-gray-500"}`}>
+                            {detectedClient && !forceNewClient
+                              ? "Se vinculará a este cliente existente en la base de datos."
+                              : "Se creará un nuevo perfil independiente sin compartir garantías ni historial."}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Toggle between existing client and brand-new independent client */}
+                    {detectedClient && (
+                      <div className="pt-2 border-t border-indigo-200/40 dark:border-indigo-800/40 flex flex-wrap gap-2 items-center">
+                        <button
+                          type="button"
+                          onClick={() => setForceNewClient(false)}
+                          className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition cursor-pointer flex items-center gap-1 ${
+                            !forceNewClient
+                              ? isDarkMode
+                                ? "bg-indigo-600 text-white shadow-xs"
+                                : "bg-indigo-600 text-white shadow-xs"
+                              : isDarkMode
+                              ? "bg-slate-800/80 text-slate-300 hover:bg-slate-750"
+                              : "bg-white text-gray-700 border border-gray-200 hover:bg-gray-50"
+                          }`}
+                        >
+                          <span>✓ Asignar a {detectedClient.name}</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setForceNewClient(true)}
+                          className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition cursor-pointer flex items-center gap-1 ${
+                            forceNewClient
+                              ? isDarkMode
+                                ? "bg-emerald-600 text-white shadow-xs"
+                                : "bg-emerald-600 text-white shadow-xs"
+                              : isDarkMode
+                              ? "bg-slate-800/80 text-slate-300 hover:bg-slate-750"
+                              : "bg-white text-gray-700 border border-gray-200 hover:bg-gray-50"
+                          }`}
+                        >
+                          <Sparkles className="w-3 h-3" />
+                          <span>Crear como NUEVO cliente independiente</span>
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -810,6 +972,85 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
                   <option value="garantia_en_proceso">🟡 Garantía en proceso</option>
                   <option value="cancelado">🔴 Cancelado</option>
                 </select>
+              </div>
+
+              {/* Warranty Selector */}
+              <div>
+                <div className="flex items-center justify-between">
+                  <label className={`block text-[11px] font-semibold uppercase ${
+                    isDarkMode ? "text-slate-400" : "text-gray-600"
+                  }`}>
+                    Garantía del Comprobante
+                  </label>
+                  {warrantyOption === "none" && (
+                    <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-semibold">
+                      (Servicio base sin garantía)
+                    </span>
+                  )}
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mt-1">
+                  <button
+                    type="button"
+                    onClick={() => setWarrantyOption("standard")}
+                    className={`px-3 py-2 rounded-lg border text-xs font-semibold flex items-center justify-center gap-1.5 transition cursor-pointer ${
+                      warrantyOption === "standard"
+                        ? isDarkMode
+                          ? "bg-indigo-600 border-indigo-500 text-white shadow-xs"
+                          : "bg-indigo-600 border-indigo-700 text-white shadow-xs"
+                        : isDarkMode
+                        ? "bg-slate-800/60 border-slate-700 text-slate-300 hover:bg-slate-800"
+                        : "bg-white border-gray-200 text-gray-700 hover:bg-gray-50"
+                    }`}
+                  >
+                    <span>🛡️ Estándar ({businessConfig.warrantyDays}d)</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setWarrantyOption("none")}
+                    className={`px-3 py-2 rounded-lg border text-xs font-semibold flex items-center justify-center gap-1.5 transition cursor-pointer ${
+                      warrantyOption === "none"
+                        ? isDarkMode
+                          ? "bg-slate-700 border-slate-500 text-white shadow-xs"
+                          : "bg-slate-800 border-slate-900 text-white shadow-xs"
+                        : isDarkMode
+                        ? "bg-slate-800/60 border-slate-700 text-slate-300 hover:bg-slate-800"
+                        : "bg-white border-gray-200 text-gray-700 hover:bg-gray-50"
+                    }`}
+                  >
+                    <span>🚫 Sin garantía (Tarjetas)</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setWarrantyOption("custom")}
+                    className={`px-3 py-2 rounded-lg border text-xs font-semibold flex items-center justify-center gap-1.5 transition cursor-pointer ${
+                      warrantyOption === "custom"
+                        ? isDarkMode
+                          ? "bg-indigo-600 border-indigo-500 text-white shadow-xs"
+                          : "bg-indigo-600 border-indigo-700 text-white shadow-xs"
+                        : isDarkMode
+                        ? "bg-slate-800/60 border-slate-700 text-slate-300 hover:bg-slate-800"
+                        : "bg-white border-gray-200 text-gray-700 hover:bg-gray-50"
+                    }`}
+                  >
+                    <span>⚙️ Personalizada</span>
+                  </button>
+                </div>
+                {warrantyOption === "custom" && (
+                  <div className="mt-2 flex items-center gap-2">
+                    <input
+                      type="number"
+                      value={customWarrantyDays}
+                      onChange={(e) => setCustomWarrantyDays(Math.max(1, parseInt(e.target.value) || 1))}
+                      className={`w-24 px-3 py-1.5 border rounded-lg text-xs ${
+                        isDarkMode ? "bg-slate-800 border-slate-700 text-white" : "bg-white border-gray-200 text-gray-900"
+                      }`}
+                      min={1}
+                    />
+                    <span className={`text-xs ${isDarkMode ? "text-slate-400" : "text-gray-500"}`}>
+                      días de reposición para este comprobante
+                    </span>
+                  </div>
+                )}
               </div>
 
               <div>
@@ -952,7 +1193,13 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
                     type="text"
                     required
                     value={customItemName}
-                    onChange={(e) => setCustomItemName(e.target.value)}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setCustomItemName(val);
+                      if (useAutoServiceCode) {
+                        setAutoServiceCode(generateCustomServiceCode(customItemCategory, val));
+                      }
+                    }}
                     placeholder="Ej. Tarjeta Digital NFC con Código QR y Perfil Web"
                     className={`mt-1 block w-full px-3.5 py-2 border rounded-lg text-sm transition focus:outline-hidden focus:ring-2 focus:ring-indigo-500/20 ${
                       isDarkMode

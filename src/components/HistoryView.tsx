@@ -20,14 +20,14 @@ import {
   ChevronLeft,
   ChevronRight
 } from "lucide-react";
-import { Receipt, getNormalizedStatus, getItemOrderIds, buildReceiptsClientIndex, isCustomServiceCode } from "../types";
+import { Receipt, getNormalizedStatus, getItemOrderIds, buildReceiptsClientIndex, isCustomServiceCode, resolveReceiptWarranty, getClientCode } from "../types";
 
 interface HistoryViewProps {
   onSelectReceipt: (receipt: Receipt, editMode?: boolean) => void;
 }
 
 export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => {
-  const { receipts, deleteReceipt, updateReceipt, markAllInProcessAsCompleted, clients, isDarkMode } = useApp();
+  const { receipts, deleteReceipt, updateReceipt, markAllInProcessAsCompleted, clients, isDarkMode, businessConfig } = useApp();
   const formatCOP = (val: number) => "$" + Math.round(val).toLocaleString("es-CO");
 
   const [searchText, setSearchText] = useState("");
@@ -82,10 +82,20 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => 
 
   // Helper to calculate detailed warranty info
   const getWarrantyDetails = (r: Receipt) => {
-    const daysStr = r.warranty || "30 días";
-    const daysMatch = daysStr.match(/\d+/);
-    const days = daysMatch ? parseInt(daysMatch[0], 10) : 30;
+    const resolved = resolveReceiptWarranty(r, businessConfig?.warrantyDays || 30);
     
+    if (resolved.isNoWarranty) {
+      return {
+        daysRemaining: 0,
+        expirationDate: null,
+        label: "Sin garantía",
+        badgeColor: isDarkMode ? "bg-slate-800 text-slate-400 border-slate-700" : "bg-slate-100 text-slate-500 border-slate-200",
+        iconColor: "text-slate-400",
+        status: "none" as const
+      };
+    }
+
+    const days = resolved.days;
     const purchaseDate = new Date(r.date);
     const expirationDate = new Date(purchaseDate.getTime() + days * 24 * 60 * 60 * 1000);
     const now = new Date();
@@ -97,21 +107,21 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => 
     let label = "";
     let badgeColor = "";
     let iconColor = "";
-    let status: "active" | "soon" | "expired" = "active";
+    let status: "active" | "soon" | "expired" | "none" = "active";
     
     if (daysRemaining <= 0) {
       label = "Garantía vencida";
-      badgeColor = "bg-red-50 text-red-700 border-red-150";
+      badgeColor = isDarkMode ? "bg-red-950/40 text-red-400 border-red-800/60" : "bg-red-50 text-red-700 border-red-150";
       iconColor = "text-red-500";
       status = "expired";
     } else if (daysRemaining <= 7) {
       label = `⚠️ Próxima (${daysRemaining} d)`;
-      badgeColor = "bg-amber-50 text-amber-700 border-amber-150";
+      badgeColor = isDarkMode ? "bg-amber-950/40 text-amber-400 border-amber-800/60" : "bg-amber-50 text-amber-700 border-amber-150";
       iconColor = "text-amber-500";
       status = "soon";
     } else {
       label = `🛡️ Activa (${daysRemaining} d)`;
-      badgeColor = "bg-emerald-50 text-emerald-700 border-emerald-150";
+      badgeColor = isDarkMode ? "bg-emerald-950/40 text-emerald-400 border-emerald-800/60" : "bg-emerald-50 text-emerald-700 border-emerald-150";
       iconColor = "text-emerald-500";
       status = "active";
     }
@@ -132,8 +142,17 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => 
       // 1. Search text filter (matches name, phone, consecutive, service, order id, month, or year)
       const search = searchText.toLowerCase().trim();
       if (search !== "") {
+        const clientObj = receiptToClient.get(r.id);
+        const clientCodeStr = clientObj ? getClientCode(clientObj) : "";
+        const nameToSearch = (clientObj?.name || r.clientName).toLowerCase();
+        const phoneToSearch = clientObj?.phone || r.clientPhone;
+
         // Matches basic info
         const matchesBasic =
+          nameToSearch.includes(search) ||
+          phoneToSearch.includes(search) ||
+          clientCodeStr.includes(search) ||
+          `id:${clientCodeStr}`.includes(search) ||
           r.clientName.toLowerCase().includes(search) ||
           r.clientPhone.includes(search) ||
           r.consecutive.toString().includes(search) ||
@@ -274,16 +293,18 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => 
   }, [filteredReceipts]);
 
   // Format Date for table
-  const formatDateSimple = (isoString: string) => {
+  const formatDateSimple = (isoString?: string | null) => {
+    if (!isoString) return "-";
     try {
       const d = new Date(isoString);
+      if (isNaN(d.getTime())) return "-";
       return d.toLocaleDateString("es-ES", {
         day: "2-digit",
         month: "2-digit",
         year: "numeric"
       });
     } catch {
-      return isoString;
+      return String(isoString);
     }
   };
 
@@ -565,13 +586,15 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => 
                 {paginatedReceipts.map((r) => {
                   const clientObj = receiptToClient.get(r.id);
                   const clientTag = clientObj?.tag;
+                  const displayClientName = clientObj?.name || r.clientName;
+                  const displayClientPhone = clientObj?.phone || r.clientPhone;
 
                   // Tag style class
                   let tagStyle = "";
                   if (clientTag === "VIP") tagStyle = isDarkMode ? "bg-purple-950 text-purple-300 border-purple-800" : "bg-purple-100 text-purple-800 border-purple-200";
                   else if (clientTag === "Frecuente") tagStyle = isDarkMode ? "bg-blue-950 text-blue-300 border-blue-800" : "bg-blue-100 text-blue-800 border-blue-200";
                   else if (clientTag === "Mayorista") tagStyle = isDarkMode ? "bg-emerald-950 text-emerald-300 border-emerald-800" : "bg-emerald-100 text-emerald-800 border-emerald-200";
-                  else if (clientTag === "Nuevo") tagStyle = isDarkMode ? "bg-slate-800 text-slate-300 border-slate-700" : "bg-gray-100 text-gray-700 border-gray-200";
+                  else if (clientTag === "Nuevo") tagStyle = isDarkMode ? "bg-emerald-950/80 text-emerald-300 border-emerald-700" : "bg-emerald-100 text-emerald-800 border-emerald-300";
 
                   // Warranty Details
                   const wInfo = getWarrantyDetails(r);
@@ -600,14 +623,26 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => 
                       {/* Client name and phone with tag */}
                       <td className="py-3 px-4">
                         <div className="flex flex-wrap items-center gap-1.5">
-                          <span className={`font-bold ${isDarkMode ? "text-white" : "text-gray-900"}`}>{r.clientName}</span>
+                          {clientObj && (
+                            <span
+                              className={`font-mono text-[9px] font-extrabold px-1.5 py-0.5 rounded border shrink-0 ${
+                                isDarkMode
+                                  ? "bg-indigo-950 text-indigo-300 border-indigo-800"
+                                  : "bg-indigo-50 text-indigo-700 border-indigo-200"
+                              }`}
+                              title={`ID de Cliente: ${getClientCode(clientObj)}`}
+                            >
+                              ID: {getClientCode(clientObj)}
+                            </span>
+                          )}
+                          <span className={`font-bold ${isDarkMode ? "text-white" : "text-gray-900"}`}>{displayClientName}</span>
                           {clientTag && (
                             <span className={`text-[9px] px-1.5 py-0.5 rounded-md font-extrabold border ${tagStyle}`}>
-                              {clientTag}
+                              {clientTag === "Nuevo" ? "🌱 Nuevo" : clientTag}
                             </span>
                           )}
                         </div>
-                        <div className={`text-[10px] font-mono mt-0.5 ${isDarkMode ? "text-slate-500" : "text-gray-400"}`}>{r.clientPhone}</div>
+                        <div className={`text-[10px] font-mono mt-0.5 ${isDarkMode ? "text-slate-500" : "text-gray-400"}`}>{displayClientPhone}</div>
                       </td>
 
                       {/* Status select editor */}
@@ -672,7 +707,11 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => 
                             <span>{wInfo.label}</span>
                           </span>
                           <div className={`text-[10px] font-mono ${isDarkMode ? "text-slate-500" : "text-gray-400"}`}>
-                            Vence: {wInfo.expirationDate.toLocaleDateString("es-ES", { day: "2-digit", month: "2-digit", year: "2-digit" })}
+                            {wInfo.expirationDate && !isNaN(wInfo.expirationDate.getTime()) ? (
+                              <>Vence: {wInfo.expirationDate.toLocaleDateString("es-ES", { day: "2-digit", month: "2-digit", year: "2-digit" })}</>
+                            ) : (
+                              <span>No aplica</span>
+                            )}
                           </div>
                         </div>
                       </td>

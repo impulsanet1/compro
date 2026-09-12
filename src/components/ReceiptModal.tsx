@@ -5,7 +5,7 @@
 
 import React, { useRef, useState, useEffect, useMemo } from "react";
 import { X, ShieldCheck, Edit3, Save, Trash2, ShieldAlert, Calendar, ChevronDown, ChevronUp, MessageSquare, Send, PhoneCall, ExternalLink, Bell, Plus, DollarSign, Layers, Download, Check } from "lucide-react";
-import { Receipt, ReceiptItem, getNormalizedStatus, getItemOrderIds, getItemOrderIdDisplay, getOrderIdTypeLabel, isCustomServiceCode } from "../types";
+import { Receipt, ReceiptItem, getNormalizedStatus, getItemOrderIds, getItemOrderIdDisplay, getOrderIdTypeLabel, isCustomServiceCode, resolveReceiptWarranty } from "../types";
 import { motion, AnimatePresence } from "motion/react";
 import { useApp } from "../context/AppContext";
 
@@ -45,9 +45,16 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
 
   // Dynamic Warranty Expiration helper
   const getWarrantyInfo = () => {
-    const daysStr = receipt.warranty || "30 días";
-    const daysMatch = daysStr.match(/\d+/);
-    const days = daysMatch ? parseInt(daysMatch[0], 10) : 0;
+    const resolved = resolveReceiptWarranty(receipt, 30);
+    if (resolved.isNoWarranty) {
+      return (
+        <p className="text-xs text-gray-600 mt-0.5 leading-relaxed">
+          Este servicio se entrega a conformidad <strong>sin garantía</strong>.
+        </p>
+      );
+    }
+    const days = resolved.days;
+    const daysStr = resolved.warrantyText;
     
     if (days <= 0) {
       return (
@@ -100,7 +107,7 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
   const [isEditing, setIsEditing] = useState(initialIsEditing);
   const [editedClientName, setEditedClientName] = useState(receipt.clientName || "");
   const [editedClientPhone, setEditedClientPhone] = useState(receipt.clientPhone || "");
-  const [editedWarranty, setEditedWarranty] = useState(receipt.warranty || "30 días");
+  const [editedWarranty, setEditedWarranty] = useState(resolveReceiptWarranty(receipt, 30).warrantyText);
   const [editedThankYouMessage, setEditedThankYouMessage] = useState(receipt.thankYouMessage || "");
   const [editedServices, setEditedServices] = useState<ReceiptItem[]>(receipt.services || []);
   const [editedStatus, setEditedStatus] = useState(getNormalizedStatus(receipt.status));
@@ -144,18 +151,20 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
     }
   };
 
-  // Sync state with prop changes ONLY when opening a different receipt
+  // Sync state with prop changes
   useEffect(() => {
-    setEditedClientName(receipt.clientName || "");
-    setEditedClientPhone(receipt.clientPhone || "");
-    setEditedWarranty(receipt.warranty || "30 días");
-    setEditedThankYouMessage(receipt.thankYouMessage || "¡Gracias por confiar en ImpulsaNet para potenciar sus redes!");
-    setEditedServices(receipt.services || []);
-    setEditedStatus(getNormalizedStatus(receipt.status));
-    setEditedInternalNotes(receipt.internalNotes || "");
-    setIsEditing(initialIsEditing);
-    setError(null);
-  }, [receipt.id, initialIsEditing]);
+    if (!isEditing) {
+      setEditedClientName(receipt.clientName || "");
+      setEditedClientPhone(receipt.clientPhone || "");
+      setEditedWarranty(resolveReceiptWarranty(receipt, 30).warrantyText);
+      setEditedThankYouMessage(receipt.thankYouMessage || "¡Gracias por confiar en ImpulsaNet para potenciar sus redes!");
+      setEditedServices(receipt.services || []);
+      setEditedStatus(getNormalizedStatus(receipt.status));
+      setEditedInternalNotes(receipt.internalNotes || "");
+      setIsEditing(initialIsEditing);
+      setError(null);
+    }
+  }, [receipt.id, receipt.clientName, receipt.clientPhone, receipt.warranty, receipt.thankYouMessage, receipt.services, receipt.status, receipt.internalNotes, initialIsEditing, isEditing]);
 
   // Recalculate totals in real time while editing
   const totals = useMemo(() => {
@@ -330,7 +339,7 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
 
           <div class="warranty-box">
             <span>🛡️ Garantía Activa del Servicio:</span>
-            <span>${receiptData.warranty || '30 días de garantía'}</span>
+            <span>${resolveReceiptWarranty(receiptData, 30).warrantyText}</span>
           </div>
 
           <div class="footer-note">
@@ -412,10 +421,16 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
         };
       });
 
+      const resolvedWarranty = resolveReceiptWarranty({
+        ...receipt,
+        warranty: editedWarranty.trim(),
+        services: sanitizedServices
+      }, 30);
+
       const updatedData: Partial<Receipt> = {
         clientName: editedClientName.trim(),
         clientPhone: editedClientPhone.trim(),
-        warranty: editedWarranty.trim(),
+        warranty: resolvedWarranty.warrantyText,
         thankYouMessage: editedThankYouMessage.trim(),
         services: sanitizedServices,
         subtotal: totals.subtotal,
@@ -452,11 +467,13 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
       .join("\n");
     const formattedTotal = formatCOP(totals.totalCharged);
 
+    const activeWarrantyStr = resolveReceiptWarranty(receipt, 30).warrantyText;
+
     let text = "";
     if (type === "confirm") {
-      text = `Hola ${clientFirstName}! 👋 Gracias por elegir ImpulsaNet.\n\n*Resumen de tu Pedido #${receipt?.consecutive || ''}:*\n${servicesList}\n\n*Total Pagado:* ${formattedTotal}\n*Garantía Activa:* ${receipt?.warranty || "30 días"}\n\n¡Cualquier inquietud estamos aquí para atenderte! 🚀`;
+      text = `Hola ${clientFirstName}! 👋 Gracias por elegir ImpulsaNet.\n\n*Resumen de tu Pedido #${receipt?.consecutive || ''}:*\n${servicesList}\n\n*Total Pagado:* ${formattedTotal}\n*Garantía Activa:* ${activeWarrantyStr}\n\n¡Cualquier inquietud estamos aquí para atenderte! 🚀`;
     } else if (type === "warranty") {
-      text = `Hola ${clientFirstName}! 👋 Esperamos te encuentres muy bien.\n\nTe escribimos de ImpulsaNet para recordarte que tu garantía de *${receipt?.warranty || "30 días"}* para el pedido *#${receipt?.consecutive || ''}* está próxima a vencer.\n\nSi deseas renovar este servicio o potenciar tus redes con nuevos paquetes, ¡cuéntanos por aquí y te daremos un precio especial! 🎯`;
+      text = `Hola ${clientFirstName}! 👋 Esperamos te encuentres muy bien.\n\nTe escribimos de ImpulsaNet para recordarte que tu garantía de *${activeWarrantyStr}* para el pedido *#${receipt?.consecutive || ''}* está próxima a vencer.\n\nSi deseas renovar este servicio o potenciar tus redes con nuevos paquetes, ¡cuéntanos por aquí y te daremos un precio especial! 🎯`;
     } else if (type === "followup") {
       text = `Hola ${clientFirstName}! 👋 ¿Cómo van los resultados con tus redes tras tu pedido *#${receipt?.consecutive || ''}*?\n\nEn ImpulsaNet estamos a tu disposición para ayudarte a seguir creciendo. ¡Escríbenos si necesitas un nuevo paquete o asesoría! 📲`;
     }
@@ -524,7 +541,7 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                       setIsEditing(false);
                       setEditedClientName(receipt.clientName || "");
                       setEditedClientPhone(receipt.clientPhone || "");
-                      setEditedWarranty(receipt.warranty || "30 días");
+                      setEditedWarranty(resolveReceiptWarranty(receipt, 30).warrantyText);
                       setEditedThankYouMessage(receipt.thankYouMessage || "");
                       setEditedServices(receipt.services || []);
                       setError(null);
@@ -585,7 +602,16 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                   <button
                     id="btn-edit-receipt-toggle"
                     type="button"
-                    onClick={() => setIsEditing(true)}
+                    onClick={() => {
+                      setEditedClientName(receipt.clientName || "");
+                      setEditedClientPhone(receipt.clientPhone || "");
+                      setEditedWarranty(receipt.warranty || "30 días");
+                      setEditedThankYouMessage(receipt.thankYouMessage || "¡Gracias por confiar en ImpulsaNet para potenciar sus redes!");
+                      setEditedServices(receipt.services || []);
+                      setEditedStatus(getNormalizedStatus(receipt.status));
+                      setEditedInternalNotes(receipt.internalNotes || "");
+                      setIsEditing(true);
+                    }}
                     className="flex-1 sm:flex-none flex items-center justify-center gap-1 text-xs font-bold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 transition px-2.5 py-2 rounded-xl cursor-pointer border border-indigo-200 touch-manipulation"
                     title="Editar comprobante"
                   >

@@ -24,7 +24,7 @@ import {
   ShieldCheck,
   Award
 } from "lucide-react";
-import { Receipt, getNormalizedStatus, normalizeContact, getClientCode } from "../types";
+import { Receipt, getNormalizedStatus, normalizeContact, getClientCode, resolveReceiptWarranty } from "../types";
 import { motion } from "motion/react";
 
 interface DashboardViewProps {
@@ -129,7 +129,7 @@ const MONTH_NAMES = [
 ];
 
 export const DashboardView: React.FC<DashboardViewProps> = ({ onViewChange, onSelectReceipt }) => {
-  const { receipts, clients, services, isDarkMode } = useApp();
+  const { receipts, clients, services, isDarkMode, businessConfig } = useApp();
 
   const [hideAmounts, setHideAmounts] = useState<boolean>(() => {
     try {
@@ -283,22 +283,24 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onViewChange, onSe
       else if (normStatus === "cancelado") countCancelado++;
 
       if (normStatus !== "cancelado" && r.date) {
-        const rDate = parseReceiptDate(r.date);
-        if (rDate) {
-          const daysStr = r.warranty || "30 días";
-          const daysMatch = daysStr.match(/\d+/);
-          const days = daysMatch ? parseInt(daysMatch[0], 10) : 30;
+        const resolved = resolveReceiptWarranty(r, businessConfig?.warrantyDays || 30);
+        
+        if (!resolved.isNoWarranty) {
+          const rDate = parseReceiptDate(r.date);
+          if (rDate) {
+            const days = resolved.days;
 
-          const expirationDate = new Date(rDate.getTime() + days * 24 * 60 * 60 * 1000);
-          const msRemaining = expirationDate.getTime() - now.getTime();
-          const daysRemaining = Math.ceil(msRemaining / (1000 * 60 * 60 * 24));
+            const expirationDate = new Date(rDate.getTime() + days * 24 * 60 * 60 * 1000);
+            const msRemaining = expirationDate.getTime() - now.getTime();
+            const daysRemaining = Math.ceil(msRemaining / (1000 * 60 * 60 * 24));
 
-          if (daysRemaining <= 0) {
-            countWarrantyExpired++;
-          } else if (daysRemaining <= 7) {
-            countWarrantySoon++;
-          } else {
-            countWarrantyActive++;
+            if (daysRemaining <= 0) {
+              countWarrantyExpired++;
+            } else if (daysRemaining <= 7) {
+              countWarrantySoon++;
+            } else {
+              countWarrantyActive++;
+            }
           }
         }
       }

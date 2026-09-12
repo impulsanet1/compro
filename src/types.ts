@@ -61,10 +61,13 @@ export interface ReceiptItem {
   trmDate?: string | null; // Date of the TRM used
   orderId: string; // ID del pedido
   orderIds?: string[]; // IDs multiples del pedido para soportar 2 o mas IDs
+  serviceCode?: string; // Optional code for service classification (e.g. TDIG)
+  customCategory?: string; // Optional category (e.g. Tarjeta Digital, Redes)
 }
 
 export interface Receipt {
   id: string; // Firestore document ID
+  clientId?: string; // Optional linked client document ID
   consecutive: number; // Consecutive order number
   clientName: string;
   clientPhone: string;
@@ -285,30 +288,41 @@ export function matchContacts(contactA?: string | null, contactB?: string | null
 
 /**
  * Generates a stable, unique client ID from client name and contact info (phone or social handle).
+ * If contact is missing or forceUnique is set, attaches timestamp and unique random component to avoid collisions.
  */
-export function generateClientId(name: string, contact?: string | null): string {
+export function generateClientId(name: string, contact?: string | null, forceUnique = false): string {
   const cleanName = (name || "").trim().toLowerCase().replace(/[^a-z0-9]/g, "-").replace(/-+/g, "-") || "cliente";
   const norm = normalizeContact(contact);
   const contactPart = norm.key.replace(":", "-");
+  if (forceUnique || norm.type === "none") {
+    const randomSuffix = Math.random().toString(36).substring(2, 6);
+    return `${cleanName}-${contactPart}-${Date.now().toString(36)}-${randomSuffix}`;
+  }
   return `${cleanName}-${contactPart}`;
 }
 
 /**
  * Checks if a receipt strictly belongs to a given client:
+ * 0. If receipt has explicit clientId: MUST match client.id.
  * 1. If BOTH have contacts (phone or handle):
  *    - If both are handles (e.g. @luisgimont vs @LuisVillotaMejia): they match ONLY if identical handle.
  *    - If both are phones: match via matchPhones.
  *    - If one is handle and other is phone: DO NOT MATCH.
  * 2. If ONE has a contact and the other has none:
- *    - Match ONLY if client explicitly lists this receipt ID or clean specific name matches.
+ *    - Match ONLY if client explicitly lists this receipt ID and contacts do not conflict.
  * 3. If NEITHER has contact:
- *    - Match strictly by exact clean non-generic name.
+ *    - Require full name match (at least 2 words, e.g. "Luis Gómez"). Never auto-merge single names like "Luis".
  */
 export function isReceiptForClient(
   client: Partial<Client> | { name?: string; phone?: string; receiptIds?: string[]; id?: string; clientCode?: string } | null | undefined,
   receipt: Partial<Receipt> | null | undefined
 ): boolean {
   if (!client || !receipt) return false;
+
+  // 0. Primary explicit check: If receipt has clientId, it is the authoritative foreign key
+  if (receipt.clientId && client.id) {
+    return receipt.clientId === client.id;
+  }
 
   const clientContact = normalizeContact(client.phone);
   const receiptContact = normalizeContact(receipt.clientPhone);
@@ -323,7 +337,22 @@ export function isReceiptForClient(
         return clientContact.key === receiptContact.key;
       }
       if (clientContact.type === "phone") {
-        return matchPhones(client.phone, receipt.clientPhone);
+        const phoneMatches = matchPhones(client.phone, receipt.clientPhone);
+        if (!phoneMatches) return false;
+
+        // If phone matches, verify names do not completely conflict with distinct individuals
+        // (prevents shared numbers or placeholder phones from cross-pollinating across different clients)
+        if (clientNameClean && receiptNameClean && clientNameClean !== "cliente" && receiptNameClean !== "cliente") {
+          const cWords = clientNameClean.split(/\s+/).filter((w) => w.length >= 3);
+          const rWords = receiptNameClean.split(/\s+/).filter((w) => w.length >= 3);
+          if (cWords.length > 0 && rWords.length > 0) {
+            const hasCommonWord = cWords.some((cw) => rWords.some((rw) => cw === rw || cw.includes(rw) || rw.includes(cw)));
+            if (!hasCommonWord) {
+              return false;
+            }
+          }
+        }
+        return true;
       }
     }
     // Different contact types (e.g. handle vs phone) -> do not match
@@ -342,16 +371,9 @@ export function isReceiptForClient(
   // 3. Neither has a contact:
   if (clientContact.type === "none" && receiptContact.type === "none") {
     if (clientNameClean && receiptNameClean && clientNameClean === receiptNameClean) {
-      return clientNameClean !== "cliente" && clientNameClean.length >= 2;
-    }
-  }
-
-  // 4. One has contact and other does not, but specific clean names match
-  if (clientNameClean && receiptNameClean && clientNameClean === receiptNameClean) {
-    if (clientNameClean !== "cliente" && clientNameClean.length >= 3) {
-      if (receipt.id && client.receiptIds && client.receiptIds.includes(receipt.id)) {
-        return true;
-      }
+      // Must be at least 2 distinct words to prevent generic single-name collisions like "Luis"
+      const words = clientNameClean.split(/\s+/).filter(Boolean);
+      return words.length >= 2 && clientNameClean !== "cliente";
     }
   }
 
@@ -375,27 +397,46 @@ export function buildReceiptsClientIndex(clients: Client[], receipts: Receipt[])
     if (r.id) receiptMap.set(r.id, r);
   });
 
+  const clientMap = new Map<string, Client>();
   const clientToReceipts = new Map<string, Receipt[]>();
   const receiptToClient = new Map<string, Client>();
   const assignedReceiptIds = new Set<string>();
 
-  // 1. Initial direct lookup via client.receiptIds
   clients.forEach((c) => {
-    const list: Receipt[] = [];
+    if (c.id) clientMap.set(c.id, c);
+    clientToReceipts.set(c.id, []);
+  });
+
+  // 0. Primary explicit mapping: receipt.clientId
+  receipts.forEach((r) => {
+    if (r.clientId && clientMap.has(r.clientId)) {
+      const c = clientMap.get(r.clientId)!;
+      const cur = clientToReceipts.get(c.id) || [];
+      cur.push(r);
+      clientToReceipts.set(c.id, cur);
+      receiptToClient.set(r.id, c);
+      assignedReceiptIds.add(r.id);
+    }
+  });
+
+  // 1. Initial direct lookup via client.receiptIds (for legacy receipts without receipt.clientId)
+  clients.forEach((c) => {
     if (c.receiptIds && Array.isArray(c.receiptIds)) {
       c.receiptIds.forEach((rId) => {
+        if (assignedReceiptIds.has(rId)) return; // Strictly prevent duplicate receipt assignment to multiple clients
         const r = receiptMap.get(rId);
         if (r && isReceiptForClient(c, r)) {
-          list.push(r);
+          const cur = clientToReceipts.get(c.id) || [];
+          cur.push(r);
+          clientToReceipts.set(c.id, cur);
           receiptToClient.set(r.id, c);
           assignedReceiptIds.add(r.id);
         }
       });
     }
-    clientToReceipts.set(c.id, list);
   });
 
-  // 2. Map remaining unassigned receipts by contact/name in O(N + M)
+  // 2. Map remaining unassigned receipts by verified contact in O(N + M)
   const remainingReceipts = receipts.filter((r) => !assignedReceiptIds.has(r.id));
   if (remainingReceipts.length > 0) {
     const handleMap = new Map<string, Client>();
@@ -408,7 +449,9 @@ export function buildReceiptsClientIndex(clients: Client[], receipts: Receipt[])
       else if (norm.type === "phone") phoneMap.set(norm.key, c);
 
       const cleanName = (c.name || "").trim().toLowerCase().replace(/^@+/, "");
-      if (cleanName && cleanName !== "cliente" && cleanName.length >= 2) {
+      // Only multi-word full names (e.g. "Luis Gómez") can be safely mapped in fallback
+      const words = cleanName.split(/\s+/).filter(Boolean);
+      if (words.length >= 2 && cleanName !== "cliente") {
         if (!nameMap.has(cleanName)) nameMap.set(cleanName, c);
       }
     });
@@ -425,7 +468,8 @@ export function buildReceiptsClientIndex(clients: Client[], receipts: Receipt[])
 
       if (!matchedClient) {
         const rCleanName = (r.clientName || "").trim().toLowerCase().replace(/^@+/, "");
-        if (rNorm.type === "none" && rCleanName && nameMap.has(rCleanName)) {
+        const words = rCleanName.split(/\s+/).filter(Boolean);
+        if (rNorm.type === "none" && words.length >= 2 && nameMap.has(rCleanName)) {
           matchedClient = nameMap.get(rCleanName);
         }
       }
@@ -444,7 +488,130 @@ export function buildReceiptsClientIndex(clients: Client[], receipts: Receipt[])
 }
 
 /**
- * Checks if a warranty record belongs to a given client
+ * Determines if a service item is strictly a digital card / NFC service (which does not have warranty).
+ */
+export function isTarjetaDigitalService(item: { serviceName?: string; customCategory?: string; serviceCode?: string }): boolean {
+  const name = (item.serviceName || "").toLowerCase();
+  const cat = (item.customCategory || "").toLowerCase();
+  const code = (item.serviceCode || "").toUpperCase();
+  
+  // Exclude ANY social media services
+  const isSocial = name.includes("seguidor") || name.includes("like") || name.includes("vista") || 
+                   name.includes("comentario") || name.includes("tiktok") || name.includes("instagram") || 
+                   name.includes("facebook") || name.includes("youtube") || name.includes("reproducci") || 
+                   name.includes("miembro") || name.includes("canal") || name.includes("grupo") ||
+                   name.includes("guardado") || name.includes("compartid") || name.includes("voto");
+  if (isSocial) return false;
+
+  return name.includes("tarjeta") || name.includes("nfc") || code.startsWith("TDIG") || cat.includes("tarjeta");
+}
+
+/**
+ * Checks if a receipt consists EXCLUSIVELY of digital cards / NFC services.
+ */
+export function isOnlyTarjetaDigitalReceipt(services?: Array<{ serviceName?: string; customCategory?: string; serviceCode?: string }>): boolean {
+  if (!services || services.length === 0) return false;
+  return services.every(isTarjetaDigitalService);
+}
+
+/**
+ * Centralized, authoritative warranty resolver for any receipt.
+ * Ensures social media services (Seguidores, Likes, Vistas, Comentarios, etc.)
+ * ALWAYS have the standard warranty (default 30 days), even if r.warranty was empty
+ * or mistakenly marked as 'Sin garantía'.
+ * Only orders exclusively composed of Digital Cards / NFC are treated as 'Sin garantía'.
+ */
+export function resolveReceiptWarranty(
+  receipt: Partial<Receipt> | null | undefined,
+  fallbackDays: number = 30
+): {
+  isNoWarranty: boolean;
+  warrantyText: string;
+  days: number;
+} {
+  if (!receipt) {
+    return {
+      isNoWarranty: false,
+      warrantyText: `${fallbackDays} días`,
+      days: fallbackDays,
+    };
+  }
+
+  const services = receipt.services || [];
+  const raw = (receipt.warranty || "").trim();
+  const lower = raw.toLowerCase();
+
+  // Check if order contains social media services (Seguidores, Likes, Vistas, Comentarios, etc.)
+  const hasSocialServices = services.some((s) => {
+    const name = (s.serviceName || "").toLowerCase();
+    const cat = (s.customCategory || "").toLowerCase();
+    return name.includes("seguidor") || name.includes("like") || name.includes("vista") || 
+           name.includes("comentario") || name.includes("tiktok") || name.includes("instagram") || 
+           name.includes("facebook") || name.includes("youtube") || name.includes("reproducci") ||
+           name.includes("miembro") || name.includes("canal") || name.includes("grupo") ||
+           name.includes("guardado") || name.includes("compartid") || name.includes("voto") ||
+           cat.includes("redes") || cat.includes("social");
+  });
+
+  // Check if order consists solely of Tarjetas Digitales
+  const isCardsOnly = services.length > 0 && services.every(isTarjetaDigitalService);
+
+  // If order has social media services, it ALWAYS has warranty
+  if (hasSocialServices) {
+    if (!raw || lower.includes("sin garant") || lower.includes("no aplica") || lower === "ninguna" || lower === "0 d" || lower === "0 días") {
+      return {
+        isNoWarranty: false,
+        warrantyText: `${fallbackDays} días`,
+        days: fallbackDays,
+      };
+    }
+    const daysMatch = raw.match(/\d+/);
+    const parsedDays = daysMatch ? parseInt(daysMatch[0], 10) : fallbackDays;
+    return {
+      isNoWarranty: false,
+      warrantyText: raw || `${fallbackDays} días`,
+      days: parsedDays > 0 ? parsedDays : fallbackDays,
+    };
+  }
+
+  // If order is purely cards
+  if (isCardsOnly) {
+    if (!raw || lower.includes("sin garant") || lower.includes("no aplica") || lower === "ninguna" || lower.includes("0 d")) {
+      return {
+        isNoWarranty: true,
+        warrantyText: "Sin garantía",
+        days: 0,
+      };
+    }
+  }
+
+  // If raw string explicitly indicates no warranty and has NO social media services
+  if (lower.includes("sin garant") || lower.includes("no aplica") || lower === "ninguna" || lower === "0 d" || lower === "0 días") {
+    return {
+      isNoWarranty: true,
+      warrantyText: "Sin garantía",
+      days: 0,
+    };
+  }
+
+  // Standard fallback with explicit days if present, or fallbackDays
+  const daysMatch = raw.match(/\d+/);
+  const parsedDays = daysMatch ? parseInt(daysMatch[0], 10) : fallbackDays;
+  return {
+    isNoWarranty: false,
+    warrantyText: raw || `${fallbackDays} días`,
+    days: parsedDays > 0 ? parsedDays : fallbackDays,
+  };
+}
+
+/**
+ * Checks if a warranty record belongs to a given client.
+ * Strictly checks:
+ * 1. Direct receiptId match in verified client receipts list.
+ * 2. Direct receiptConsecutive match in verified client receipts list.
+ * CRITICAL FIX: If warranty is explicitly tied to a receiptId or receiptConsecutive
+ * that does NOT belong to this client, it returns FALSE immediately.
+ * Never falls back to loose single-name matching!
  */
 export function isWarrantyForClient(
   client: Partial<Client> | { name?: string; phone?: string; receiptIds?: string[]; id?: string; clientCode?: string } | null | undefined,
@@ -453,36 +620,40 @@ export function isWarrantyForClient(
 ): boolean {
   if (!client || !warranty) return false;
 
-  // 1. Receipt ID or Consecutivo direct match from verified clientReceipts list
-  if (warranty.receiptId && clientReceipts.some((r) => r.id === warranty.receiptId)) {
-    return true;
-  }
-  if (warranty.receiptConsecutive && clientReceipts.some((r) => r.consecutive === warranty.receiptConsecutive)) {
-    return true;
-  }
-
-  const clientPhone = (client.phone || "").trim();
-  const warrantyPhone = (warranty.clientPhone || "").trim();
-  const clientPhoneDigits = getPhoneDigits(clientPhone);
-  const warrantyPhoneDigits = getPhoneDigits(warrantyPhone);
-
-  const clientHasValidPhone = clientPhoneDigits.length >= 7;
-  const warrantyHasValidPhone = warrantyPhoneDigits.length >= 7;
-
-  if (clientHasValidPhone && warrantyHasValidPhone) {
-    return matchPhones(clientPhone, warrantyPhone);
-  }
-
-  if (clientPhoneDigits.length > 0 && warrantyPhoneDigits.length > 0) {
-    if (clientPhoneDigits !== warrantyPhoneDigits) return false;
-  }
-
-  const clientNameClean = (client.name || "").trim().toLowerCase();
-  const warrantyNameClean = (warranty.clientName || "").trim().toLowerCase();
-
-  if (clientNameClean && warrantyNameClean && clientNameClean === warrantyNameClean) {
-    if (clientNameClean !== "cliente" && clientNameClean.length >= 3) {
+  // 1. Direct Receipt ID match from verified clientReceipts list or client.receiptIds
+  if (warranty.receiptId) {
+    if (clientReceipts.some((r) => r.id === warranty.receiptId)) {
       return true;
+    }
+    if (client.receiptIds && client.receiptIds.includes(warranty.receiptId)) {
+      return true;
+    }
+    // Explicitly tied to a specific receipt that does NOT belong to this client!
+    return false;
+  }
+
+  // 2. Direct Consecutivo match from verified clientReceipts list
+  if (warranty.receiptConsecutive) {
+    if (clientReceipts.some((r) => r.consecutive === warranty.receiptConsecutive)) {
+      return true;
+    }
+    // Explicitly tied to a specific consecutive that does NOT belong to this client!
+    return false;
+  }
+
+  // 3. Fallback ONLY if warranty has NO receiptId and NO receiptConsecutive:
+  // Requires matching verified phone or handle. NEVER match purely by single name!
+  const clientContact = normalizeContact(client.phone);
+  const warrantyContact = normalizeContact(warranty.clientPhone);
+
+  if (clientContact.type !== "none" && warrantyContact.type !== "none") {
+    if (clientContact.type === warrantyContact.type) {
+      if (clientContact.type === "handle") {
+        return clientContact.key === warrantyContact.key;
+      }
+      if (clientContact.type === "phone") {
+        return matchPhones(client.phone, warranty.clientPhone);
+      }
     }
   }
 
@@ -611,6 +782,8 @@ export interface SupplierWarrantyRecord {
   providerOrderIds?: string[]; // Lista de IDs individuales
   receiptId?: string; // ID del comprobante asociado (opcional)
   receiptConsecutive?: number; // Consecutivo de comprobante ej. 45
+  clientId?: string; // ID único del cliente asociado
+  clientCode?: string; // Código de 4 dígitos del cliente (ej. 0001, 0023)
   clientName: string; // Nombre del cliente
   clientPhone?: string;
   serviceName: string; // Servicio ej. "Instagram - Seguidores"

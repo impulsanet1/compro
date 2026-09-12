@@ -3,16 +3,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useCallback } from "react";
 import { useApp } from "../context/AppContext";
 import {
   SupplierWarrantyRecord,
   getSupplierWarrantyTimeStatus,
   Receipt,
+  Client,
   getNormalizedStatus,
   getItemOrderIds,
   getLocalDatetimeInputValue,
-  parseLocalDatetimeInput
+  parseLocalDatetimeInput,
+  buildReceiptsClientIndex,
+  getClientCode,
+  matchContacts
 } from "../types";
 import {
   ShieldAlert,
@@ -31,7 +35,8 @@ import {
   X,
   Zap,
   CheckSquare,
-  Square
+  Square,
+  Users
 } from "lucide-react";
 
 interface SupplierWarrantyViewProps {
@@ -93,6 +98,7 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
   const {
     supplierWarranties,
     receipts,
+    clients,
     businessConfig,
     addSupplierWarranty,
     updateSupplierWarranty,
@@ -101,6 +107,50 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
     updateReceipt,
     isDarkMode
   } = useApp();
+
+  // Index for fast client lookup and clientCode resolution
+  const { receiptToClient, clientMap } = useMemo(() => {
+    const idx = buildReceiptsClientIndex(clients, receipts);
+    const cMap = new Map<string, Client>();
+    clients.forEach((c) => {
+      if (c.id) cMap.set(c.id, c);
+    });
+    return { receiptToClient: idx.receiptToClient, clientMap: cMap };
+  }, [clients, receipts]);
+
+  // Helper to resolve client and clientCode for any warranty record
+  const resolveClientForRecord = useCallback(
+    (record: SupplierWarrantyRecord): { client?: Client; clientCode?: string } => {
+      if (record.clientCode && record.clientCode.trim()) {
+        return { clientCode: record.clientCode.trim() };
+      }
+      if (record.clientId && clientMap.has(record.clientId)) {
+        const c = clientMap.get(record.clientId)!;
+        return { client: c, clientCode: getClientCode(c) };
+      }
+      if (record.receiptId && receiptToClient.has(record.receiptId)) {
+        const c = receiptToClient.get(record.receiptId)!;
+        return { client: c, clientCode: getClientCode(c) };
+      }
+      if (record.receiptConsecutive) {
+        const matchingReceipt = receipts.find((r) => r.consecutive === record.receiptConsecutive);
+        if (matchingReceipt) {
+          const c = receiptToClient.get(matchingReceipt.id) || (matchingReceipt.clientId ? clientMap.get(matchingReceipt.clientId) : undefined);
+          if (c) return { client: c, clientCode: getClientCode(c) };
+        }
+      }
+      const found = clients.find((c) => {
+        if (record.clientPhone && matchContacts(c.phone, record.clientPhone)) return true;
+        if (c.name.trim().toLowerCase() === record.clientName.trim().toLowerCase()) return true;
+        return false;
+      });
+      if (found) {
+        return { client: found, clientCode: getClientCode(found) };
+      }
+      return {};
+    },
+    [clientMap, receiptToClient, receipts, clients]
+  );
 
   // Navigation & View state
   const [activeSubTab, setActiveSubTab] = useState<"tracking" | "active_ids">("tracking");
@@ -248,35 +298,45 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
       // 2. Search Term
       if (searchTerm.trim() !== "") {
         const term = searchTerm.toLowerCase();
+        const clientInfo = resolveClientForRecord(record);
+        const clientCodeStr = clientInfo.clientCode || "";
         const matchesId = record.providerOrderId.toLowerCase().includes(term);
         const matchesClient = record.clientName.toLowerCase().includes(term);
+        const matchesClientCode =
+          clientCodeStr.toLowerCase().includes(term) || `id:${clientCodeStr}`.toLowerCase().includes(term);
         const matchesService = record.serviceName.toLowerCase().includes(term);
         const matchesReason = (record.reason || "").toLowerCase().includes(term);
         const matchesConsecutive = (record.receiptConsecutive?.toString() || "").includes(term);
 
-        if (!matchesId && !matchesClient && !matchesService && !matchesReason && !matchesConsecutive) {
+        if (!matchesId && !matchesClient && !matchesClientCode && !matchesService && !matchesReason && !matchesConsecutive) {
           return false;
         }
       }
 
       return true;
     });
-  }, [warrantyRecordsWithStatus, statusFilter, searchTerm]);
+  }, [warrantyRecordsWithStatus, statusFilter, searchTerm, resolveClientForRecord]);
 
   // Filter active client IDs
   const filteredClientWarrantyItems = useMemo(() => {
     return activeClientWarrantyItems.filter((item) => {
       if (searchTerm.trim() !== "") {
         const term = searchTerm.toLowerCase();
+        const client =
+          receiptToClient.get(item.receipt.id) ||
+          (item.receipt.clientId ? clientMap.get(item.receipt.clientId) : undefined);
+        const clientCodeStr = client ? getClientCode(client) : "";
         const matchesId = item.orderId.toLowerCase().includes(term);
         const matchesClient = item.receipt.clientName.toLowerCase().includes(term);
+        const matchesClientCode =
+          clientCodeStr.toLowerCase().includes(term) || `id:${clientCodeStr}`.toLowerCase().includes(term);
         const matchesService = item.serviceName.toLowerCase().includes(term);
         const matchesConsecutive = item.receipt.consecutive.toString().includes(term);
-        return matchesId || matchesClient || matchesService || matchesConsecutive;
+        return matchesId || matchesClient || matchesClientCode || matchesService || matchesConsecutive;
       }
       return true;
     });
-  }, [activeClientWarrantyItems, searchTerm]);
+  }, [activeClientWarrantyItems, searchTerm, receiptToClient, clientMap]);
 
   // Invoices filtered by search query in the simplified modal
   const modalInvoiceSearchResults = useMemo(() => {
@@ -287,14 +347,17 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
     return receipts.filter((r) => {
       const matchConsecutive = r.consecutive.toString().includes(q) || `#${r.consecutive}`.includes(q);
       const matchClient = r.clientName.toLowerCase().includes(q);
+      const rClient = receiptToClient.get(r.id) || (r.clientId ? clientMap.get(r.clientId) : undefined);
+      const rCode = rClient ? getClientCode(rClient) : "";
+      const matchClientCode = rCode.toLowerCase().includes(q) || `id:${rCode}`.toLowerCase().includes(q);
       const matchPhone = (r.clientPhone || "").includes(q);
       const matchService = r.services.some((s) => s.serviceName.toLowerCase().includes(q));
       const matchOrderId = r.services.some((s) =>
         getItemOrderIds(s).some((id) => id.toLowerCase().includes(q))
       );
-      return matchConsecutive || matchClient || matchPhone || matchService || matchOrderId;
+      return matchConsecutive || matchClient || matchClientCode || matchPhone || matchService || matchOrderId;
     }).slice(0, 10);
-  }, [receipts, invoiceSearchQuery]);
+  }, [receipts, invoiceSearchQuery, receiptToClient, clientMap]);
 
   // Extract all available IDs from the selected invoice
   const selectedInvoiceOrderIds = useMemo(() => {
@@ -465,6 +528,14 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
 
     const clientName = selectedInvoice ? selectedInvoice.clientName : formClientNameManual.trim() || "Cliente";
     const clientPhone = selectedInvoice ? selectedInvoice.clientPhone : undefined;
+
+    // Resolve client ID and 4-digit client code
+    const resolvedClient = selectedInvoice
+      ? (receiptToClient.get(selectedInvoice.id) || (selectedInvoice.clientId ? clientMap.get(selectedInvoice.clientId) : undefined))
+      : clients.find((c) => (clientPhone && matchContacts(c.phone, clientPhone)) || c.name.trim().toLowerCase() === clientName.trim().toLowerCase());
+
+    const clientId = selectedInvoice?.clientId || resolvedClient?.id || undefined;
+    const clientCode = resolvedClient ? getClientCode(resolvedClient) : undefined;
     
     // Find matching service for the selected IDs if invoice exists
     const matchingService = selectedInvoice
@@ -489,6 +560,8 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
         providerOrderIds: finalOrderIds,
         receiptId: selectedInvoice ? selectedInvoice.id : undefined,
         receiptConsecutive: selectedInvoice ? selectedInvoice.consecutive : undefined,
+        clientId,
+        clientCode,
         clientName,
         clientPhone,
         serviceName,
@@ -503,6 +576,8 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
         providerOrderIds: finalOrderIds,
         receiptId: selectedInvoice ? selectedInvoice.id : undefined,
         receiptConsecutive: selectedInvoice ? selectedInvoice.consecutive : undefined,
+        clientId,
+        clientCode,
         clientName,
         clientPhone,
         serviceName,
@@ -810,6 +885,7 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {filteredTrackingRecords.map((record) => {
                 const isOverdue = record.timeInfo.isOverdue;
+                const clientInfo = resolveClientForRecord(record);
 
                 return (
                   <div
@@ -835,6 +911,20 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
                             >
                               {record.timeInfo.statusLabel}
                             </span>
+                            {/* Client ID Badge */}
+                            {clientInfo.clientCode && (
+                              <span
+                                className={`font-mono font-black text-[11px] px-2 py-0.5 rounded-md border flex items-center gap-1 shrink-0 ${
+                                  isDarkMode
+                                    ? "bg-indigo-950/80 text-indigo-300 border-indigo-800"
+                                    : "bg-indigo-50 text-indigo-700 border-indigo-200"
+                                }`}
+                                title={`ID de Cliente: #${clientInfo.clientCode}`}
+                              >
+                                <Users className="w-3 h-3 text-indigo-500" />
+                                <span>ID: #{clientInfo.clientCode}</span>
+                              </span>
+                            )}
                             {/* Prominent Factura Number */}
                             {record.receiptConsecutive ? (
                               <button
@@ -930,9 +1020,22 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
 
                       {/* Order and Client Information */}
                       <div className={`space-y-1.5 text-xs pt-1 ${isDarkMode ? "text-slate-300" : "text-gray-600"}`}>
-                        <div className="flex items-center justify-between">
+                        <div className="flex items-center justify-between gap-1">
                           <span className={isDarkMode ? "text-slate-400" : "text-gray-400"}>Cliente:</span>
-                          <span className={`font-bold truncate ${isDarkMode ? "text-slate-200" : "text-gray-800"}`}>{record.clientName}</span>
+                          <div className="flex items-center gap-1.5 truncate">
+                            {clientInfo.clientCode && (
+                              <span
+                                className={`font-mono text-[10px] font-extrabold px-1.5 py-0.5 rounded border shrink-0 ${
+                                  isDarkMode
+                                    ? "bg-indigo-950 text-indigo-300 border-indigo-800"
+                                    : "bg-indigo-50 text-indigo-700 border-indigo-200"
+                                }`}
+                              >
+                                ID: {clientInfo.clientCode}
+                              </span>
+                            )}
+                            <span className={`font-bold truncate ${isDarkMode ? "text-slate-200" : "text-gray-800"}`}>{record.clientName}</span>
+                          </div>
                         </div>
                         <div className="flex items-center justify-between">
                           <span className={isDarkMode ? "text-slate-400" : "text-gray-400"}>Servicio:</span>
@@ -943,13 +1046,15 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
                         <div className="flex items-center justify-between">
                           <span className={isDarkMode ? "text-slate-400" : "text-gray-400"}>Enviado:</span>
                           <span className={`font-semibold ${isDarkMode ? "text-slate-300" : "text-gray-700"}`}>
-                            {new Date(record.sentDate).toLocaleDateString("es-ES", {
-                              day: "2-digit",
-                              month: "short",
-                              hour: "2-digit",
-                              minute: "2-digit",
-                              hour12: true
-                            })}
+                            {record.sentDate && !isNaN(new Date(record.sentDate).getTime()) ? (
+                              new Date(record.sentDate).toLocaleDateString("es-ES", {
+                                day: "2-digit",
+                                month: "short",
+                                hour: "2-digit",
+                                minute: "2-digit",
+                                hour12: true
+                              })
+                            ) : "-"}
                           </span>
                         </div>
                         <div className="flex items-center justify-between">
@@ -1087,7 +1192,35 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
 
                           {/* Cliente */}
                           <td className="py-3 px-4">
-                            <div className={`font-semibold ${isDarkMode ? "text-slate-200" : "text-gray-800"}`}>{item.receipt.clientName}</div>
+                            <div className="flex items-center gap-1.5">
+                              {(() => {
+                                const itemClient =
+                                  receiptToClient.get(item.receipt.id) ||
+                                  (item.receipt.clientId ? clientMap.get(item.receipt.clientId) : undefined);
+                                const itemClientCode = itemClient ? getClientCode(itemClient) : undefined;
+                                return (
+                                  <>
+                                    {itemClientCode && (
+                                      <span
+                                        className={`font-mono text-[10px] font-extrabold px-1.5 py-0.5 rounded border shrink-0 ${
+                                          isDarkMode
+                                            ? "bg-indigo-950 text-indigo-300 border-indigo-800"
+                                            : "bg-indigo-50 text-indigo-700 border-indigo-200"
+                                        }`}
+                                        title={`ID de Cliente: ${itemClientCode}`}
+                                      >
+                                        ID: {itemClientCode}
+                                      </span>
+                                    )}
+                                    <span
+                                      className={`font-semibold truncate ${isDarkMode ? "text-slate-200" : "text-gray-800"}`}
+                                    >
+                                      {item.receipt.clientName}
+                                    </span>
+                                  </>
+                                );
+                              })()}
+                            </div>
                           </td>
 
                           {/* Servicio */}
@@ -1269,10 +1402,27 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
                               }`}
                             >
                               <div>
-                                <div className="flex items-center gap-2">
+                                <div className="flex items-center gap-2 flex-wrap">
                                   <span className="font-mono font-bold text-indigo-400">
                                     #{String(r.consecutive).padStart(4, "0")}
                                   </span>
+                                  {(() => {
+                                    const rClient =
+                                      receiptToClient.get(r.id) ||
+                                      (r.clientId ? clientMap.get(r.clientId) : undefined);
+                                    const rCode = rClient ? getClientCode(rClient) : undefined;
+                                    return rCode ? (
+                                      <span
+                                        className={`font-mono text-[10px] font-extrabold px-1.5 py-0.2 rounded border shrink-0 ${
+                                          isDarkMode
+                                            ? "bg-indigo-950 text-indigo-300 border-indigo-800"
+                                            : "bg-indigo-50 text-indigo-700 border-indigo-200"
+                                        }`}
+                                      >
+                                        ID: {rCode}
+                                      </span>
+                                    ) : null;
+                                  })()}
                                   <span className="font-bold">{r.clientName}</span>
                                 </div>
                                 <div className={`text-[10px] mt-0.5 ${isDarkMode ? "text-slate-400" : "text-gray-400"}`}>
@@ -1302,13 +1452,34 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
                     isDarkMode ? "border-indigo-800/60" : "border-indigo-100"
                   }`}>
                     <div>
-                      <div className={`text-xs font-bold flex items-center gap-2 ${
-                        isDarkMode ? "text-white" : "text-gray-900"
-                      }`}>
-                        <span>Factura #{String(selectedInvoice.consecutive).padStart(4, "0")}</span>
-                        <span className="text-gray-400">•</span>
-                        <span>{selectedInvoice.clientName}</span>
-                      </div>
+                      {(() => {
+                        const selClient =
+                          receiptToClient.get(selectedInvoice.id) ||
+                          (selectedInvoice.clientId ? clientMap.get(selectedInvoice.clientId) : undefined);
+                        const selCode = selClient ? getClientCode(selClient) : undefined;
+                        return (
+                          <div
+                            className={`text-xs font-bold flex items-center gap-2 flex-wrap ${
+                              isDarkMode ? "text-white" : "text-gray-900"
+                            }`}
+                          >
+                            <span>Factura #{String(selectedInvoice.consecutive).padStart(4, "0")}</span>
+                            <span className="text-gray-400">•</span>
+                            {selCode && (
+                              <span
+                                className={`font-mono text-[10px] font-extrabold px-1.5 py-0.5 rounded border ${
+                                  isDarkMode
+                                    ? "bg-indigo-950 text-indigo-300 border-indigo-800"
+                                    : "bg-indigo-50 text-indigo-700 border-indigo-200"
+                                }`}
+                              >
+                                ID: {selCode}
+                              </span>
+                            )}
+                            <span>{selectedInvoice.clientName}</span>
+                          </div>
+                        );
+                      })()}
                     </div>
                     <button
                       type="button"

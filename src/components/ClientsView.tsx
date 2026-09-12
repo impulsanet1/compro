@@ -23,9 +23,12 @@ import {
   Clock,
   Edit3,
   ChevronLeft,
-  ChevronRight
+  ChevronRight,
+  Split,
+  X,
+  Sparkles
 } from "lucide-react";
-import { Receipt, getClientCode, getNormalizedStatus, isWarrantyForClient, buildReceiptsClientIndex } from "../types";
+import { Receipt, getClientCode, getNormalizedStatus, isWarrantyForClient, buildReceiptsClientIndex, resolveReceiptWarranty } from "../types";
 import { RepurchaseModal } from "./RepurchaseModal";
 
 interface ClientsViewProps {
@@ -33,16 +36,33 @@ interface ClientsViewProps {
 }
 
 export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => {
-  const { clients, receipts, supplierWarranties, updateClientTag, isDarkMode } = useApp();
+  const { clients, receipts, supplierWarranties, updateClientTag, updateClient, separateReceiptToNewClient, isDarkMode } = useApp();
   const formatCOP = (val: number) => "$" + Math.round(val).toLocaleString("es-CO");
 
   const [searchText, setSearchText] = useState("");
-  const [warrantyFilter, setWarrantyFilter] = useState<"all" | "eligible_10d" | "recent" | "active_warranty" | "with_history">("all");
+  const [warrantyFilter, setWarrantyFilter] = useState<"all" | "new_clients" | "eligible_10d" | "recent" | "active_warranty" | "with_history">("all");
   const [selectedClientId, setSelectedClientId] = useState<string | null>(null);
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
   const [showRepurchaseModal, setShowRepurchaseModal] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
+
+  // Separation modal state
+  const [receiptToSeparate, setReceiptToSeparate] = useState<Receipt | null>(null);
+  const [showSeparateModal, setShowSeparateModal] = useState(false);
+  const [separateNewName, setSeparateNewName] = useState("");
+  const [separateNewPhone, setSeparateNewPhone] = useState("");
+  const [isSeparating, setIsSeparating] = useState(false);
+
+  // Edit client modal state
+  const [showEditClientModal, setShowEditClientModal] = useState(false);
+  const [editClientName, setEditClientName] = useState("");
+  const [editClientPhone, setEditClientPhone] = useState("");
+  const [editClientTag, setEditClientTag] = useState<"Nuevo" | "VIP" | "Frecuente" | "Mayorista" | undefined>(undefined);
+  const [isUpdatingClient, setIsUpdatingClient] = useState(false);
+
+  // User notification message
+  const [userNotification, setUserNotification] = useState<{ type: "success" | "error"; message: string } | null>(null);
 
   // Fast O(N + M) index mapping clients to receipts
   const { clientToReceipts } = useMemo(() => {
@@ -128,7 +148,9 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
         receiptsInProcess,
         hasActiveWarranty,
         totalWarrantiesCount,
-        isPromoEligible
+        isPromoEligible,
+        isNewClient: c.tag === "Nuevo" || (actualReceipts.length <= 1 && !c.tag),
+        effectiveTag: c.tag || (actualReceipts.length <= 1 && !c.tag ? "Nuevo" : undefined)
       };
     });
   }, [clients, clientToReceipts, supplierWarranties]);
@@ -139,6 +161,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
       if (c.actualPurchaseCount <= 0) return false;
 
       // Filter by warranty/promo eligibility tab
+      if (warrantyFilter === "new_clients" && !c.isNewClient) return false;
       if (warrantyFilter === "eligible_10d" && !c.isPromoEligible) return false;
       if (warrantyFilter === "recent" && !c.isRecentPurchase) return false;
       if (warrantyFilter === "active_warranty" && !c.hasActiveWarranty) return false;
@@ -182,6 +205,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
   // Overall warranty & promo stats for quick summary bar
   const clientsWarrantyStats = useMemo(() => {
     const totalBuyers = enrichedClients.filter((c) => c.actualPurchaseCount > 0);
+    const newClients = totalBuyers.filter((c) => c.isNewClient);
     const withActiveWarranty = totalBuyers.filter((c) => c.hasActiveWarranty);
     const withWarrantyHistory = totalBuyers.filter((c) => c.totalWarrantiesCount > 0 && !c.hasActiveWarranty);
     const eligible10Days = totalBuyers.filter((c) => c.isPromoEligible);
@@ -189,6 +213,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
 
     return {
       total: totalBuyers.length,
+      newClients: newClients.length,
       withActiveWarranty: withActiveWarranty.length,
       withWarrantyHistory: withWarrantyHistory.length,
       eligible10Days: eligible10Days.length,
@@ -355,6 +380,21 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
 
           <button
             type="button"
+            onClick={() => setWarrantyFilter("new_clients")}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer ${
+              warrantyFilter === "new_clients"
+                ? "bg-teal-600 text-white shadow-xs"
+                : isDarkMode
+                ? "bg-teal-950/60 text-teal-300 border border-teal-800 hover:bg-teal-900/80"
+                : "bg-teal-50 text-teal-800 border border-teal-200 hover:bg-teal-100"
+            }`}
+            title="Clientes nuevos registrados recientemente con etiqueta Nuevo"
+          >
+            <span>🌱 Nuevos ({clientsWarrantyStats.newClients})</span>
+          </button>
+
+          <button
+            type="button"
             onClick={() => setWarrantyFilter("eligible_10d")}
             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer ${
               warrantyFilter === "eligible_10d"
@@ -493,14 +533,15 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
                         </span>
                         <User className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
                         <span className="truncate">{client.name}</span>
-                        {client.tag && (
+                        {(client.tag || client.isNewClient) && (
                           <span className={`text-[8px] px-1.5 py-0.5 rounded-sm font-extrabold border shrink-0 ${
                             client.tag === "VIP" ? (isDarkMode ? "bg-purple-950 text-purple-300 border-purple-800" : "bg-purple-100 text-purple-800 border-purple-200") :
                             client.tag === "Frecuente" ? (isDarkMode ? "bg-blue-950 text-blue-300 border-blue-800" : "bg-blue-100 text-blue-800 border-blue-200") :
                             client.tag === "Mayorista" ? (isDarkMode ? "bg-emerald-950 text-emerald-300 border-emerald-800" : "bg-emerald-100 text-emerald-800 border-emerald-200") :
+                            (client.tag === "Nuevo" || client.isNewClient) ? (isDarkMode ? "bg-emerald-950/80 text-emerald-300 border-emerald-700" : "bg-emerald-100 text-emerald-800 border-emerald-300") :
                             (isDarkMode ? "bg-slate-800 text-slate-300 border-slate-700" : "bg-gray-100 text-gray-700 border-gray-200")
                           }`}>
-                            {client.tag}
+                            {(client.tag === "Nuevo" || (!client.tag && client.isNewClient)) ? "🌱 Nuevo" : client.tag}
                           </span>
                         )}
                       </div>
@@ -673,6 +714,33 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
 
         {/* Right Column: Client details and order history */}
         <div className="lg:col-span-7 space-y-6">
+          {userNotification && (
+            <div className={`p-3.5 rounded-xl border flex items-center justify-between text-xs font-semibold animate-fade-in ${
+              userNotification.type === "success"
+                ? isDarkMode
+                  ? "bg-emerald-950/80 border-emerald-700 text-emerald-200"
+                  : "bg-emerald-50 border-emerald-200 text-emerald-800"
+                : isDarkMode
+                ? "bg-rose-950/80 border-rose-700 text-rose-200"
+                : "bg-rose-50 border-rose-200 text-rose-800"
+            }`}>
+              <div className="flex items-center gap-2">
+                {userNotification.type === "success" ? (
+                  <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
+                ) : (
+                  <AlertTriangle className="w-4 h-4 text-rose-500 shrink-0" />
+                )}
+                <span>{userNotification.message}</span>
+              </div>
+              <button
+                onClick={() => setUserNotification(null)}
+                className="opacity-70 hover:opacity-100 p-1 cursor-pointer"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
+
           {selectedClient ? (
             <div className="space-y-6">
               {/* Client Profile Box */}
@@ -695,14 +763,15 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
                       <h3 className={`text-lg font-bold ${isDarkMode ? "text-white" : "text-gray-950"}`}>{selectedClient.name}</h3>
-                      {selectedClient.tag && (
+                      {(selectedClient.tag || selectedClient.isNewClient) && (
                         <span className={`text-[10px] font-extrabold px-2 py-0.5 rounded-md border ${
                           selectedClient.tag === "VIP" ? (isDarkMode ? "bg-purple-950 text-purple-300 border-purple-800" : "bg-purple-100 text-purple-800 border-purple-200") :
                           selectedClient.tag === "Frecuente" ? (isDarkMode ? "bg-blue-950 text-blue-300 border-blue-800" : "bg-blue-100 text-blue-800 border-blue-200") :
                           selectedClient.tag === "Mayorista" ? (isDarkMode ? "bg-emerald-950 text-emerald-300 border-emerald-800" : "bg-emerald-100 text-emerald-800 border-emerald-200") :
+                          (selectedClient.tag === "Nuevo" || selectedClient.isNewClient) ? (isDarkMode ? "bg-emerald-950/80 text-emerald-300 border-emerald-700" : "bg-emerald-100 text-emerald-800 border-emerald-300") :
                           (isDarkMode ? "bg-slate-800 text-slate-300 border-slate-700" : "bg-gray-100 text-gray-700 border-gray-200")
                         }`}>
-                          {selectedClient.tag}
+                          {(selectedClient.tag === "Nuevo" || (!selectedClient.tag && selectedClient.isNewClient)) ? "🌱 Nuevo" : selectedClient.tag}
                         </span>
                       )}
                     </div>
@@ -751,12 +820,32 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
                         <span>Chat Libre</span>
                       </a>
 
+                      <button
+                        type="button"
+                        id="btn-open-edit-client-profile"
+                        onClick={() => {
+                          setEditClientName(selectedClient.name);
+                          setEditClientPhone(selectedClient.phone);
+                          setEditClientTag(selectedClient.tag as any);
+                          setShowEditClientModal(true);
+                        }}
+                        className={`inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1.5 rounded-lg transition active:scale-95 cursor-pointer shadow-2xs border ${
+                          isDarkMode
+                            ? "bg-indigo-950/60 hover:bg-indigo-900/80 border-indigo-700 text-indigo-200"
+                            : "bg-indigo-50 hover:bg-indigo-100 border-indigo-200 text-indigo-800"
+                        }`}
+                        title="Editar Nombre, Teléfono o Etiqueta de este cliente"
+                      >
+                        <Edit3 className="w-3.5 h-3.5 text-indigo-500" />
+                        <span>Editar Datos</span>
+                      </button>
+
                       <div className="flex items-center gap-1">
                         <span className={`text-[10px] font-bold uppercase ${
                           isDarkMode ? "text-slate-400" : "text-gray-400"
                         }`}>Etiqueta:</span>
                         <select
-                          value={selectedClient.tag || ""}
+                          value={selectedClient.tag || (selectedClient.isNewClient ? "Nuevo" : "")}
                           onChange={async (e) => {
                             const newTag = e.target.value;
                             try {
@@ -947,18 +1036,34 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
                               </span>
                             )}
                           </div>
-                          <div className={`text-[10px] font-mono flex items-center gap-1 ${
+                          <div className={`text-[10px] font-mono flex items-center gap-1 flex-wrap ${
                             isDarkMode ? "text-slate-400" : "text-gray-400"
                           }`}>
                             <Calendar className="w-3 h-3" />
                             {formatDateSimple(receipt.date)}
                             <span className={isDarkMode ? "text-slate-600" : "text-gray-200"}>|</span>
                             <span>{receipt.services.length} {receipt.services.length === 1 ? "servicio" : "servicios"}</span>
+                            <span className={isDarkMode ? "text-slate-600" : "text-gray-200"}>|</span>
+                            {(() => {
+                              const wRes = resolveReceiptWarranty(receipt, 30);
+                              if (wRes.isNoWarranty) {
+                                return (
+                                  <span className={isDarkMode ? "text-slate-500 font-medium" : "text-gray-400 font-medium"}>
+                                    🚫 Sin garantía
+                                  </span>
+                                );
+                              }
+                              return (
+                                <span className="text-emerald-500 font-semibold">
+                                  🛡️ {wRes.warrantyText}
+                                </span>
+                              );
+                            })()}
                           </div>
                         </div>
 
-                        <div className="flex items-center gap-2 sm:gap-3">
-                          <span className={`text-xs font-bold ${isDarkMode ? "text-indigo-400" : "text-indigo-600"}`}>
+                        <div className="flex items-center gap-1.5 sm:gap-2">
+                          <span className={`text-xs font-bold mr-1 ${isDarkMode ? "text-indigo-400" : "text-indigo-600"}`}>
                             {formatCOP(receipt.totalCharged)}
                           </span>
                           <button
@@ -986,6 +1091,24 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
                             <Edit3 className="w-3 h-3 text-indigo-500" />
                             <span>Editar</span>
                           </button>
+                          <button
+                            id={`btn-separate-client-receipt-${receipt.consecutive}`}
+                            onClick={() => {
+                              setReceiptToSeparate(receipt);
+                              setSeparateNewName(receipt.clientName || selectedClient.name);
+                              setSeparateNewPhone(receipt.clientPhone || selectedClient.phone);
+                              setShowSeparateModal(true);
+                            }}
+                            className={`inline-flex items-center gap-1 text-xs font-semibold border transition px-2.5 py-1.5 rounded-lg shadow-2xs cursor-pointer ${
+                              isDarkMode
+                                ? "bg-amber-950/60 border-amber-800 text-amber-300 hover:bg-amber-900"
+                                : "bg-amber-50 border-amber-200 text-amber-800 hover:bg-amber-100"
+                            }`}
+                            title="Separar este pedido a un nuevo cliente independiente (corrige cruce de clientes)"
+                          >
+                            <Split className="w-3 h-3 text-amber-500" />
+                            <span>Separar</span>
+                          </button>
                         </div>
                       </div>
                     ))}
@@ -1012,6 +1135,265 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
           initialClient={selectedClient}
           onClose={() => setShowRepurchaseModal(false)}
         />
+      )}
+
+      {/* Modal: Separar Comprobante a Nuevo Cliente Independiente */}
+      {showSeparateModal && receiptToSeparate && selectedClient && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-50 flex items-center justify-center p-4">
+          <div className={`w-full max-w-md rounded-2xl border shadow-2xl p-6 space-y-4 animate-fade-in ${
+            isDarkMode ? "bg-slate-900 border-slate-800 text-white" : "bg-white border-gray-200 text-gray-900"
+          }`}>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className="p-2 rounded-xl bg-amber-500/10 text-amber-500">
+                  <Split className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold">Separar a Nuevo Cliente</h3>
+                  <p className={`text-[11px] ${isDarkMode ? "text-slate-400" : "text-gray-500"}`}>
+                    Pedido #{receiptToSeparate.consecutive}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  setShowSeparateModal(false);
+                  setReceiptToSeparate(null);
+                }}
+                className="p-1 rounded-lg hover:bg-slate-800/20 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className={`p-3 rounded-xl border text-xs space-y-1.5 ${
+              isDarkMode ? "bg-amber-950/30 border-amber-800/60 text-amber-200" : "bg-amber-50/80 border-amber-200 text-amber-900"
+            }`}>
+              <p className="font-semibold">
+                Este pedido se desvinculará de <strong>{selectedClient.name}</strong>.
+              </p>
+              <p className="text-[11px] opacity-90 leading-relaxed">
+                Se creará un nuevo cliente independiente con su propio código de WhatsApp, historial y estadísticas. Las garantías no se mezclarán.
+              </p>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <label className={`block text-[11px] font-semibold uppercase ${
+                  isDarkMode ? "text-slate-400" : "text-gray-600"
+                }`}>
+                  Nombre del Nuevo Cliente
+                </label>
+                <input
+                  type="text"
+                  value={separateNewName}
+                  onChange={(e) => setSeparateNewName(e.target.value)}
+                  placeholder="Ej. Luis (Tarjeta) o Nombre Real"
+                  className={`mt-1 block w-full px-3 py-2 border rounded-lg text-sm ${
+                    isDarkMode ? "bg-slate-800 border-slate-700 text-white" : "bg-white border-gray-200 text-gray-900"
+                  }`}
+                />
+              </div>
+
+              <div>
+                <label className={`block text-[11px] font-semibold uppercase ${
+                  isDarkMode ? "text-slate-400" : "text-gray-600"
+                }`}>
+                  Teléfono / Contacto
+                </label>
+                <input
+                  type="text"
+                  value={separateNewPhone}
+                  onChange={(e) => setSeparateNewPhone(e.target.value)}
+                  placeholder="Ej. 573208354198"
+                  className={`mt-1 block w-full px-3 py-2 border rounded-lg text-sm ${
+                    isDarkMode ? "bg-slate-800 border-slate-700 text-white" : "bg-white border-gray-200 text-gray-900"
+                  }`}
+                />
+              </div>
+            </div>
+
+            <div className="pt-2 flex justify-end gap-2">
+              <button
+                type="button"
+                disabled={isSeparating}
+                onClick={() => {
+                  setShowSeparateModal(false);
+                  setReceiptToSeparate(null);
+                }}
+                className={`px-4 py-2 text-xs font-semibold rounded-xl border cursor-pointer ${
+                  isDarkMode ? "bg-slate-800 border-slate-700 text-slate-300" : "bg-white border-gray-200 text-gray-700 hover:bg-gray-50"
+                }`}
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={isSeparating || !separateNewName.trim()}
+                onClick={async () => {
+                  if (!receiptToSeparate || !selectedClient) return;
+                  setIsSeparating(true);
+                  try {
+                    const newClientId = await separateReceiptToNewClient(
+                      receiptToSeparate.id,
+                      selectedClient.id,
+                      separateNewName.trim(),
+                      separateNewPhone.trim()
+                    );
+                    setShowSeparateModal(false);
+                    setReceiptToSeparate(null);
+                    setSelectedClientId(newClientId);
+                    setUserNotification({
+                      type: "success",
+                      message: `¡Pedido #${receiptToSeparate.consecutive} separado exitosamente a ${separateNewName.trim()}!`
+                    });
+                  } catch (err: any) {
+                    console.error("Error separating receipt:", err);
+                    setUserNotification({
+                      type: "error",
+                      message: err?.message || "No se pudo separar el pedido. Intente nuevamente."
+                    });
+                  } finally {
+                    setIsSeparating(false);
+                  }
+                }}
+                className="px-4 py-2 text-xs font-extrabold rounded-xl bg-amber-600 hover:bg-amber-500 text-white transition active:scale-95 cursor-pointer shadow-sm disabled:opacity-50"
+              >
+                {isSeparating ? "Separando..." : "Confirmar Separación"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Editar Perfil de Cliente */}
+      {showEditClientModal && selectedClient && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-50 flex items-center justify-center p-4">
+          <div className={`w-full max-w-md rounded-2xl border shadow-2xl p-6 space-y-4 animate-fade-in ${
+            isDarkMode ? "bg-slate-900 border-slate-800 text-white" : "bg-white border-gray-200 text-gray-900"
+          }`}>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className="p-2 rounded-xl bg-indigo-500/10 text-indigo-500">
+                  <Edit3 className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold">Editar Perfil de Cliente</h3>
+                  <p className={`text-[11px] ${isDarkMode ? "text-slate-400" : "text-gray-500"}`}>
+                    ID: {selectedClient.computedCode}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowEditClientModal(false)}
+                className="p-1 rounded-lg hover:bg-slate-800/20 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <label className={`block text-[11px] font-semibold uppercase ${
+                  isDarkMode ? "text-slate-400" : "text-gray-600"
+                }`}>
+                  Nombre Completo
+                </label>
+                <input
+                  type="text"
+                  value={editClientName}
+                  onChange={(e) => setEditClientName(e.target.value)}
+                  placeholder="Nombre del cliente"
+                  className={`mt-1 block w-full px-3 py-2 border rounded-lg text-sm ${
+                    isDarkMode ? "bg-slate-800 border-slate-700 text-white" : "bg-white border-gray-200 text-gray-900"
+                  }`}
+                />
+              </div>
+
+              <div>
+                <label className={`block text-[11px] font-semibold uppercase ${
+                  isDarkMode ? "text-slate-400" : "text-gray-600"
+                }`}>
+                  Teléfono / WhatsApp
+                </label>
+                <input
+                  type="text"
+                  value={editClientPhone}
+                  onChange={(e) => setEditClientPhone(e.target.value)}
+                  placeholder="Ej. 573208354198"
+                  className={`mt-1 block w-full px-3 py-2 border rounded-lg text-sm ${
+                    isDarkMode ? "bg-slate-800 border-slate-700 text-white" : "bg-white border-gray-200 text-gray-900"
+                  }`}
+                />
+              </div>
+
+              <div>
+                <label className={`block text-[11px] font-semibold uppercase ${
+                  isDarkMode ? "text-slate-400" : "text-gray-600"
+                }`}>
+                  Etiqueta del Cliente
+                </label>
+                <select
+                  value={editClientTag || ""}
+                  onChange={(e) => setEditClientTag((e.target.value as any) || undefined)}
+                  className={`mt-1 block w-full px-3 py-2 border rounded-lg text-sm ${
+                    isDarkMode ? "bg-slate-800 border-slate-700 text-white" : "bg-white border-gray-200 text-gray-900"
+                  }`}
+                >
+                  <option value="">Sin Etiqueta</option>
+                  <option value="Nuevo">🌱 Nuevo</option>
+                  <option value="Frecuente">⭐ Frecuente</option>
+                  <option value="VIP">👑 VIP</option>
+                  <option value="Mayorista">💼 Mayorista</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="pt-2 flex justify-end gap-2">
+              <button
+                type="button"
+                disabled={isUpdatingClient}
+                onClick={() => setShowEditClientModal(false)}
+                className={`px-4 py-2 text-xs font-semibold rounded-xl border cursor-pointer ${
+                  isDarkMode ? "bg-slate-800 border-slate-700 text-slate-300" : "bg-white border-gray-200 text-gray-700 hover:bg-gray-50"
+                }`}
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={isUpdatingClient || !editClientName.trim()}
+                onClick={async () => {
+                  if (!selectedClient) return;
+                  setIsUpdatingClient(true);
+                  try {
+                    await updateClient(selectedClient.id, {
+                      name: editClientName.trim(),
+                      phone: editClientPhone.trim(),
+                      tag: editClientTag
+                    });
+                    setShowEditClientModal(false);
+                    setUserNotification({
+                      type: "success",
+                      message: `Datos del cliente y todos sus comprobantes actualizados correctamente.`
+                    });
+                  } catch (err: any) {
+                    console.error("Error updating client:", err);
+                    setUserNotification({
+                      type: "error",
+                      message: err?.message || "No se pudo actualizar el cliente."
+                    });
+                  } finally {
+                    setIsUpdatingClient(false);
+                  }
+                }}
+                className="px-4 py-2 text-xs font-extrabold rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white transition active:scale-95 cursor-pointer shadow-sm disabled:opacity-50"
+              >
+                {isUpdatingClient ? "Guardando..." : "Guardar Cambios"}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

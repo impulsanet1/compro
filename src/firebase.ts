@@ -10,8 +10,16 @@ import {
   getFirestore,
   persistentLocalCache,
   persistentMultipleTabManager,
+  setLogLevel,
 } from "firebase/firestore";
 import firebaseConfig from "../firebase-applet-config.json";
+
+// Silence internal Firestore SDK diagnostic logs (such as sub-second multi-tab lease clock skew warnings)
+try {
+  setLogLevel("silent");
+} catch {
+  // Ignore if unsupported in environment
+}
 
 const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
 

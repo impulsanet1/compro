@@ -26,6 +26,20 @@ if (typeof window !== 'undefined' && typeof Node !== 'undefined' && Node.prototy
     }
     return originalRemoveChild.call(this, child);
   };
+
+  // Suppress benign internal Firestore SDK multi-tab lease clock skew diagnostic messages
+  const originalConsoleError = console.error;
+  console.error = (...args: unknown[]) => {
+    const msg = typeof args[0] === 'string' ? args[0] : '';
+    const secondMsg = typeof args[1] === 'string' ? args[1] : '';
+    if (
+      msg.includes('Detected an update time that is in the future') ||
+      secondMsg.includes('Detected an update time that is in the future')
+    ) {
+      return;
+    }
+    originalConsoleError.apply(console, args);
+  };
 }
 
 createRoot(document.getElementById('root')!).render(

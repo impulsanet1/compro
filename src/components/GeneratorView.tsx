@@ -26,12 +26,15 @@ import {
   Calculator,
   MessageSquare,
   CreditCard,
-  Hash
+  Hash,
+  PackageOpen
 } from "lucide-react";
 import {
   ReceiptItem,
   Receipt,
   Client,
+  ServiceCombo,
+  ServiceComboItem,
   getServiceBaseCosts,
   calculateServicePrices,
   getClientCode,
@@ -54,7 +57,7 @@ interface GeneratorViewProps {
 }
 
 export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated, initialItems }) => {
-  const { socialNetworks, services, createReceipt, businessConfig, clients, trmState, fetchTRM, isDarkMode } = useApp();
+  const { socialNetworks, services, combos, createReceipt, businessConfig, clients, trmState, fetchTRM, isDarkMode } = useApp();
   const formatCOP = (val: number) => "$" + Math.round(val).toLocaleString("es-CO");
 
   // Client info state
@@ -91,8 +94,13 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
     setClientSearchQuery("");
   };
 
-  // Entry mode: "catalog" (redes sociales predeterminadas) vs "custom" (tarjetas digitales, alertas digitales, diseño, etc.)
-  const [serviceEntryMode, setServiceEntryMode] = useState<"catalog" | "custom">("catalog");
+  // Entry mode: "catalog" (redes sociales predeterminadas) vs "combo" (paquetes combinados automatizados) vs "custom" (tarjetas digitales, alertas digitales, diseño, etc.)
+  const [serviceEntryMode, setServiceEntryMode] = useState<"catalog" | "combo" | "custom">("catalog");
+
+  // Combo Selection State
+  const [selectedComboId, setSelectedComboId] = useState<string>("");
+  const [customComboPrice, setCustomComboPrice] = useState<string>("");
+  const [comboItemOrderIds, setComboItemOrderIds] = useState<Record<number, string>>({});
   const [customItemCategory, setCustomItemCategory] = useState("Tarjetas Digitales");
   const [customItemName, setCustomItemName] = useState("");
   const [customItemQty, setCustomItemQty] = useState("1");
@@ -248,6 +256,26 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
       setCustomChargedPrice("");
     }
   }, [selectedServiceObj, effectiveQuantity, isOverridingCost, trmState.valor]);
+
+  // Selected combo object
+  const selectedComboObj = useMemo(() => {
+    return combos.find((c) => c.id === selectedComboId) || null;
+  }, [combos, selectedComboId]);
+
+  // When combo is chosen, sync customComboPrice and initialize empty/auto order IDs
+  useEffect(() => {
+    if (selectedComboObj) {
+      setCustomComboPrice(selectedComboObj.comboPrice.toString());
+      const initialIds: Record<number, string> = {};
+      selectedComboObj.items.forEach((_, idx) => {
+        initialIds[idx] = "";
+      });
+      setComboItemOrderIds(initialIds);
+    } else {
+      setCustomComboPrice("");
+      setComboItemOrderIds({});
+    }
+  }, [selectedComboObj]);
 
   // Reset service and quantity fields when social network changes
   useEffect(() => {
@@ -467,6 +495,117 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
     setCustomChargedPrice("");
   };
 
+  // Add Combo Items (Option B: Expands into separate individual items with separate provider IDs)
+  const handleAddComboItems = (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+
+    if (!selectedComboObj) {
+      setError("Por favor seleccione un combo de la lista.");
+      return;
+    }
+
+    const totalComboCharged = parseFloat(customComboPrice);
+    if (isNaN(totalComboCharged) || totalComboCharged < 0) {
+      setError("Por favor ingrese un precio válido para el combo.");
+      return;
+    }
+
+    if (!selectedComboObj.items || selectedComboObj.items.length === 0) {
+      setError("El combo seleccionado no contiene servicios configurados.");
+      return;
+    }
+
+    // Determine price per item: proportional to allocatedPrice or suggestedPrice, summing up to totalComboCharged
+    const totalAllocatedSum = selectedComboObj.items.reduce(
+      (sum, itm) => sum + (itm.allocatedPrice || 0),
+      0
+    );
+
+    const generatedItems: ReceiptItem[] = selectedComboObj.items.map((comboItem, index) => {
+      const srv = services.find((s) => s.id === comboItem.serviceId);
+      const sn = socialNetworks.find((s) => s.id === comboItem.socialNetworkId) ||
+        (srv ? socialNetworks.find((s) => s.id === srv.socialNetworkId) : null);
+
+      const srvName = srv?.name || "Servicio";
+      const snName = sn?.name || (comboItem.socialNetworkId.charAt(0).toUpperCase() + comboItem.socialNetworkId.slice(1));
+      const snId = sn?.id || comboItem.socialNetworkId || "general";
+
+      // Calculate provider costs
+      let autoProvCost = 0;
+      let autoSuggPrice = 0;
+      if (srv) {
+        const prices = calculateServicePrices(srv, comboItem.quantity);
+        autoProvCost = prices.providerCost;
+        autoSuggPrice = prices.suggestedPrice;
+      }
+
+      let calculatedCostCOP = autoProvCost;
+      const itemCostUSD = srv?.providerCostUSDPer1000
+        ? calculateSupplierCostUSD(srv.providerCostUSDPer1000, comboItem.quantity)
+        : null;
+
+      if (srv?.providerCostUSDPer1000 && trmState.valor) {
+        const copCost = calculateSupplierCostCOP(srv.providerCostUSDPer1000, comboItem.quantity, trmState.valor);
+        if (copCost !== null) {
+          calculatedCostCOP = Math.round(copCost);
+        }
+      }
+
+      // Calculate charged price for this specific combo line
+      let itemCharged = 0;
+      if (selectedComboObj.items.length === 1) {
+        itemCharged = totalComboCharged;
+      } else if (totalAllocatedSum > 0) {
+        const ratio = (comboItem.allocatedPrice || 0) / totalAllocatedSum;
+        itemCharged = Math.round(totalComboCharged * ratio);
+      } else {
+        itemCharged = Math.round(totalComboCharged / selectedComboObj.items.length);
+      }
+
+      // Order ID for this specific service item in the combo
+      const rawOrderId = (comboItemOrderIds[index] || "").trim();
+      let finalOrderIds: string[] = [];
+      if (rawOrderId) {
+        const split = rawOrderId.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+        finalOrderIds = split.length > 0 ? split : [rawOrderId];
+      } else {
+        finalOrderIds = [`PED-${Math.floor(100000 + Math.random() * 900000)}`];
+      }
+      const primaryOrderId = finalOrderIds.join(", ");
+
+      return {
+        id: `${Date.now()}-${index}-${Math.random().toString(36).substr(2, 5)}`,
+        socialNetworkId: snId,
+        socialNetworkName: snName,
+        serviceId: comboItem.serviceId,
+        serviceName: srvName,
+        quantity: comboItem.quantity,
+        suggestedPrice: autoSuggPrice || itemCharged,
+        chargedPrice: itemCharged,
+        providerCostAtPurchase: calculatedCostCOP,
+        providerCostUSD: itemCostUSD,
+        providerCostCOP: calculatedCostCOP,
+        trmUsed: trmState.valor || undefined,
+        trmDate: trmState.fecha || undefined,
+        orderId: primaryOrderId,
+        orderIds: finalOrderIds,
+      };
+    });
+
+    // Make sure rounding doesn't cause a 1-peso discrepancy with user-entered total
+    const currentSum = generatedItems.reduce((acc, itm) => acc + itm.chargedPrice, 0);
+    const diff = totalComboCharged - currentSum;
+    if (diff !== 0 && generatedItems.length > 0) {
+      generatedItems[0].chargedPrice += diff;
+    }
+
+    setAddedItems((prev) => [...prev, ...generatedItems]);
+    setSelectedComboId("");
+    setCustomComboPrice("");
+    setComboItemOrderIds({});
+  };
+
   const handleRemoveItem = (id: string) => {
     setAddedItems((prev) => prev.filter((item) => item.id !== id));
   };
@@ -577,6 +716,8 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
       // Reset form entirely
       setClientName("");
       setClientPhone("");
+      setSelectedClientObj(null);
+      setClientSearchQuery("");
       setForceNewClient(false);
       setAddedItems([]);
       setStatus("completado");
@@ -1085,8 +1226,8 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
               </h3>
             </div>
 
-            {/* Mode Switcher: Catálogo vs Servicio Personalizado / Otro */}
-            <div className={`grid grid-cols-2 p-1 rounded-xl mb-4 text-xs font-semibold ${
+            {/* Mode Switcher: Catálogo vs Combos vs Servicio Personalizado / Otro */}
+            <div className={`grid grid-cols-3 p-1 rounded-xl mb-4 text-xs font-semibold ${
               isDarkMode ? "bg-slate-800 text-slate-400" : "bg-gray-100 text-gray-600"
             }`}>
               <button
@@ -1095,7 +1236,7 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
                   setServiceEntryMode("catalog");
                   setError(null);
                 }}
-                className={`py-2 px-3 rounded-lg transition text-center cursor-pointer flex items-center justify-center gap-1.5 ${
+                className={`py-2 px-2 sm:px-3 rounded-lg transition text-center cursor-pointer flex items-center justify-center gap-1.5 ${
                   serviceEntryMode === "catalog"
                     ? isDarkMode
                       ? "bg-indigo-600 text-white shadow-xs font-bold"
@@ -1104,7 +1245,24 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
                 }`}
               >
                 <Layers className="w-3.5 h-3.5" />
-                <span>Catálogo Redes</span>
+                <span>Catálogo</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setServiceEntryMode("combo");
+                  setError(null);
+                }}
+                className={`py-2 px-2 sm:px-3 rounded-lg transition text-center cursor-pointer flex items-center justify-center gap-1.5 ${
+                  serviceEntryMode === "combo"
+                    ? isDarkMode
+                      ? "bg-indigo-600 text-white shadow-xs font-bold"
+                      : "bg-white text-indigo-900 shadow-xs font-bold"
+                    : "hover:text-gray-900 dark:hover:text-white"
+                }`}
+              >
+                <PackageOpen className="w-3.5 h-3.5 text-emerald-400" />
+                <span>Combos</span>
               </button>
               <button
                 type="button"
@@ -1112,7 +1270,7 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
                   setServiceEntryMode("custom");
                   setError(null);
                 }}
-                className={`py-2 px-3 rounded-lg transition text-center cursor-pointer flex items-center justify-center gap-1.5 ${
+                className={`py-2 px-2 sm:px-3 rounded-lg transition text-center cursor-pointer flex items-center justify-center gap-1.5 ${
                   serviceEntryMode === "custom"
                     ? isDarkMode
                       ? "bg-indigo-600 text-white shadow-xs font-bold"
@@ -1121,7 +1279,7 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
                 }`}
               >
                 <CreditCard className="w-3.5 h-3.5 text-amber-400" />
-                <span>Personalizado / Otro</span>
+                <span>Personalizado</span>
               </button>
             </div>
 
@@ -1402,6 +1560,156 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
                 >
                   <Plus className="w-4 h-4 mr-1.5" />
                   Agregar al Comprobante
+                </button>
+              </form>
+            ) : serviceEntryMode === "combo" ? (
+              /* Automated Combos & Packages Form */
+              <form onSubmit={handleAddComboItems} className="space-y-4">
+                <div>
+                  <label className={`block text-[11px] font-semibold uppercase ${
+                    isDarkMode ? "text-slate-400" : "text-gray-600"
+                  }`}>
+                    Seleccionar Combo
+                  </label>
+                  <select
+                    value={selectedComboId}
+                    onChange={(e) => setSelectedComboId(e.target.value)}
+                    className={`mt-1 block w-full px-3.5 py-2 border rounded-lg text-sm transition focus:outline-hidden focus:ring-2 focus:ring-indigo-500/20 ${
+                      isDarkMode
+                        ? "bg-slate-800 border-slate-700 text-white focus:border-indigo-400"
+                        : "bg-white border-gray-200 text-gray-800 focus:border-indigo-500"
+                    }`}
+                  >
+                    <option value="">-- Seleccionar Paquete Combo --</option>
+                    {combos
+                      .filter((c) => c.active !== false)
+                      .map((combo) => (
+                        <option key={combo.id} value={combo.id}>
+                          {combo.name} — ${Math.round(combo.comboPrice).toLocaleString("es-CO")}
+                        </option>
+                      ))}
+                  </select>
+                </div>
+
+                {selectedComboObj && (
+                  <div className="space-y-3.5">
+                    {/* Combo Breakdown summary */}
+                    <div className={`p-3.5 rounded-xl border text-xs space-y-2 ${
+                      isDarkMode ? "bg-slate-800/60 border-slate-700/80" : "bg-indigo-50/50 border-indigo-100"
+                    }`}>
+                      <div className="flex items-center justify-between font-semibold">
+                        <span className={isDarkMode ? "text-indigo-300" : "text-indigo-900"}>
+                          Contenido del Combo:
+                        </span>
+                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                          isDarkMode ? "bg-emerald-950 text-emerald-300 border border-emerald-800" : "bg-emerald-100 text-emerald-800"
+                        }`}>
+                          {selectedComboObj.items.length} servicios automáticos
+                        </span>
+                      </div>
+
+                      <div className="space-y-1.5 pt-1">
+                        {selectedComboObj.items.map((item, idx) => {
+                          const srv = services.find((s) => s.id === item.serviceId);
+                          const srvName = srv?.name || item.serviceId;
+                          const snName = item.socialNetworkId.charAt(0).toUpperCase() + item.socialNetworkId.slice(1);
+                          return (
+                            <div key={idx} className="flex items-center justify-between text-[11px]">
+                              <span className={isDarkMode ? "text-slate-300" : "text-gray-700"}>
+                                • <strong className="font-semibold">{item.quantity.toLocaleString("es-CO")}</strong> {srvName} ({snName})
+                              </span>
+                              <span className={`font-mono text-[10px] ${isDarkMode ? "text-slate-400" : "text-gray-500"}`}>
+                                ID Proveedor #{idx + 1}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* Combo Price Charged */}
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className={`block text-[11px] font-semibold uppercase ${
+                          isDarkMode ? "text-slate-400" : "text-gray-600"
+                        }`}>
+                          Precio Total del Combo al Cliente (COP)
+                        </label>
+                        <span className="text-[10px] text-emerald-500 font-bold font-mono">
+                          Editable
+                        </span>
+                      </div>
+                      <div className="relative rounded-lg shadow-2xs">
+                        <span className="absolute inset-y-0 left-0 pl-3.5 flex items-center font-bold text-gray-400 text-sm">
+                          $
+                        </span>
+                        <input
+                          type="number"
+                          required
+                          value={customComboPrice}
+                          onChange={(e) => setCustomComboPrice(e.target.value)}
+                          placeholder="18000"
+                          className={`block w-full pl-8 pr-3.5 py-2 border rounded-lg text-sm font-semibold transition focus:outline-hidden focus:ring-2 focus:ring-indigo-500/20 ${
+                            isDarkMode
+                              ? "bg-slate-800 border-slate-700 text-white focus:border-indigo-400"
+                              : "bg-white border-gray-200 text-gray-800 focus:border-indigo-500"
+                          }`}
+                        />
+                      </div>
+                      <p className={`text-[10px] mt-1 ${isDarkMode ? "text-slate-400" : "text-gray-500"}`}>
+                        Se distribuirá automáticamente en {selectedComboObj.items.length} renglones separados con el mismo formato estándar.
+                      </p>
+                    </div>
+
+                    {/* Order IDs for each item in the combo */}
+                    <div className="space-y-2 pt-1 border-t border-dashed border-gray-200 dark:border-slate-800">
+                      <label className={`block text-[11px] font-semibold uppercase ${
+                        isDarkMode ? "text-slate-400" : "text-gray-600"
+                      }`}>
+                        IDs de Proveedor por Servicio (Opcionales)
+                      </label>
+                      <div className="space-y-2">
+                        {selectedComboObj.items.map((item, idx) => {
+                          const srv = services.find((s) => s.id === item.serviceId);
+                          const srvName = srv?.name || item.serviceId;
+                          return (
+                            <div key={idx} className="flex items-center gap-2">
+                              <span className={`text-[11px] font-medium w-28 truncate ${
+                                isDarkMode ? "text-slate-300" : "text-gray-700"
+                              }`}>
+                                {item.quantity} {srvName}:
+                              </span>
+                              <input
+                                type="text"
+                                value={comboItemOrderIds[idx] || ""}
+                                onChange={(e) =>
+                                  setComboItemOrderIds((prev) => ({
+                                    ...prev,
+                                    [idx]: e.target.value,
+                                  }))
+                                }
+                                placeholder="Auto-generar ID"
+                                className={`flex-1 px-3 py-1.5 border rounded-lg text-xs font-mono transition focus:outline-hidden focus:ring-2 focus:ring-indigo-500/20 ${
+                                  isDarkMode
+                                    ? "bg-slate-800 border-slate-700 text-white placeholder-slate-500 focus:border-indigo-400"
+                                    : "bg-white border-gray-200 text-gray-800 placeholder-gray-400 focus:border-indigo-500"
+                                }`}
+                              />
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={!selectedComboId || !customComboPrice || parseFloat(customComboPrice) < 0}
+                  className="w-full flex justify-center items-center py-2.5 px-4 border border-transparent rounded-lg shadow-sm text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-hidden disabled:opacity-40 transition mt-2 cursor-pointer active:scale-[0.99]"
+                >
+                  <Plus className="w-4 h-4 mr-1.5" />
+                  Agregar Servicios del Combo al Comprobante
                 </button>
               </form>
             ) : (

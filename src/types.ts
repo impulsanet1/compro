@@ -34,6 +34,26 @@ export interface ServiceQuantity {
   active: boolean;
 }
 
+export interface ServiceComboItem {
+  socialNetworkId: string;
+  serviceId: string;
+  quantity: number;
+  // Optional custom price allocated for this line (if not set, distributed proportionally)
+  allocatedPrice?: number;
+}
+
+export interface ServiceCombo {
+  id: string;
+  name: string; // e.g. "Combo TikTok (2.000 Likes + 5.000 Vistas)"
+  description?: string;
+  socialNetworkId?: string; // e.g. "tiktok", "instagram", "facebook", "general"
+  comboPrice: number; // e.g. 18000 COP
+  items: ServiceComboItem[];
+  active: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
 export interface Service {
   id: string;
   socialNetworkId: string;

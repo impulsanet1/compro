@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { SocialNetwork, Service, BusinessConfig } from "./types";
+import { SocialNetwork, Service, BusinessConfig, ServiceCombo } from "./types";
 
 export const DEFAULT_BUSINESS_CONFIG: BusinessConfig = {
   businessName: "ImpulsaNet",
@@ -254,3 +254,73 @@ export const DEFAULT_SERVICES: Service[] = [
     ]
   }
 ];
+
+export const DEFAULT_COMBOS: ServiceCombo[] = [
+  {
+    id: "combo-tiktok-2k-likes-5k-vistas",
+    name: "Combo TikTok (2.000 Likes + 5.000 Vistas)",
+    description: "2.000 Likes de TikTok + 5.000 Vistas de TikTok",
+    socialNetworkId: "tiktok",
+    comboPrice: 18000,
+    active: true,
+    items: [
+      {
+        socialNetworkId: "tiktok",
+        serviceId: "tt-likes",
+        quantity: 2000,
+        allocatedPrice: 12000,
+      },
+      {
+        socialNetworkId: "tiktok",
+        serviceId: "tt-views",
+        quantity: 5000,
+        allocatedPrice: 6000,
+      },
+    ],
+  },
+  {
+    id: "combo-ig-1k-seguidores-1k-likes",
+    name: "Combo Instagram Impulso (1.000 Seguidores + 1.000 Likes)",
+    description: "1.000 Seguidores de Instagram + 1.000 Likes de Instagram",
+    socialNetworkId: "instagram",
+    comboPrice: 20000,
+    active: true,
+    items: [
+      {
+        socialNetworkId: "instagram",
+        serviceId: "ig-followers",
+        quantity: 1000,
+        allocatedPrice: 14000,
+      },
+      {
+        socialNetworkId: "instagram",
+        serviceId: "ig-likes",
+        quantity: 1000,
+        allocatedPrice: 6000,
+      },
+    ],
+  },
+  {
+    id: "combo-fb-1k-seguidores-1k-likes",
+    name: "Combo Facebook Básico (1.000 Seguidores + 1.000 Likes)",
+    description: "1.000 Seguidores de Facebook + 1.000 Likes de Facebook",
+    socialNetworkId: "facebook",
+    comboPrice: 22000,
+    active: true,
+    items: [
+      {
+        socialNetworkId: "facebook",
+        serviceId: "fb-followers",
+        quantity: 1000,
+        allocatedPrice: 14000,
+      },
+      {
+        socialNetworkId: "facebook",
+        serviceId: "fb-likes",
+        quantity: 1000,
+        allocatedPrice: 8000,
+      },
+    ],
+  },
+];
+

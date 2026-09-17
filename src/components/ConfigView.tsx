@@ -31,9 +31,18 @@ import {
   RefreshCw,
   CreditCard,
   Smartphone,
-  Globe
+  Globe,
+  PackageOpen
 } from "lucide-react";
-import { BusinessConfig, SocialNetwork, Service, getServiceBaseCosts, calculateServicePrices } from "../types";
+import {
+  BusinessConfig,
+  SocialNetwork,
+  Service,
+  ServiceCombo,
+  ServiceComboItem,
+  getServiceBaseCosts,
+  calculateServicePrices
+} from "../types";
 import { motion, AnimatePresence } from "motion/react";
 
 export const ConfigView: React.FC = () => {
@@ -41,8 +50,8 @@ export const ConfigView: React.FC = () => {
     businessConfig,
     socialNetworks,
     services,
+    combos,
     trmState,
-    fetchTRM,
     updateBusinessConfig,
     addSocialNetwork,
     updateSocialNetwork,
@@ -50,6 +59,9 @@ export const ConfigView: React.FC = () => {
     addService,
     updateService,
     deleteService,
+    addCombo,
+    updateCombo,
+    deleteCombo,
     restoreDefaults,
     isDarkMode
   } = useApp();
@@ -57,7 +69,7 @@ export const ConfigView: React.FC = () => {
   const formatCOP = (val: number) => "$" + Math.round(val).toLocaleString("es-CO");
 
   // Tab systems or section selectors
-  const [activeTab, setActiveTab] = useState<"general" | "services">("general");
+  const [activeTab, setActiveTab] = useState<"general" | "services" | "combos">("general");
 
   // General Settings state
   const [bName, setBName] = useState(businessConfig.businessName);
@@ -98,6 +110,19 @@ export const ConfigView: React.FC = () => {
 
   // Live calculator test quantity
   const [testQuantity, setTestQuantity] = useState<string>("3250");
+
+  // Combos tab state
+  const [editingComboId, setEditingComboId] = useState<string | null>(null);
+  const [comboNameInput, setComboNameInput] = useState("");
+  const [comboDescInput, setComboDescInput] = useState("");
+  const [comboSocialInput, setComboSocialInput] = useState("tiktok");
+  const [comboPriceInput, setComboPriceInput] = useState("");
+  const [comboItemsInput, setComboItemsInput] = useState<ServiceComboItem[]>([
+    { socialNetworkId: "tiktok", serviceId: "tt-likes", quantity: 2000, allocatedPrice: 12000 },
+    { socialNetworkId: "tiktok", serviceId: "tt-views", quantity: 5000, allocatedPrice: 6000 }
+  ]);
+  const [showAddComboForm, setShowAddComboForm] = useState(false);
+  const [comboSuccessMessage, setComboSuccessMessage] = useState<string | null>(null);
 
   // Filtered services for the currently selected social network
   const currentServices = useMemo(() => {
@@ -317,6 +342,83 @@ export const ConfigView: React.FC = () => {
     }
   };
 
+  // Combos action helpers
+  const handleOpenAddCombo = () => {
+    setEditingComboId(null);
+    setComboNameInput("");
+    setComboDescInput("");
+    setComboSocialInput(socialNetworks[0]?.id || "tiktok");
+    setComboPriceInput("");
+    setComboItemsInput([
+      { socialNetworkId: "tiktok", serviceId: "tt-likes", quantity: 2000, allocatedPrice: 12000 },
+      { socialNetworkId: "tiktok", serviceId: "tt-views", quantity: 5000, allocatedPrice: 6000 }
+    ]);
+    setShowAddComboForm(true);
+  };
+
+  const handleOpenEditCombo = (combo: ServiceCombo) => {
+    setEditingComboId(combo.id);
+    setComboNameInput(combo.name);
+    setComboDescInput(combo.description || "");
+    setComboSocialInput(combo.socialNetworkId);
+    setComboPriceInput(combo.comboPrice.toString());
+    setComboItemsInput(
+      combo.items && combo.items.length > 0
+        ? JSON.parse(JSON.stringify(combo.items))
+        : [{ socialNetworkId: combo.socialNetworkId, serviceId: "", quantity: 1000, allocatedPrice: combo.comboPrice }]
+    );
+    setShowAddComboForm(true);
+  };
+
+  const handleSaveCombo = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!comboNameInput.trim()) return;
+
+    const priceNum = parseFloat(comboPriceInput);
+    if (isNaN(priceNum) || priceNum < 0) return;
+
+    const comboId = editingComboId || `combo-${Date.now()}`;
+    const newCombo: ServiceCombo = {
+      id: comboId,
+      name: comboNameInput.trim(),
+      description: comboDescInput.trim() || undefined,
+      socialNetworkId: comboSocialInput,
+      comboPrice: priceNum,
+      active: true,
+      items: comboItemsInput.map((itm) => ({
+        ...itm,
+        quantity: Math.max(1, itm.quantity),
+        allocatedPrice: itm.allocatedPrice || 0
+      }))
+    };
+
+    try {
+      if (editingComboId) {
+        await updateCombo(newCombo);
+        setComboSuccessMessage("¡Combo actualizado con éxito!");
+      } else {
+        await addCombo(newCombo);
+        setComboSuccessMessage("¡Nuevo combo creado con éxito!");
+      }
+      setShowAddComboForm(false);
+      setTimeout(() => setComboSuccessMessage(null), 3000);
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleDeleteCombo = async (id: string) => {
+    if (confirm("¿Está seguro de eliminar este combo?")) {
+      try {
+        await deleteCombo(id);
+        setComboSuccessMessage("Combo eliminado.");
+        setTimeout(() => setComboSuccessMessage(null), 2500);
+      } catch (err) {
+        console.error(err);
+      }
+    }
+  };
+
   // Render social network icon helper
   const renderSocialIcon = (iconName: string, className = "w-4 h-4") => {
     switch (iconName) {
@@ -388,6 +490,19 @@ export const ConfigView: React.FC = () => {
           }`}
         >
           Centro de Costos Inteligente
+        </button>
+        <button
+          onClick={() => setActiveTab("combos")}
+          className={`pb-3 border-b-2 px-1 transition cursor-pointer flex items-center gap-1.5 ${
+            activeTab === "combos"
+              ? "border-indigo-500 text-indigo-400 font-bold"
+              : isDarkMode
+              ? "border-transparent text-slate-400 hover:text-slate-200"
+              : "border-transparent text-gray-400 hover:text-gray-600"
+          }`}
+        >
+          <PackageOpen className="w-3.5 h-3.5" />
+          <span>Combos y Paquetes</span>
         </button>
       </div>
 
@@ -1028,54 +1143,6 @@ export const ConfigView: React.FC = () => {
                       </span>
                     </div>
 
-                    {/* TRM Colombia Live Card */}
-                    <div className={`text-white rounded-xl p-4 shadow-sm flex flex-wrap items-center justify-between gap-3 border ${
-                      isDarkMode ? "bg-indigo-950/70 border-indigo-900" : "bg-indigo-950 border-indigo-850"
-                    }`}>
-                      <div className="flex items-center gap-3">
-                        <div className="p-2.5 bg-indigo-900/80 rounded-lg text-emerald-400 border border-indigo-800">
-                          <DollarSign className="w-5 h-5" />
-                        </div>
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <span className="text-[11px] font-bold text-indigo-200 uppercase tracking-wider">TRM Oficial Colombia</span>
-                            <span className="bg-emerald-500/20 text-emerald-300 text-[10px] font-bold px-2 py-0.5 rounded-full border border-emerald-500/30">
-                              vía dolarapi.com
-                            </span>
-                          </div>
-                          <div className="text-xl font-extrabold font-mono text-white mt-0.5">
-                            {trmState.loading ? (
-                              <span className="text-xs font-normal text-indigo-300">Cargando TRM...</span>
-                            ) : trmState.valor ? (
-                              `$${trmState.valor.toLocaleString("es-CO", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} COP`
-                            ) : (
-                              <span className="text-xs font-semibold text-amber-300">TRM no disponible</span>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="flex items-center gap-3">
-                        {trmState.fecha && (
-                          <div className="text-right hidden sm:block">
-                            <div className="text-[10px] text-indigo-300">Fecha TRM:</div>
-                            <div className="text-xs font-mono font-medium text-indigo-100">
-                              {new Date(trmState.fecha).toLocaleDateString("es-CO")}
-                            </div>
-                          </div>
-                        )}
-                        <button
-                          type="button"
-                          onClick={() => fetchTRM()}
-                          className="p-2 bg-indigo-900 hover:bg-indigo-800 text-indigo-200 hover:text-white rounded-lg transition cursor-pointer text-xs font-medium flex items-center gap-1 border border-indigo-800"
-                          title="Actualizar TRM"
-                        >
-                          <RefreshCw className={`w-3.5 h-3.5 ${trmState.loading ? "animate-spin" : ""}`} />
-                          <span>Actualizar TRM</span>
-                        </button>
-                      </div>
-                    </div>
-
                     {/* Single Cost Record Form */}
                     <form onSubmit={handleSaveServiceBaseCosts} className={`border rounded-xl p-4 space-y-4 ${
                       isDarkMode ? "bg-slate-800/50 border-slate-700/80" : "bg-gray-50/70 border-gray-200/80"
@@ -1378,6 +1445,385 @@ export const ConfigView: React.FC = () => {
               )}
             </div>
           </>
+        )}
+
+        {/* Tab 3: Combos y Paquetes Manager */}
+        {activeTab === "combos" && (
+          <div className="col-span-1 lg:col-span-12 space-y-6">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div>
+                <h3 className={`text-sm font-bold uppercase tracking-wider flex items-center gap-2 ${
+                  isDarkMode ? "text-slate-200" : "text-gray-900"
+                }`}>
+                  <PackageOpen className="w-4 h-4 text-emerald-500" />
+                  Gestión de Combos y Paquetes Especiales
+                </h3>
+                <p className={`text-xs mt-0.5 ${isDarkMode ? "text-slate-400" : "text-gray-500"}`}>
+                  Cree paquetes combinados (ej. Likes + Vistas de TikTok) para emitir con un solo clic conservando IDs y costos independientes.
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={handleOpenAddCombo}
+                className="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold rounded-lg shadow-xs transition cursor-pointer self-start sm:self-auto"
+              >
+                <Plus className="w-4 h-4" />
+                Nuevo Combo
+              </button>
+            </div>
+
+            {comboSuccessMessage && (
+              <div className="p-3 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 rounded-lg text-emerald-800 dark:text-emerald-300 text-xs flex items-center gap-2">
+                <Check className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                <span>{comboSuccessMessage}</span>
+              </div>
+            )}
+
+            {/* List of Combos */}
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {combos.map((combo) => {
+                const sn = socialNetworks.find((s) => s.id === combo.socialNetworkId);
+                const snName = sn?.name || (combo.socialNetworkId.charAt(0).toUpperCase() + combo.socialNetworkId.slice(1));
+
+                return (
+                  <div
+                    key={combo.id}
+                    className={`border rounded-xl p-4 flex flex-col justify-between transition shadow-xs ${
+                      isDarkMode ? "bg-slate-900/90 border-slate-800" : "bg-white border-gray-200"
+                    }`}
+                  >
+                    <div>
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <span className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold uppercase mb-1.5 ${
+                            isDarkMode ? "bg-slate-800 text-indigo-400" : "bg-indigo-50 text-indigo-700"
+                          }`}>
+                            {snName}
+                          </span>
+                          <h4 className={`text-sm font-bold ${isDarkMode ? "text-white" : "text-gray-900"}`}>
+                            {combo.name}
+                          </h4>
+                        </div>
+                        <span className="text-sm font-extrabold text-emerald-500 font-mono">
+                          ${Math.round(combo.comboPrice).toLocaleString("es-CO")}
+                        </span>
+                      </div>
+
+                      {combo.description && (
+                        <p className={`text-xs mt-1.5 ${isDarkMode ? "text-slate-400" : "text-gray-500"}`}>
+                          {combo.description}
+                        </p>
+                      )}
+
+                      {/* Items list */}
+                      <div className="mt-3 pt-3 border-t border-dashed border-gray-200 dark:border-slate-800 space-y-1.5">
+                        <span className={`text-[10px] font-bold uppercase tracking-wider block ${
+                          isDarkMode ? "text-slate-400" : "text-gray-400"
+                        }`}>
+                          Servicios incluidos ({combo.items.length}):
+                        </span>
+                        {combo.items.map((itm, i) => {
+                          const srv = services.find((s) => s.id === itm.serviceId);
+                          return (
+                            <div key={i} className="flex justify-between items-center text-xs">
+                              <span className={isDarkMode ? "text-slate-300" : "text-gray-700"}>
+                                • {itm.quantity.toLocaleString("es-CO")} {srv?.name || itm.serviceId}
+                              </span>
+                              {itm.allocatedPrice ? (
+                                <span className={`font-mono text-[11px] ${isDarkMode ? "text-slate-400" : "text-gray-500"}`}>
+                                  ${Math.round(itm.allocatedPrice).toLocaleString("es-CO")}
+                                </span>
+                              ) : null}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    <div className="mt-4 pt-3 border-t border-gray-100 dark:border-slate-800/80 flex items-center justify-end gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleOpenEditCombo(combo)}
+                        className={`p-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 cursor-pointer transition ${
+                          isDarkMode ? "text-slate-400 hover:text-white hover:bg-slate-800" : "text-gray-600 hover:text-gray-900 hover:bg-gray-100"
+                        }`}
+                      >
+                        <Edit2 className="w-3.5 h-3.5" />
+                        <span>Editar</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteCombo(combo.id)}
+                        className="p-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 cursor-pointer text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950/30 transition"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Eliminar</span>
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Modal / Form to Add or Edit Combo */}
+            <AnimatePresence>
+              {showAddComboForm && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
+                  <motion.div
+                    initial={{ opacity: 0, scale: 0.95 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    exit={{ opacity: 0, scale: 0.95 }}
+                    className={`w-full max-w-xl max-h-[90vh] overflow-y-auto rounded-2xl border p-6 shadow-2xl ${
+                      isDarkMode ? "bg-slate-900 border-slate-800 text-white" : "bg-white border-gray-200 text-gray-900"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between pb-3 border-b border-gray-100 dark:border-slate-800">
+                      <h3 className="text-base font-bold flex items-center gap-2">
+                        <PackageOpen className="w-5 h-5 text-emerald-500" />
+                        {editingComboId ? "Editar Combo" : "Nuevo Combo de Servicios"}
+                      </h3>
+                      <button
+                        onClick={() => setShowAddComboForm(false)}
+                        className="text-gray-400 hover:text-gray-600 dark:hover:text-white p-1 rounded-lg cursor-pointer"
+                      >
+                        <X className="w-5 h-5" />
+                      </button>
+                    </div>
+
+                    <form onSubmit={handleSaveCombo} className="mt-4 space-y-4">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <div>
+                          <label className={`block text-[11px] font-semibold uppercase mb-1 ${
+                            isDarkMode ? "text-slate-400" : "text-gray-600"
+                          }`}>
+                            Nombre del Combo
+                          </label>
+                          <input
+                            type="text"
+                            required
+                            value={comboNameInput}
+                            onChange={(e) => setComboNameInput(e.target.value)}
+                            placeholder="Ej. Combo TikTok 2k Likes + 5k Vistas"
+                            className={`w-full px-3.5 py-2 border rounded-lg text-sm transition focus:outline-hidden focus:ring-2 focus:ring-indigo-500/20 ${
+                              isDarkMode
+                                ? "bg-slate-800 border-slate-700 text-white focus:border-indigo-400"
+                                : "bg-white border-gray-200 text-gray-800 focus:border-indigo-500"
+                            }`}
+                          />
+                        </div>
+
+                        <div>
+                          <label className={`block text-[11px] font-semibold uppercase mb-1 ${
+                            isDarkMode ? "text-slate-400" : "text-gray-600"
+                          }`}>
+                            Red Social Principal
+                          </label>
+                          <select
+                            value={comboSocialInput}
+                            onChange={(e) => setComboSocialInput(e.target.value)}
+                            className={`w-full px-3.5 py-2 border rounded-lg text-sm transition focus:outline-hidden focus:ring-2 focus:ring-indigo-500/20 ${
+                              isDarkMode
+                                ? "bg-slate-800 border-slate-700 text-white focus:border-indigo-400"
+                                : "bg-white border-gray-200 text-gray-800 focus:border-indigo-500"
+                            }`}
+                          >
+                            {socialNetworks.map((sn) => (
+                              <option key={sn.id} value={sn.id}>
+                                {sn.name}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <div>
+                          <label className={`block text-[11px] font-semibold uppercase mb-1 ${
+                            isDarkMode ? "text-slate-400" : "text-gray-600"
+                          }`}>
+                            Precio del Combo al Cliente (COP)
+                          </label>
+                          <div className="relative">
+                            <span className="absolute inset-y-0 left-0 pl-3 flex items-center text-gray-400 text-xs font-bold">$</span>
+                            <input
+                              type="number"
+                              required
+                              value={comboPriceInput}
+                              onChange={(e) => setComboPriceInput(e.target.value)}
+                              placeholder="18000"
+                              className={`w-full pl-7 pr-3 py-2 border rounded-lg text-sm font-semibold transition focus:outline-hidden focus:ring-2 focus:ring-indigo-500/20 ${
+                                isDarkMode
+                                  ? "bg-slate-800 border-slate-700 text-white focus:border-indigo-400"
+                                  : "bg-white border-gray-200 text-gray-800 focus:border-indigo-500"
+                              }`}
+                            />
+                          </div>
+                        </div>
+
+                        <div>
+                          <label className={`block text-[11px] font-semibold uppercase mb-1 ${
+                            isDarkMode ? "text-slate-400" : "text-gray-600"
+                          }`}>
+                            Descripción / Nota
+                          </label>
+                          <input
+                            type="text"
+                            value={comboDescInput}
+                            onChange={(e) => setComboDescInput(e.target.value)}
+                            placeholder="Ej. Promoción especial para TikTokers"
+                            className={`w-full px-3.5 py-2 border rounded-lg text-sm transition focus:outline-hidden focus:ring-2 focus:ring-indigo-500/20 ${
+                              isDarkMode
+                                ? "bg-slate-800 border-slate-700 text-white focus:border-indigo-400"
+                                : "bg-white border-gray-200 text-gray-800 focus:border-indigo-500"
+                            }`}
+                          />
+                        </div>
+                      </div>
+
+                      {/* Items Builder in Combo */}
+                      <div className="pt-2 border-t border-gray-100 dark:border-slate-800 space-y-3">
+                        <div className="flex items-center justify-between">
+                          <label className={`block text-xs font-bold uppercase tracking-wider ${
+                            isDarkMode ? "text-slate-300" : "text-gray-700"
+                          }`}>
+                            Servicios que componen el combo ({comboItemsInput.length})
+                          </label>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const firstSrv = services[0];
+                              setComboItemsInput((prev) => [
+                                ...prev,
+                                {
+                                  socialNetworkId: firstSrv?.socialNetworkId || "tiktok",
+                                  serviceId: firstSrv?.id || "",
+                                  quantity: 1000,
+                                  allocatedPrice: 5000
+                                }
+                              ]);
+                            }}
+                            className="text-xs text-indigo-500 hover:text-indigo-600 font-bold flex items-center gap-1 cursor-pointer"
+                          >
+                            <Plus className="w-3.5 h-3.5" />
+                            Agregar Servicio
+                          </button>
+                        </div>
+
+                        <div className="space-y-2">
+                          {comboItemsInput.map((itm, idx) => (
+                            <div
+                              key={idx}
+                              className={`p-3 rounded-lg border grid grid-cols-1 sm:grid-cols-12 gap-2 items-center text-xs ${
+                                isDarkMode ? "bg-slate-800/60 border-slate-700" : "bg-gray-50 border-gray-200"
+                              }`}
+                            >
+                              <div className="sm:col-span-6">
+                                <label className="block text-[10px] text-gray-400 mb-0.5">Servicio:</label>
+                                <select
+                                  value={itm.serviceId}
+                                  onChange={(e) => {
+                                    const sId = e.target.value;
+                                    const srv = services.find((s) => s.id === sId);
+                                    setComboItemsInput((prev) =>
+                                      prev.map((c, i) =>
+                                        i === idx
+                                          ? {
+                                              ...c,
+                                              serviceId: sId,
+                                              socialNetworkId: srv ? srv.socialNetworkId : c.socialNetworkId
+                                            }
+                                          : c
+                                      )
+                                    );
+                                  }}
+                                  className={`w-full px-2 py-1.5 border rounded text-xs transition ${
+                                    isDarkMode ? "bg-slate-900 border-slate-700 text-white" : "bg-white border-gray-300 text-gray-900"
+                                  }`}
+                                >
+                                  <option value="">-- Seleccionar --</option>
+                                  {services.map((srv) => (
+                                    <option key={srv.id} value={srv.id}>
+                                      {srv.name} ({srv.socialNetworkId})
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+
+                              <div className="sm:col-span-3">
+                                <label className="block text-[10px] text-gray-400 mb-0.5">Cantidad:</label>
+                                <input
+                                  type="number"
+                                  value={itm.quantity}
+                                  onChange={(e) => {
+                                    const q = parseInt(e.target.value) || 0;
+                                    setComboItemsInput((prev) =>
+                                      prev.map((c, i) => (i === idx ? { ...c, quantity: q } : c))
+                                    );
+                                  }}
+                                  className={`w-full px-2 py-1.5 border rounded text-xs transition font-mono ${
+                                    isDarkMode ? "bg-slate-900 border-slate-700 text-white" : "bg-white border-gray-300 text-gray-900"
+                                  }`}
+                                />
+                              </div>
+
+                              <div className="sm:col-span-2">
+                                <label className="block text-[10px] text-gray-400 mb-0.5">Precio Asig.:</label>
+                                <input
+                                  type="number"
+                                  value={itm.allocatedPrice || 0}
+                                  onChange={(e) => {
+                                    const p = parseFloat(e.target.value) || 0;
+                                    setComboItemsInput((prev) =>
+                                      prev.map((c, i) => (i === idx ? { ...c, allocatedPrice: p } : c))
+                                    );
+                                  }}
+                                  className={`w-full px-2 py-1.5 border rounded text-xs transition font-mono ${
+                                    isDarkMode ? "bg-slate-900 border-slate-700 text-white" : "bg-white border-gray-300 text-gray-900"
+                                  }`}
+                                />
+                              </div>
+
+                              <div className="sm:col-span-1 flex justify-end pt-3 sm:pt-0">
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setComboItemsInput((prev) => prev.filter((_, i) => i !== idx))
+                                  }
+                                  disabled={comboItemsInput.length <= 1}
+                                  className="text-red-400 hover:text-red-500 disabled:opacity-30 p-1 cursor-pointer"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="pt-4 border-t border-gray-100 dark:border-slate-800 flex items-center justify-end gap-3">
+                        <button
+                          type="button"
+                          onClick={() => setShowAddComboForm(false)}
+                          className={`px-4 py-2 text-xs font-semibold rounded-lg cursor-pointer ${
+                            isDarkMode ? "text-slate-300 hover:bg-slate-800" : "text-gray-600 hover:bg-gray-100"
+                          }`}
+                        >
+                          Cancelar
+                        </button>
+                        <button
+                          type="submit"
+                          className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-lg shadow-xs transition cursor-pointer"
+                        >
+                          {editingComboId ? "Guardar Cambios" : "Crear Combo"}
+                        </button>
+                      </div>
+                    </form>
+                  </motion.div>
+                </div>
+              )}
+            </AnimatePresence>
+          </div>
         )}
       </div>
     </div>

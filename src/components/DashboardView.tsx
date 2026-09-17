@@ -22,7 +22,8 @@ import {
   ArrowUp,
   ArrowDown,
   ShieldCheck,
-  Award
+  Award,
+  RefreshCw
 } from "lucide-react";
 import { Receipt, getNormalizedStatus, normalizeContact, getClientCode, resolveReceiptWarranty } from "../types";
 import { motion } from "motion/react";
@@ -129,7 +130,7 @@ const MONTH_NAMES = [
 ];
 
 export const DashboardView: React.FC<DashboardViewProps> = ({ onViewChange, onSelectReceipt }) => {
-  const { receipts, clients, services, isDarkMode, businessConfig } = useApp();
+  const { receipts, clients, services, isDarkMode, businessConfig, trmState, fetchTRM } = useApp();
 
   const [hideAmounts, setHideAmounts] = useState<boolean>(() => {
     try {
@@ -605,6 +606,40 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onViewChange, onSe
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
+          {/* TRM Colombia Real-Time Rate & Update Action */}
+          <div
+            className={`flex items-center gap-2 text-xs font-semibold rounded-lg px-2.5 py-1.5 border shadow-2xs transition ${
+              isDarkMode
+                ? "bg-slate-800/90 border-slate-700 text-slate-200"
+                : "bg-white border-gray-100 text-gray-800"
+            }`}
+          >
+            <div className="flex items-center gap-1.5">
+              <span className="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-500 font-mono">
+                TRM
+              </span>
+              <span className="font-mono font-bold text-xs text-emerald-500">
+                {trmState.valor
+                  ? `$${Math.round(trmState.valor).toLocaleString("es-CO")}`
+                  : "Cargando..."}
+              </span>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => fetchTRM()}
+              disabled={trmState.loading}
+              title="Actualizar TRM oficial desde DolarAPI Colombia"
+              className={`p-1 rounded-md transition cursor-pointer disabled:opacity-50 ${
+                isDarkMode
+                  ? "hover:bg-slate-700 text-slate-400 hover:text-slate-100"
+                  : "hover:bg-gray-100 text-gray-500 hover:text-gray-900"
+              }`}
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${trmState.loading ? "animate-spin text-indigo-500" : ""}`} />
+            </button>
+          </div>
+
           {/* Privacy Button: Hide / Show Financials */}
           <button
             type="button"

@@ -21,6 +21,7 @@ import {
   BusinessConfig,
   SocialNetwork,
   Service,
+  ServiceCombo,
   Receipt,
   Client,
   TrmState,
@@ -33,7 +34,7 @@ import {
   matchPhones,
   buildReceiptsClientIndex
 } from "../types";
-import { DEFAULT_BUSINESS_CONFIG, DEFAULT_SOCIAL_NETWORKS, DEFAULT_SERVICES } from "../defaultData";
+import { DEFAULT_BUSINESS_CONFIG, DEFAULT_SOCIAL_NETWORKS, DEFAULT_SERVICES, DEFAULT_COMBOS } from "../defaultData";
 
 interface AppContextType {
   user: User | null;
@@ -42,6 +43,7 @@ interface AppContextType {
   businessConfig: BusinessConfig;
   socialNetworks: SocialNetwork[];
   services: Service[];
+  combos: ServiceCombo[];
   receipts: Receipt[];
   clients: Client[];
   supplierWarranties: SupplierWarrantyRecord[];
@@ -80,6 +82,11 @@ interface AppContextType {
   addService: (service: Service) => Promise<void>;
   updateService: (service: Service) => Promise<void>;
   deleteService: (id: string) => Promise<void>;
+
+  // Combos actions
+  addCombo: (combo: ServiceCombo) => Promise<void>;
+  updateCombo: (combo: ServiceCombo) => Promise<void>;
+  deleteCombo: (id: string) => Promise<void>;
   
   // Receipts actions
   createReceipt: (receiptData: Omit<Receipt, "id" | "consecutive"> & { clientId?: string; forceNewClient?: boolean }) => Promise<Receipt>;
@@ -123,6 +130,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [businessConfig, setBusinessConfig] = useState<BusinessConfig>(DEFAULT_BUSINESS_CONFIG);
   const [socialNetworks, setSocialNetworks] = useState<SocialNetwork[]>([]);
   const [services, setServices] = useState<Service[]>([]);
+  const [combos, setCombos] = useState<ServiceCombo[]>(DEFAULT_COMBOS);
   const [receipts, setReceipts] = useState<Receipt[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
   const [supplierWarranties, setSupplierWarranties] = useState<SupplierWarrantyRecord[]>([]);
@@ -309,6 +317,36 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     );
 
+    // Sync combos
+    const combosRef = collection(db, "combos");
+    const unsubCombos = onSnapshot(
+      combosRef,
+      (querySnap) => {
+        const combosFromDb: ServiceCombo[] = [];
+        querySnap.forEach((doc) => {
+          combosFromDb.push({ id: doc.id, ...doc.data() } as ServiceCombo);
+        });
+
+        if (combosFromDb.length === 0) {
+          setCombos(DEFAULT_COMBOS);
+        } else {
+          // Merge defaults with custom/updated
+          const merged = DEFAULT_COMBOS.map((def) => {
+            const found = combosFromDb.find((c) => c.id === def.id);
+            return found ? { ...def, ...found } : def;
+          });
+          const customOnly = combosFromDb.filter(
+            (c) => !DEFAULT_COMBOS.some((def) => def.id === c.id)
+          );
+          setCombos([...merged, ...customOnly]);
+        }
+      },
+      (error) => {
+        console.warn("Firestore combos error:", error);
+        setCombos(DEFAULT_COMBOS);
+      }
+    );
+
     // Sync receipts
     const receiptsRef = collection(db, "receipts");
     const unsubReceipts = onSnapshot(
@@ -367,6 +405,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       unsubConfig();
       unsubSocial();
       unsubServices();
+      unsubCombos();
       unsubReceipts();
       unsubClients();
       unsubSupplierWarranties();
@@ -664,6 +703,37 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const deleteService = async (id: string) => {
     await deleteDoc(doc(db, "services", id));
+  };
+
+  // Combos Operations
+  const addCombo = async (combo: ServiceCombo) => {
+    const cDoc = cleanForFirestore({
+      name: combo.name,
+      description: combo.description || "",
+      socialNetworkId: combo.socialNetworkId || "general",
+      comboPrice: Number(combo.comboPrice) || 0,
+      items: combo.items || [],
+      active: combo.active !== false,
+      updatedAt: new Date().toISOString()
+    });
+    await setDoc(doc(db, "combos", combo.id), cDoc);
+  };
+
+  const updateCombo = async (combo: ServiceCombo) => {
+    const cDoc = cleanForFirestore({
+      name: combo.name,
+      description: combo.description || "",
+      socialNetworkId: combo.socialNetworkId || "general",
+      comboPrice: Number(combo.comboPrice) || 0,
+      items: combo.items || [],
+      active: combo.active !== false,
+      updatedAt: new Date().toISOString()
+    });
+    await updateDoc(doc(db, "combos", combo.id), cDoc);
+  };
+
+  const deleteCombo = async (id: string) => {
+    await deleteDoc(doc(db, "combos", id));
   };
 
   // Receipt & Client Generation
@@ -1120,6 +1190,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
     }
 
+    // Re-initialize default combos
+    const combosQuery = await getDocs(collection(db, "combos"));
+    for (const cDoc of combosQuery.docs) {
+      await deleteDoc(doc(db, "combos", cDoc.id));
+    }
+    for (const combo of DEFAULT_COMBOS) {
+      await setDoc(doc(db, "combos", combo.id), cleanForFirestore(combo));
+    }
+
     // Reset config
     const configRef = doc(db, "config", "business");
     const initialConfig = { ...DEFAULT_BUSINESS_CONFIG, facebookSeeded: true };
@@ -1249,6 +1328,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         businessConfig,
         socialNetworks,
         services,
+        combos,
         receipts,
         clients,
         supplierWarranties,
@@ -1273,6 +1353,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         addService,
         updateService,
         deleteService,
+        addCombo,
+        updateCombo,
+        deleteCombo,
         createReceipt,
         deleteReceipt,
         updateReceipt,

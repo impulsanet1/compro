@@ -28,15 +28,16 @@ import {
   X,
   Sparkles
 } from "lucide-react";
-import { Receipt, getClientCode, getNormalizedStatus, isWarrantyForClient, buildReceiptsClientIndex, resolveReceiptWarranty } from "../types";
+import { Client, Receipt, getClientCode, getNormalizedStatus, isWarrantyForClient, buildReceiptsClientIndex, resolveReceiptWarranty } from "../types";
 import { RepurchaseModal } from "./RepurchaseModal";
+import { safeCopyToClipboard } from "../utils";
 
 interface ClientsViewProps {
   onSelectReceipt: (receipt: Receipt, editMode?: boolean) => void;
 }
 
 export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => {
-  const { clients, receipts, supplierWarranties, updateClientTag, updateClient, separateReceiptToNewClient, isDarkMode } = useApp();
+  const { clients, receipts, supplierWarranties, updateClientTag, updateClient, reassignClientCode, resolveDuplicateClientCodes, separateReceiptToNewClient, isDarkMode } = useApp();
   const formatCOP = (val: number) => "$" + Math.round(val).toLocaleString("es-CO");
 
   const [searchText, setSearchText] = useState("");
@@ -58,8 +59,10 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
   const [showEditClientModal, setShowEditClientModal] = useState(false);
   const [editClientName, setEditClientName] = useState("");
   const [editClientPhone, setEditClientPhone] = useState("");
+  const [editClientCode, setEditClientCode] = useState("");
   const [editClientTag, setEditClientTag] = useState<"Nuevo" | "VIP" | "Frecuente" | "Mayorista" | undefined>(undefined);
   const [isUpdatingClient, setIsUpdatingClient] = useState(false);
+  const [isResolvingDuplicates, setIsResolvingDuplicates] = useState(false);
 
   // User notification message
   const [userNotification, setUserNotification] = useState<{ type: "success" | "error"; message: string } | null>(null);
@@ -258,8 +261,47 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
     };
   }, [enrichedClients, clients]);
 
-  const handleCopyCode = (code: string) => {
-    navigator.clipboard.writeText(code);
+  // Detect any clients sharing the same code (e.g., ID 0083 assigned to two people)
+  const duplicateGroups = useMemo(() => {
+    const codeMap = new Map<string, Client[]>();
+    clients.forEach((c) => {
+      const cd = (c.clientCode || "").trim().padStart(4, "0");
+      if (cd && cd !== "0000") {
+        if (!codeMap.has(cd)) codeMap.set(cd, []);
+        codeMap.get(cd)!.push(c);
+      }
+    });
+    const res: Array<{ code: string; clients: Client[] }> = [];
+    codeMap.forEach((cList, code) => {
+      if (cList.length > 1) {
+        res.push({ code, clients: cList });
+      }
+    });
+    return res;
+  }, [clients]);
+
+  const handleResolveDuplicates = async () => {
+    setIsResolvingDuplicates(true);
+    try {
+      const res = await resolveDuplicateClientCodes();
+      setUserNotification({
+        type: "success",
+        message: res.resolvedCount > 0
+          ? `¡Conflicto resuelto! Se reasignaron ${res.resolvedCount} cliente(s) con nuevos IDs únicos automáticos.`
+          : "Todos los clientes tienen IDs únicos y verificados."
+      });
+    } catch (err: any) {
+      setUserNotification({
+        type: "error",
+        message: err?.message || "No se pudo resolver el conflicto de IDs."
+      });
+    } finally {
+      setIsResolvingDuplicates(false);
+    }
+  };
+
+  const handleCopyCode = async (code: string) => {
+    await safeCopyToClipboard(code);
     setCopiedCode(code);
     setTimeout(() => setCopiedCode(null), 2500);
   };
@@ -352,6 +394,75 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
           )}
         </button>
       </div>
+
+      {/* Alerta Destacada para IDs Duplicados (ej. Dos personas con ID 0083) */}
+      {duplicateGroups.length > 0 && (
+        <div className="bg-amber-500/10 dark:bg-amber-950/40 border-2 border-amber-500/40 rounded-2xl p-4 sm:p-5 shadow-sm space-y-3 animate-in fade-in">
+          <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+            <div className="flex items-start gap-3">
+              <div className="p-2.5 rounded-xl bg-amber-500/20 text-amber-600 dark:text-amber-400 shrink-0">
+                <AlertTriangle className="w-6 h-6" />
+              </div>
+              <div>
+                <h4 className="text-sm font-bold text-amber-900 dark:text-amber-200">
+                  Conflicto Detectado: {duplicateGroups.length === 1 ? `Hay 2 personas distintas con el ID #${duplicateGroups[0].code}` : "Existen clientes con IDs duplicados"}
+                </h4>
+                <p className="text-xs text-amber-800/80 dark:text-amber-300/80 mt-0.5">
+                  Se detectaron clientes diferentes registrados con el mismo código. Puedes resolverlo en 1 clic manteniendo el ID para el cliente original y asignando un nuevo ID único y libre al segundo.
+                </p>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              disabled={isResolvingDuplicates}
+              onClick={handleResolveDuplicates}
+              className="px-4 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-extrabold text-xs shadow-md transition active:scale-95 shrink-0 flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+            >
+              <Sparkles className="w-4 h-4" />
+              {isResolvingDuplicates ? "Resolviendo..." : "Resolver en 1 Clic"}
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
+            {duplicateGroups.map((group) => (
+              <div key={group.code} className="bg-white/90 dark:bg-slate-900/90 border border-amber-300 dark:border-amber-800/60 rounded-xl p-3 text-xs space-y-2">
+                <div className="flex items-center justify-between font-bold text-slate-800 dark:text-slate-100">
+                  <span className="font-mono bg-amber-100 dark:bg-amber-950 px-2 py-0.5 rounded text-amber-800 dark:text-amber-300 font-extrabold">
+                    ID #{group.code}
+                  </span>
+                  <span className="text-[11px] text-slate-500">
+                    {group.clients.length} personas comparten este código
+                  </span>
+                </div>
+                <div className="space-y-1.5 pl-1">
+                  {group.clients.map((c, i) => (
+                    <div key={c.id} className="flex items-center justify-between gap-2 text-[11px] text-slate-700 dark:text-slate-300 bg-slate-50 dark:bg-slate-800/50 p-1.5 rounded-lg border border-slate-200/50 dark:border-slate-700/50">
+                      <span className="font-semibold truncate">
+                        {i + 1}. {c.name} {c.phone ? `(${c.phone})` : ""}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedClientId(c.id);
+                          setEditClientName(c.name);
+                          setEditClientPhone(c.phone);
+                          setEditClientTag(c.tag as any);
+                          setEditClientCode(group.code);
+                          setShowEditClientModal(true);
+                        }}
+                        className="text-indigo-600 dark:text-indigo-400 hover:underline font-bold text-[10px] shrink-0 cursor-pointer"
+                      >
+                        ✏️ Cambiar ID
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Promotional & Warranty Eligibility Filter Banner */}
       <div className={`p-3 rounded-2xl border flex flex-wrap items-center justify-between gap-3 ${
@@ -760,6 +871,20 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
                       }`}>
                         ID: {selectedClient.computedCode}
                       </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditClientName(selectedClient.name);
+                          setEditClientPhone(selectedClient.phone);
+                          setEditClientTag(selectedClient.tag as any);
+                          setEditClientCode(selectedClient.computedCode);
+                          setShowEditClientModal(true);
+                        }}
+                        className="text-[10px] text-indigo-600 dark:text-indigo-400 hover:underline font-bold cursor-pointer"
+                        title="Cambiar o corregir código ID de este cliente"
+                      >
+                        ✏️ Modificar ID
+                      </button>
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
                       <h3 className={`text-lg font-bold ${isDarkMode ? "text-white" : "text-gray-950"}`}>{selectedClient.name}</h3>
@@ -827,6 +952,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
                           setEditClientName(selectedClient.name);
                           setEditClientPhone(selectedClient.phone);
                           setEditClientTag(selectedClient.tag as any);
+                          setEditClientCode(selectedClient.computedCode);
                           setShowEditClientModal(true);
                         }}
                         className={`inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1.5 rounded-lg transition active:scale-95 cursor-pointer shadow-2xs border ${
@@ -1347,6 +1473,46 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
                   <option value="Mayorista">💼 Mayorista</option>
                 </select>
               </div>
+
+              <div>
+                <div className="flex items-center justify-between">
+                  <label className={`block text-[11px] font-semibold uppercase ${
+                    isDarkMode ? "text-slate-400" : "text-gray-600"
+                  }`}>
+                    Código / ID de Cliente (4 dígitos)
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const used = new Set(
+                        clients
+                          .filter((c) => c.id !== selectedClient.id && c.clientCode)
+                          .map((c) => parseInt(c.clientCode!, 10))
+                          .filter((n) => !isNaN(n) && n > 0)
+                      );
+                      let n = 1;
+                      while (used.has(n)) n++;
+                      setEditClientCode(String(n).padStart(4, "0"));
+                    }}
+                    className="text-[10px] text-indigo-600 dark:text-indigo-400 hover:underline font-bold cursor-pointer"
+                  >
+                    Asignar siguiente ID libre
+                  </button>
+                </div>
+                <input
+                  type="text"
+                  maxLength={4}
+                  value={editClientCode}
+                  onChange={(e) => setEditClientCode(e.target.value.replace(/\D/g, ""))}
+                  placeholder="Ej. 0083"
+                  className={`mt-1 block w-full px-3 py-2 border rounded-lg text-sm font-mono font-bold ${
+                    isDarkMode ? "bg-slate-800 border-slate-700 text-indigo-300" : "bg-white border-gray-200 text-indigo-700"
+                  }`}
+                />
+                <p className={`text-[10px] mt-1 ${isDarkMode ? "text-slate-400" : "text-gray-500"}`}>
+                  Identificador único del cliente para WhatsApp y seguimiento.
+                </p>
+              </div>
             </div>
 
             <div className="pt-2 flex justify-end gap-2">
@@ -1372,10 +1538,19 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
                       phone: editClientPhone.trim(),
                       tag: editClientTag
                     });
+
+                    // If client code was modified, reassign it with collision check
+                    if (editClientCode.trim()) {
+                      const cleanCode = editClientCode.trim().padStart(4, "0");
+                      if (cleanCode !== selectedClient.computedCode) {
+                        await reassignClientCode(selectedClient.id, cleanCode);
+                      }
+                    }
+
                     setShowEditClientModal(false);
                     setUserNotification({
                       type: "success",
-                      message: `Datos del cliente y todos sus comprobantes actualizados correctamente.`
+                      message: `Datos del cliente y ID #${editClientCode.trim().padStart(4, "0") || selectedClient.computedCode} actualizados correctamente.`
                     });
                   } catch (err: any) {
                     console.error("Error updating client:", err);

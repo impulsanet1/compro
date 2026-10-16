@@ -4,7 +4,7 @@
  */
 
 import React, { useRef, useState, useEffect, useMemo } from "react";
-import { X, ShieldCheck, Edit3, Save, Trash2, ShieldAlert, Calendar, ChevronDown, ChevronUp, MessageSquare, Send, PhoneCall, ExternalLink, Bell, Plus, DollarSign, Layers, Download, Check } from "lucide-react";
+import { X, ShieldCheck, Edit3, Save, Trash2, ShieldAlert, Calendar, ChevronDown, ChevronUp, MessageSquare, Send, PhoneCall, ExternalLink, Bell, Plus, DollarSign, Layers, Download, Check, RotateCcw, AlertCircle, Clock, Sparkles, ArrowRight } from "lucide-react";
 import { Receipt, ReceiptItem, getNormalizedStatus, getItemOrderIds, getItemOrderIdDisplay, getOrderIdTypeLabel, isCustomServiceCode, resolveReceiptWarranty } from "../types";
 import { motion, AnimatePresence } from "motion/react";
 import { useApp } from "../context/AppContext";
@@ -24,7 +24,7 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
   whatsapp,
   initialIsEditing = false,
 }) => {
-  const { updateReceipt, socialNetworks, services } = useApp();
+  const { updateReceipt, socialNetworks, services, addSupplierWarranty } = useApp();
   const receiptRef = useRef<HTMLDivElement>(null);
   
   // Format utility
@@ -118,6 +118,20 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
   const [isDownloading, setIsDownloading] = useState(false);
   const [downloadSuccess, setDownloadSuccess] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [resendSuccess, setResendSuccess] = useState<string | null>(null);
+  const [showCancelConfirm, setShowCancelConfirm] = useState(false);
+  const [isResendingWarranty, setIsResendingWarranty] = useState(false);
+
+  // Quick Reorder & Supplier Warranty States
+  const [showReorderPanel, setShowReorderPanel] = useState(getNormalizedStatus(receipt.status) === "cancelado");
+  const [reorderActionType, setReorderActionType] = useState<"reorder" | "warranty">(
+    getNormalizedStatus(receipt.status) === "cancelado" ? "reorder" : "warranty"
+  );
+  const [newProviderIdInput, setNewProviderIdInput] = useState("");
+  const [claimReasonInput, setClaimReasonInput] = useState("");
+  const [warrantyResponseHours, setWarrantyResponseHours] = useState<number>(48);
+  const [isSubmittingReorder, setIsSubmittingReorder] = useState(false);
+  const [lastActionWhatsAppUrl, setLastActionWhatsAppUrl] = useState<string | null>(null);
 
   const handleDownloadPNG = async () => {
     if (!receiptRef.current || isDownloading) return;
@@ -151,20 +165,18 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
     }
   };
 
-  // Sync state with prop changes
+  // Sync state with prop changes when receipt or initial mode changes
   useEffect(() => {
-    if (!isEditing) {
-      setEditedClientName(receipt.clientName || "");
-      setEditedClientPhone(receipt.clientPhone || "");
-      setEditedWarranty(resolveReceiptWarranty(receipt, 30).warrantyText);
-      setEditedThankYouMessage(receipt.thankYouMessage || "¡Gracias por confiar en ImpulsaNet para potenciar sus redes!");
-      setEditedServices(receipt.services || []);
-      setEditedStatus(getNormalizedStatus(receipt.status));
-      setEditedInternalNotes(receipt.internalNotes || "");
-      setIsEditing(initialIsEditing);
-      setError(null);
-    }
-  }, [receipt.id, receipt.clientName, receipt.clientPhone, receipt.warranty, receipt.thankYouMessage, receipt.services, receipt.status, receipt.internalNotes, initialIsEditing, isEditing]);
+    setIsEditing(initialIsEditing);
+    setEditedClientName(receipt.clientName || "");
+    setEditedClientPhone(receipt.clientPhone || "");
+    setEditedWarranty(resolveReceiptWarranty(receipt, 30).warrantyText);
+    setEditedThankYouMessage(receipt.thankYouMessage || "¡Gracias por confiar en ImpulsaNet para potenciar sus redes!");
+    setEditedServices(receipt.services || []);
+    setEditedStatus(getNormalizedStatus(receipt.status));
+    setEditedInternalNotes(receipt.internalNotes || "");
+    setError(null);
+  }, [receipt.id, initialIsEditing]);
 
   // Recalculate totals in real time while editing
   const totals = useMemo(() => {
@@ -437,6 +449,8 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
         totalCharged: totals.totalCharged,
         totalProviderCost: totals.totalProviderCost,
         totalProfit: totals.totalProfit,
+        status: editedStatus,
+        internalNotes: editedInternalNotes.trim(),
       };
 
       await updateReceipt(receipt.id, updatedData);
@@ -449,7 +463,7 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
     }
   };
 
-  const getWhatsAppLink = (type: "confirm" | "warranty" | "followup") => {
+  const getWhatsAppLink = (type: "confirm" | "warranty" | "followup" | "reordered" | "warranty_claim") => {
     let rawDigits = (receipt?.clientPhone || "").replace(/\D/g, "");
     if (rawDigits.length === 10 && !rawDigits.startsWith("57")) {
       rawDigits = "57" + rawDigits;
@@ -476,9 +490,120 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
       text = `Hola ${clientFirstName}! 👋 Esperamos te encuentres muy bien.\n\nTe escribimos de ImpulsaNet para recordarte que tu garantía de *${activeWarrantyStr}* para el pedido *#${receipt?.consecutive || ''}* está próxima a vencer.\n\nSi deseas renovar este servicio o potenciar tus redes con nuevos paquetes, ¡cuéntanos por aquí y te daremos un precio especial! 🎯`;
     } else if (type === "followup") {
       text = `Hola ${clientFirstName}! 👋 ¿Cómo van los resultados con tus redes tras tu pedido *#${receipt?.consecutive || ''}*?\n\nEn ImpulsaNet estamos a tu disposición para ayudarte a seguir creciendo. ¡Escríbenos si necesitas un nuevo paquete o asesoría! 📲`;
+    } else if (type === "reordered") {
+      text = `Hola ${clientFirstName}! 👋 Te informamos que hemos activado nuestro servidor de respaldo prioritario para tu pedido *#${receipt?.consecutive || ''}* para asegurar la entrega óptima de tus servicios.\n\nTu orden ya se encuentra en marcha nuevamente. 🚀`;
+    } else if (type === "warranty_claim") {
+      text = `Hola ${clientFirstName}! 👋 Tu solicitud de garantía / reposición para el pedido *#${receipt?.consecutive || ''}* ha sido radicada formalmente ante nuestro proveedor con un plazo estimado de respuesta de 24 a 48 horas.\n\nTe notificaremos apenas quede finalizada al 100%. 🛡️`;
     }
 
     return `https://wa.me/${rawDigits}?text=${encodeURIComponent(text)}`;
+  };
+
+  const handleExecuteReorder = async () => {
+    if (!newProviderIdInput.trim()) {
+      setError("Por favor ingresa el nuevo ID de orden del proveedor.");
+      return;
+    }
+    setIsSubmittingReorder(true);
+    setError(null);
+    try {
+      const cleanNewId = newProviderIdInput.trim();
+      const currentServices = receipt.services || [];
+      
+      const updatedServices: ReceiptItem[] = currentServices.map((item) => {
+        const existingIds = getItemOrderIds(item);
+        const combined = Array.from(new Set([cleanNewId, ...existingIds]));
+        return {
+          ...item,
+          orderId: cleanNewId,
+          orderIds: combined,
+        };
+      });
+
+      const nowFormatted = new Date().toLocaleString("es-CO", { dateStyle: "short", timeStyle: "short" });
+      const noteEntry = `[${nowFormatted}] 🔄 Reordenado con nuevo ID Proveedor: ${cleanNewId}${claimReasonInput.trim() ? ` (${claimReasonInput.trim()})` : ""}`;
+      const updatedNotes = editedInternalNotes ? `${editedInternalNotes}\n${noteEntry}` : noteEntry;
+
+      const patch: Partial<Receipt> = {
+        status: "en_proceso",
+        services: updatedServices,
+        internalNotes: updatedNotes,
+      };
+
+      await updateReceipt(receipt.id, patch);
+      setEditedServices(updatedServices);
+      setEditedStatus("en_proceso");
+      setEditedInternalNotes(updatedNotes);
+      
+      const waUrl = getWhatsAppLink("reordered");
+      setLastActionWhatsAppUrl(waUrl);
+      setResendSuccess(`¡Pedido reordenado con ID ${cleanNewId} y reactivado a 'En proceso'!`);
+      setNewProviderIdInput("");
+      setClaimReasonInput("");
+      setTimeout(() => setResendSuccess(null), 6000);
+    } catch (err: any) {
+      console.error("Error al reordenar pedido:", err);
+      setError("Error al reordenar: " + (err.message || String(err)));
+    } finally {
+      setIsSubmittingReorder(false);
+    }
+  };
+
+  const handleExecuteSupplierWarranty = async () => {
+    setIsSubmittingReorder(true);
+    setError(null);
+    try {
+      const allExistingIds = (receipt.services || []).flatMap((s) => getItemOrderIds(s));
+      const targetId = newProviderIdInput.trim() || (allExistingIds.length > 0 ? allExistingIds.join(", ") : `PED-${receipt.consecutive}`);
+      const cleanIdsList = targetId.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+      
+      const sLabel = receipt.services && receipt.services[0]
+        ? `${receipt.services[0].socialNetworkName} - ${receipt.services[0].serviceName}`
+        : "Servicio General";
+
+      const finalReason = claimReasonInput.trim() || "Garantía de reposición / Refill solicitado";
+
+      await addSupplierWarranty({
+        providerOrderId: targetId,
+        providerOrderIds: cleanIdsList.length > 0 ? cleanIdsList : [targetId],
+        receiptId: receipt.id,
+        receiptConsecutive: receipt.consecutive,
+        clientId: receipt.clientId,
+        clientName: receipt.clientName,
+        clientPhone: receipt.clientPhone,
+        serviceName: sLabel,
+        quantity: receipt.services?.[0]?.quantity,
+        sentDate: new Date().toISOString(),
+        expectedResponseHours: warrantyResponseHours,
+        status: "en_espera",
+        reason: finalReason,
+        claimedAgainCount: 0,
+      });
+
+      const nowFormatted = new Date().toLocaleString("es-CO", { dateStyle: "short", timeStyle: "short" });
+      const noteEntry = `[${nowFormatted}] 🛡️ Garantía enviada a proveedor (${warrantyResponseHours}h) - ID: ${targetId} - Motivo: ${finalReason}`;
+      const updatedNotes = editedInternalNotes ? `${editedInternalNotes}\n${noteEntry}` : noteEntry;
+
+      await updateReceipt(receipt.id, {
+        status: "garantia_en_proceso",
+        internalNotes: updatedNotes,
+      });
+
+      setEditedStatus("garantia_en_proceso");
+      setEditedInternalNotes(updatedNotes);
+      
+      const waUrl = getWhatsAppLink("warranty_claim");
+      setLastActionWhatsAppUrl(waUrl);
+      setResendSuccess(`¡Garantía radicada (plazo ${warrantyResponseHours}h) y pedido en 'Garantía en proceso'!`);
+      setNewProviderIdInput("");
+      setClaimReasonInput("");
+      setTimeout(() => setResendSuccess(null), 6000);
+    } catch (err: any) {
+      console.error("Error al registrar garantía:", err);
+      setError("Error al registrar garantía: " + (err.message || String(err)));
+    } finally {
+      setIsSubmittingReorder(false);
+    }
   };
 
   return (
@@ -542,8 +667,10 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                       setEditedClientName(receipt.clientName || "");
                       setEditedClientPhone(receipt.clientPhone || "");
                       setEditedWarranty(resolveReceiptWarranty(receipt, 30).warrantyText);
-                      setEditedThankYouMessage(receipt.thankYouMessage || "");
+                      setEditedThankYouMessage(receipt.thankYouMessage || "¡Gracias por confiar en ImpulsaNet para potenciar sus redes!");
                       setEditedServices(receipt.services || []);
+                      setEditedStatus(getNormalizedStatus(receipt.status));
+                      setEditedInternalNotes(receipt.internalNotes || "");
                       setError(null);
                     }}
                     className="flex-1 sm:flex-none flex items-center justify-center gap-1 text-xs font-bold text-gray-600 bg-white border border-gray-200 hover:bg-gray-50 transition px-3 py-2 rounded-xl shadow-2xs cursor-pointer active:scale-95 touch-manipulation"
@@ -553,6 +680,64 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                 </>
               ) : (
                 <>
+                  {showCancelConfirm ? (
+                    <div className="flex items-center gap-1.5 bg-rose-50 border border-rose-200 px-2.5 py-1.5 rounded-xl animate-fade-in">
+                      <span className="text-[11px] font-bold text-rose-800">¿Cancelar pedido?</span>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            await updateReceipt(receipt.id, { status: "cancelado" });
+                            setEditedStatus("cancelado");
+                            setShowCancelConfirm(false);
+                          } catch (err: any) {
+                            setError(err.message || "Error al cancelar pedido");
+                          }
+                        }}
+                        className="px-2 py-0.5 bg-rose-600 hover:bg-rose-700 text-white text-[10px] font-bold rounded cursor-pointer transition"
+                      >
+                        Sí
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowCancelConfirm(false)}
+                        className="px-2 py-0.5 bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 text-[10px] font-bold rounded cursor-pointer transition"
+                      >
+                        No
+                      </button>
+                    </div>
+                  ) : (
+                    getNormalizedStatus(receipt.status) !== "cancelado" && (
+                      <button
+                        id="btn-quick-cancel-receipt"
+                        type="button"
+                        onClick={() => setShowCancelConfirm(true)}
+                        className="flex-1 sm:flex-none flex items-center justify-center gap-1 text-xs font-semibold text-rose-600 bg-rose-50/70 hover:bg-rose-100/70 border border-rose-200 transition px-2.5 py-2 rounded-xl cursor-pointer touch-manipulation"
+                        title="Marcar pedido como cancelado"
+                      >
+                        <span>🔴 Cancelar Pedido</span>
+                      </button>
+                    )
+                  )}
+                  <button
+                    id="btn-toggle-reorder-panel"
+                    type="button"
+                    onClick={() => {
+                      setShowReorderPanel((prev) => !prev);
+                      if (!showReorderPanel) {
+                        setReorderActionType(getNormalizedStatus(receipt.status) === "cancelado" ? "reorder" : "warranty");
+                      }
+                    }}
+                    className={`flex-1 sm:flex-none flex items-center justify-center gap-1 text-xs font-bold transition px-2.5 py-2 rounded-xl cursor-pointer border touch-manipulation ${
+                      showReorderPanel
+                        ? "bg-purple-600 text-white border-purple-700 shadow-2xs"
+                        : "bg-purple-50 text-purple-700 hover:bg-purple-100 border-purple-200"
+                    }`}
+                    title="Reordenar con nuevo proveedor o tramitar garantía"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    <span>Reenviar / Garantía</span>
+                  </button>
                   <button
                     id="btn-download-receipt-png"
                     type="button"
@@ -618,17 +803,17 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                     <Edit3 className="w-3.5 h-3.5" />
                     <span>Editar</span>
                   </button>
-                  <button
-                    id="btn-close-receipt-desktop"
-                    type="button"
-                    onClick={onClose}
-                    className="hidden sm:flex text-gray-400 hover:text-gray-700 p-2 hover:bg-gray-100 transition rounded-xl cursor-pointer ml-1"
-                    title="Cerrar"
-                  >
-                    <X className="w-4.5 h-4.5" />
-                  </button>
                 </>
               )}
+              <button
+                id="btn-close-receipt-desktop"
+                type="button"
+                onClick={onClose}
+                className="hidden sm:flex text-gray-400 hover:text-gray-700 p-2 hover:bg-gray-100 transition rounded-xl cursor-pointer ml-1"
+                title="Cerrar"
+              >
+                <X className="w-4.5 h-4.5" />
+              </button>
             </div>
           </div>
 
@@ -731,33 +916,51 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                   <MessageSquare className="w-3.5 h-3.5 text-emerald-600" />
                   <span>Plantillas Rápidas de WhatsApp al Cliente ({receipt.clientPhone || 'Sin teléfono'})</span>
                 </span>
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
                   <a
                     href={getWhatsAppLink("confirm")}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="flex items-center justify-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs py-2 px-3 rounded-lg shadow-2xs transition active:scale-95 text-center cursor-pointer"
+                    className="flex items-center justify-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs py-2 px-2.5 rounded-lg shadow-2xs transition active:scale-95 text-center cursor-pointer"
                   >
-                    <Send className="w-3.5 h-3.5" />
-                    <span>Confirmación Pedido</span>
+                    <Send className="w-3.5 h-3.5 shrink-0" />
+                    <span className="truncate">Confirmación Pedido</span>
                   </a>
                   <a
                     href={getWhatsAppLink("warranty")}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="flex items-center justify-center gap-1.5 bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs py-2 px-3 rounded-lg shadow-2xs transition active:scale-95 text-center cursor-pointer"
+                    className="flex items-center justify-center gap-1.5 bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs py-2 px-2.5 rounded-lg shadow-2xs transition active:scale-95 text-center cursor-pointer"
                   >
-                    <Bell className="w-3.5 h-3.5" />
-                    <span>Vencimiento / Garantía</span>
+                    <Bell className="w-3.5 h-3.5 shrink-0" />
+                    <span className="truncate">Vencimiento / Garantía</span>
                   </a>
                   <a
                     href={getWhatsAppLink("followup")}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="flex items-center justify-center gap-1.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs py-2 px-3 rounded-lg shadow-2xs transition active:scale-95 text-center cursor-pointer"
+                    className="flex items-center justify-center gap-1.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs py-2 px-2.5 rounded-lg shadow-2xs transition active:scale-95 text-center cursor-pointer"
                   >
-                    <MessageSquare className="w-3.5 h-3.5" />
-                    <span>Seguimiento Post-Venta</span>
+                    <MessageSquare className="w-3.5 h-3.5 shrink-0" />
+                    <span className="truncate">Seguimiento Post-Venta</span>
+                  </a>
+                  <a
+                    href={getWhatsAppLink("reordered")}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center justify-center gap-1.5 bg-purple-600 hover:bg-purple-700 text-white font-bold text-xs py-2 px-2.5 rounded-lg shadow-2xs transition active:scale-95 text-center cursor-pointer"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5 shrink-0" />
+                    <span className="truncate">Aviso Reenvío Servidor</span>
+                  </a>
+                  <a
+                    href={getWhatsAppLink("warranty_claim")}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center justify-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs py-2 px-2.5 rounded-lg shadow-2xs transition active:scale-95 text-center cursor-pointer"
+                  >
+                    <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
+                    <span className="truncate">Aviso Garantía (48h)</span>
                   </a>
                 </div>
               </div>
@@ -776,7 +979,264 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                 </div>
               )}
 
+              {/* Success Feedback for Resend Warranty / Status Change */}
+              {resendSuccess && (
+                <div className="no-print bg-emerald-50 border border-emerald-200 p-3 rounded-xl flex items-center gap-2.5 text-xs text-emerald-800 font-semibold animate-fade-in shadow-2xs">
+                  <Check className="w-4 h-4 text-emerald-600 shrink-0" />
+                  <span>{resendSuccess}</span>
+                </div>
+              )}
 
+              {/* Centro Interactivo de Reenvío de Garantías y Reorden con Nuevo Proveedor */}
+              {!isEditing && (showReorderPanel || getNormalizedStatus(receipt.status) === "cancelado") && (
+                <div className={`no-print p-4 sm:p-5 rounded-2xl border transition-all duration-200 shadow-sm ${
+                  getNormalizedStatus(receipt.status) === "cancelado"
+                    ? "bg-rose-50/70 border-rose-200"
+                    : "bg-purple-50/60 border-purple-200"
+                }`}>
+                  {/* Panel Header */}
+                  <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 pb-3 border-b border-gray-200/70">
+                    <div className="flex items-center gap-2.5">
+                      <div className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${
+                        getNormalizedStatus(receipt.status) === "cancelado"
+                          ? "bg-rose-100 text-rose-700"
+                          : "bg-purple-100 text-purple-700"
+                      }`}>
+                        {getNormalizedStatus(receipt.status) === "cancelado" ? (
+                          <ShieldAlert className="w-4.5 h-4.5" />
+                        ) : (
+                          <RotateCcw className="w-4.5 h-4.5" />
+                        )}
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <h4 className="font-extrabold text-xs sm:text-sm text-gray-900">
+                            Centro de Reenvíos y Garantías de Proveedor
+                          </h4>
+                          <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider ${
+                            getNormalizedStatus(receipt.status) === "cancelado"
+                              ? "bg-rose-200 text-rose-900"
+                              : getNormalizedStatus(receipt.status) === "garantia_en_proceso"
+                              ? "bg-amber-200 text-amber-900"
+                              : "bg-purple-200 text-purple-900"
+                          }`}>
+                            {getNormalizedStatus(receipt.status) === "cancelado" ? "Cancelado" : receipt.status}
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-gray-600 mt-0.5">
+                          {getNormalizedStatus(receipt.status) === "cancelado"
+                            ? "El proveedor canceló esta orden. Reordénala con un servidor de respaldo o tramita la garantía."
+                            : "Gestiona reposiciones (Refill) o cambios de proveedor para este comprobante."}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 self-end sm:self-center">
+                      {getNormalizedStatus(receipt.status) !== "cancelado" && (
+                        <button
+                          type="button"
+                          onClick={() => setShowReorderPanel(false)}
+                          className="text-gray-400 hover:text-gray-700 p-1 rounded-lg hover:bg-gray-100 transition cursor-pointer"
+                          title="Cerrar panel"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Mode Selector Tabs */}
+                  <div className="flex items-center gap-1.5 pt-3 pb-3">
+                    <button
+                      type="button"
+                      onClick={() => setReorderActionType("reorder")}
+                      className={`flex-1 sm:flex-none flex items-center justify-center gap-1.5 px-3.5 py-1.5 rounded-xl font-bold text-xs transition cursor-pointer ${
+                        reorderActionType === "reorder"
+                          ? "bg-purple-700 text-white shadow-xs"
+                          : "bg-white/80 text-gray-700 hover:bg-white border border-gray-200"
+                      }`}
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      <span>1. Reordenar con Nuevo Proveedor</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setReorderActionType("warranty")}
+                      className={`flex-1 sm:flex-none flex items-center justify-center gap-1.5 px-3.5 py-1.5 rounded-xl font-bold text-xs transition cursor-pointer ${
+                        reorderActionType === "warranty"
+                          ? "bg-indigo-700 text-white shadow-xs"
+                          : "bg-white/80 text-gray-700 hover:bg-white border border-gray-200"
+                      }`}
+                    >
+                      <ShieldCheck className="w-3.5 h-3.5" />
+                      <span>2. Reclamar Garantía / Refill (Proveedor)</span>
+                    </button>
+                  </div>
+
+                  {/* Tab 1 Content: Reorder with New Provider */}
+                  {reorderActionType === "reorder" && (
+                    <div className="space-y-3 bg-white/90 p-3.5 rounded-xl border border-purple-100">
+                      <div className="text-[11px] text-gray-700">
+                        <strong>¿Para qué sirve?</strong> Si tu proveedor canceló por problemas con el enlace, cuenta privada o saturación, ingresa el <strong>nuevo ID de orden</strong> generado en tu proveedor o servidor de respaldo. Al reactivar, se actualizarán los servicios y el pedido pasará a <strong>'En proceso'</strong>.
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                        <div>
+                          <label className="block text-[10px] font-bold text-gray-600 uppercase tracking-wider mb-1">
+                            Nuevo ID de Orden del Proveedor *
+                          </label>
+                          <input
+                            type="text"
+                            value={newProviderIdInput}
+                            onChange={(e) => setNewProviderIdInput(e.target.value)}
+                            placeholder="Ej: 1048291 ó 1048291, 1048292"
+                            className="w-full px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-xs font-mono font-bold text-gray-900 focus:outline-hidden focus:ring-2 focus:ring-purple-500/20 focus:border-purple-600"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] font-bold text-gray-600 uppercase tracking-wider mb-1">
+                            Detalle / Proveedor Alternativo (Opcional)
+                          </label>
+                          <input
+                            type="text"
+                            value={claimReasonInput}
+                            onChange={(e) => setClaimReasonInput(e.target.value)}
+                            placeholder="Ej: Reenviado por servidor de respaldo B"
+                            className="w-full px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-xs text-gray-800 focus:outline-hidden focus:ring-2 focus:ring-purple-500/20 focus:border-purple-600"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="flex flex-col sm:flex-row items-center justify-between gap-2 pt-1">
+                        <span className="text-[11px] text-gray-500">
+                          IDs anteriores guardados: {receipt.services?.map(s => getItemOrderIdDisplay(s)).filter(Boolean).join(", ") || "Ninguno"}
+                        </span>
+                        <button
+                          type="button"
+                          disabled={isSubmittingReorder || !newProviderIdInput.trim()}
+                          onClick={handleExecuteReorder}
+                          className="w-full sm:w-auto flex items-center justify-center gap-1.5 px-4 py-2 bg-purple-700 hover:bg-purple-800 disabled:bg-purple-300 text-white font-bold text-xs rounded-xl shadow-xs transition cursor-pointer active:scale-95"
+                        >
+                          {isSubmittingReorder ? (
+                            <>
+                              <span className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
+                              <span>Reactivando...</span>
+                            </>
+                          ) : (
+                            <>
+                              <RotateCcw className="w-3.5 h-3.5" />
+                              <span>⚡ Reactivar Pedido con Nuevo ID</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Tab 2 Content: Supplier Warranty / Refill */}
+                  {reorderActionType === "warranty" && (
+                    <div className="space-y-3 bg-white/90 p-3.5 rounded-xl border border-indigo-100">
+                      <div className="text-[11px] text-gray-700">
+                        <strong>¿Para qué sirve?</strong> Si el cliente reporta que hubo caída de seguidores/likes dentro de sus días de garantía, radica aquí el reclamo para su seguimiento con cuenta regresiva. El pedido pasará a <strong>'Garantía en proceso'</strong>.
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                        <div className="sm:col-span-1">
+                          <label className="block text-[10px] font-bold text-gray-600 uppercase tracking-wider mb-1">
+                            ID(s) de Orden a Reclamar
+                          </label>
+                          <input
+                            type="text"
+                            value={newProviderIdInput || (receipt.services || []).flatMap(s => getItemOrderIds(s)).join(", ")}
+                            onChange={(e) => setNewProviderIdInput(e.target.value)}
+                            placeholder="Ej: 1048291"
+                            className="w-full px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-xs font-mono font-bold text-gray-900 focus:outline-hidden focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600"
+                          />
+                        </div>
+
+                        <div className="sm:col-span-1">
+                          <label className="block text-[10px] font-bold text-gray-600 uppercase tracking-wider mb-1">
+                            Plazo Límite de Respuesta
+                          </label>
+                          <div className="flex items-center gap-1">
+                            {[24, 48, 72].map((hrs) => (
+                              <button
+                                key={hrs}
+                                type="button"
+                                onClick={() => setWarrantyResponseHours(hrs)}
+                                className={`flex-1 py-1 rounded-lg text-xs font-bold transition cursor-pointer border ${
+                                  warrantyResponseHours === hrs
+                                    ? "bg-indigo-600 text-white border-indigo-600 shadow-2xs"
+                                    : "bg-gray-50 text-gray-700 border-gray-200 hover:bg-gray-100"
+                                }`}
+                              >
+                                {hrs}h
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div className="sm:col-span-1">
+                          <label className="block text-[10px] font-bold text-gray-600 uppercase tracking-wider mb-1">
+                            Motivo / Detalle Caída
+                          </label>
+                          <input
+                            type="text"
+                            value={claimReasonInput}
+                            onChange={(e) => setClaimReasonInput(e.target.value)}
+                            placeholder="Ej: Caída de 400 seguidores / Refill"
+                            className="w-full px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-xs text-gray-800 focus:outline-hidden focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="flex flex-col sm:flex-row items-center justify-between gap-2 pt-1">
+                        <span className="text-[11px] text-gray-500 flex items-center gap-1">
+                          <Clock className="w-3.5 h-3.5 text-indigo-500" />
+                          <span>Se creará un registro con alerta regresiva en el panel de Garantías.</span>
+                        </span>
+                        <button
+                          type="button"
+                          disabled={isSubmittingReorder}
+                          onClick={handleExecuteSupplierWarranty}
+                          className="w-full sm:w-auto flex items-center justify-center gap-1.5 px-4 py-2 bg-indigo-700 hover:bg-indigo-800 disabled:bg-indigo-300 text-white font-bold text-xs rounded-xl shadow-xs transition cursor-pointer active:scale-95"
+                        >
+                          {isSubmittingReorder ? (
+                            <>
+                              <span className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
+                              <span>Radicando...</span>
+                            </>
+                          ) : (
+                            <>
+                              <ShieldCheck className="w-3.5 h-3.5" />
+                              <span>🛡️ Radicar Garantía ante Proveedor ({warrantyResponseHours}h)</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Immediate Action WhatsApp Notice Banner */}
+                  {lastActionWhatsAppUrl && (
+                    <div className="mt-3 bg-emerald-50 border border-emerald-200 p-3 rounded-xl flex flex-col sm:flex-row items-center justify-between gap-2.5 animate-fade-in">
+                      <div className="flex items-center gap-2 text-xs text-emerald-900 font-medium">
+                        <MessageSquare className="w-4 h-4 text-emerald-600 shrink-0" />
+                        <span>¿Deseas enviar el aviso automático del estado al cliente?</span>
+                      </div>
+                      <a
+                        href={lastActionWhatsAppUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="w-full sm:w-auto px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-bold text-xs flex items-center justify-center gap-1.5 shadow-2xs transition active:scale-95 cursor-pointer"
+                      >
+                        <Send className="w-3.5 h-3.5" />
+                        <span>Enviar Notificación por WhatsApp</span>
+                      </a>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Receipt Header */}
               <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border-b border-gray-100 pb-8">
@@ -801,7 +1261,7 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
 
               {/* Client Info (Conditional View/Edit) */}
               {isEditing ? (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 bg-indigo-50/30 p-4 rounded-xl border border-indigo-100">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 bg-indigo-50/30 p-4 rounded-xl border border-indigo-100">
                   <div>
                     <label className="block text-[10px] font-bold text-gray-500 uppercase tracking-wider">Nombre del Cliente</label>
                     <input
@@ -820,9 +1280,22 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                       className="mt-1 block w-full px-3.5 py-1.5 border border-gray-200 rounded-lg text-sm bg-white focus:outline-hidden focus:ring-2 focus:ring-indigo-500/10 focus:border-indigo-500 transition font-mono text-gray-800"
                     />
                   </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-gray-500 uppercase tracking-wider">Estado del Pedido</label>
+                    <select
+                      value={editedStatus}
+                      onChange={(e) => setEditedStatus(e.target.value as any)}
+                      className="mt-1 block w-full px-3.5 py-1.5 border border-gray-200 rounded-lg text-sm bg-white focus:outline-hidden focus:ring-2 focus:ring-indigo-500/10 focus:border-indigo-500 transition font-semibold text-gray-900 cursor-pointer"
+                    >
+                      <option value="en_proceso">🟢 En proceso</option>
+                      <option value="completado">✅ Completado</option>
+                      <option value="garantia_en_proceso">🟡 Garantía en proceso</option>
+                      <option value="cancelado">🔴 Cancelado</option>
+                    </select>
+                  </div>
                 </div>
               ) : (
-                <div className="grid grid-cols-2 gap-4 bg-gray-50/50 p-4 rounded-xl border border-gray-100">
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-4 bg-gray-50/50 p-4 rounded-xl border border-gray-100">
                   <div>
                     <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">
                       Cliente
@@ -837,6 +1310,30 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                     </div>
                     <div className="text-sm font-mono text-gray-700 mt-0.5">
                       {receipt.clientPhone || "No especificado"}
+                    </div>
+                  </div>
+                  <div className="col-span-2 md:col-span-1">
+                    <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">
+                      Estado
+                    </div>
+                    <div className="mt-0.5">
+                      {getNormalizedStatus(receipt.status) === "cancelado" ? (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-bold bg-rose-50 text-rose-700 border border-rose-200">
+                          🔴 Cancelado
+                        </span>
+                      ) : getNormalizedStatus(receipt.status) === "garantia_en_proceso" ? (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-bold bg-amber-50 text-amber-700 border border-amber-200">
+                          🟡 Garantía en proceso
+                        </span>
+                      ) : getNormalizedStatus(receipt.status) === "completado" ? (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                          ✅ Completado
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-bold bg-blue-50 text-blue-700 border border-blue-200">
+                          🟢 En proceso
+                        </span>
+                      )}
                     </div>
                   </div>
                 </div>

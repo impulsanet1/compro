@@ -24,6 +24,7 @@ import {
   getServiceBaseCosts
 } from "../types";
 import { motion, AnimatePresence } from "motion/react";
+import { safeCopyToClipboard } from "../utils";
 
 export interface QuoteItem {
   id: string;
@@ -37,7 +38,11 @@ export interface QuoteItem {
   budgetPercentage?: number; // e.g. 50% of budget allocated
 }
 
-export const QuoteCalculatorView: React.FC = () => {
+interface QuoteCalculatorViewProps {
+  onTransferToReceipt?: (items: Partial<ReceiptItem>[]) => void;
+}
+
+export const QuoteCalculatorView: React.FC<QuoteCalculatorViewProps> = ({ onTransferToReceipt }) => {
   const { socialNetworks, services, businessConfig, isDarkMode } = useApp();
   const formatCOP = (val: number) => "$" + Math.round(val).toLocaleString("es-CO");
 
@@ -266,8 +271,8 @@ export const QuoteCalculatorView: React.FC = () => {
   }, [calculatedItems, overallTotals, clientName, businessConfig, calcMode]);
 
   // Copy WhatsApp message to clipboard
-  const handleCopyWhatsApp = () => {
-    navigator.clipboard.writeText(generatedWhatsAppMessage);
+  const handleCopyWhatsApp = async () => {
+    await safeCopyToClipboard(generatedWhatsAppMessage);
     setCopiedText(true);
     setTimeout(() => setCopiedText(false), 2500);
   };
@@ -702,7 +707,7 @@ export const QuoteCalculatorView: React.FC = () => {
             </div>
 
             {/* Action Buttons */}
-            <div className="mt-4 pt-3 border-t border-gray-150 dark:border-slate-800">
+            <div className="mt-4 pt-3 border-t border-gray-150 dark:border-slate-800 space-y-2">
               <button
                 id="btn-copy-quote-whatsapp"
                 type="button"
@@ -721,6 +726,28 @@ export const QuoteCalculatorView: React.FC = () => {
                   </>
                 )}
               </button>
+
+              {onTransferToReceipt && calculatedItems.length > 0 && (
+                <button
+                  id="btn-transfer-quote-to-receipt"
+                  type="button"
+                  onClick={() => {
+                    const itemsToTransfer: Partial<ReceiptItem>[] = calculatedItems.map((item) => ({
+                      socialNetworkId: item.socialNetworkId,
+                      serviceId: item.serviceId,
+                      quantity: item.effectiveQty,
+                      cost: item.itemProviderCost,
+                      costUSD: item.providerCostPer1000USD ? (item.effectiveQty / 1000) * item.providerCostPer1000USD : undefined,
+                      price: item.itemChargedPrice
+                    }));
+                    onTransferToReceipt(itemsToTransfer);
+                  }}
+                  className="w-full flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs shadow-xs transition cursor-pointer active:scale-95 touch-manipulation"
+                >
+                  <Package className="w-4 h-4" />
+                  <span>Pasar a Comprobante de Venta</span>
+                </button>
+              )}
             </div>
           </div>
 

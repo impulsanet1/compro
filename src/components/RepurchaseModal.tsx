@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { Client, Receipt, ReceiptItem, getClientCode, getNormalizedStatus, isReceiptForClient, isWarrantyForClient } from "../types";
 import { useApp } from "../context/AppContext";
+import { safeCopyToClipboard } from "../utils";
 
 interface RepurchaseModalProps {
   initialClient?: Client | { name: string; phone: string; id?: string } | null;
@@ -453,8 +454,8 @@ En ${businessName} acabamos de actualizar nuestros servidores con servicios de m
     return `https://wa.me/${cleanPhone}?text=${encodedText}`;
   }, [selectedClient, editableMessage]);
 
-  const handleCopy = () => {
-    navigator.clipboard.writeText(editableMessage);
+  const handleCopy = async () => {
+    await safeCopyToClipboard(editableMessage);
     setCopied(true);
     setTimeout(() => setCopied(false), 2500);
   };

@@ -18,7 +18,10 @@ import {
   Check,
   Copy,
   ChevronLeft,
-  ChevronRight
+  ChevronRight,
+  RotateCcw,
+  ShieldAlert,
+  ShieldCheck
 } from "lucide-react";
 import { Receipt, getNormalizedStatus, getItemOrderIds, buildReceiptsClientIndex, isCustomServiceCode, resolveReceiptWarranty, getClientCode } from "../types";
 
@@ -41,6 +44,22 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => 
   const [bulkSuccessMessage, setBulkSuccessMessage] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
+
+  // Status counts for quick filter buttons
+  const statusCounts = useMemo(() => {
+    let cancelados = 0;
+    let garantias = 0;
+    let enProceso = 0;
+    let completados = 0;
+    receipts.forEach((r) => {
+      const st = getNormalizedStatus(r.status);
+      if (st === "cancelado") cancelados++;
+      else if (st === "garantia_en_proceso") garantias++;
+      else if (st === "en_proceso") enProceso++;
+      else if (st === "completado") completados++;
+    });
+    return { cancelados, garantias, enProceso, completados };
+  }, [receipts]);
 
   // Fast O(N + M) index mapping receipts to clients
   const { receiptToClient } = useMemo(() => {
@@ -495,6 +514,65 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => 
           </div>
         </div>
 
+        {/* Quick Status Filter Chips */}
+        <div className="flex flex-wrap items-center gap-1.5 pt-2">
+          <button
+            type="button"
+            onClick={() => setSelectedStatus("")}
+            className={`px-2.5 py-1 rounded-lg text-xs font-bold transition cursor-pointer border ${
+              selectedStatus === ""
+                ? isDarkMode ? "bg-indigo-950 text-indigo-300 border-indigo-700" : "bg-indigo-50 text-indigo-700 border-indigo-300 shadow-2xs"
+                : isDarkMode ? "bg-slate-800 text-slate-400 border-slate-700 hover:text-white" : "bg-white text-gray-600 border-gray-200 hover:bg-gray-50"
+            }`}
+          >
+            Todos ({receipts.length})
+          </button>
+          <button
+            type="button"
+            onClick={() => setSelectedStatus("cancelado")}
+            className={`px-2.5 py-1 rounded-lg text-xs font-bold transition cursor-pointer border flex items-center gap-1 ${
+              selectedStatus === "cancelado"
+                ? "bg-rose-600 text-white border-rose-700 shadow-2xs"
+                : isDarkMode ? "bg-slate-800 text-rose-400 border-rose-900/60 hover:bg-rose-950/40" : "bg-rose-50 text-rose-700 border-rose-200 hover:bg-rose-100"
+            }`}
+          >
+            <span>🔴 Cancelados ({statusCounts.cancelados})</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setSelectedStatus("garantia_en_proceso")}
+            className={`px-2.5 py-1 rounded-lg text-xs font-bold transition cursor-pointer border flex items-center gap-1 ${
+              selectedStatus === "garantia_en_proceso"
+                ? "bg-amber-600 text-white border-amber-700 shadow-2xs"
+                : isDarkMode ? "bg-slate-800 text-amber-400 border-amber-900/60 hover:bg-amber-950/40" : "bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100"
+            }`}
+          >
+            <span>🟡 Garantía en proceso ({statusCounts.garantias})</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setSelectedStatus("en_proceso")}
+            className={`px-2.5 py-1 rounded-lg text-xs font-bold transition cursor-pointer border flex items-center gap-1 ${
+              selectedStatus === "en_proceso"
+                ? "bg-blue-600 text-white border-blue-700 shadow-2xs"
+                : isDarkMode ? "bg-slate-800 text-blue-400 border-blue-900/60 hover:bg-blue-950/40" : "bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100"
+            }`}
+          >
+            <span>🟢 En proceso ({statusCounts.enProceso})</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setSelectedStatus("completado")}
+            className={`px-2.5 py-1 rounded-lg text-xs font-bold transition cursor-pointer border flex items-center gap-1 ${
+              selectedStatus === "completado"
+                ? "bg-emerald-600 text-white border-emerald-700 shadow-2xs"
+                : isDarkMode ? "bg-slate-800 text-emerald-400 border-emerald-900/60 hover:bg-emerald-950/40" : "bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100"
+            }`}
+          >
+            <span>✅ Completados ({statusCounts.completados})</span>
+          </button>
+        </div>
+
         {/* Filter Indicator / Total of search results */}
         <div className={`flex flex-wrap justify-between items-center gap-3 text-xs border-t pt-3 ${
           isDarkMode ? "border-slate-800 text-slate-400" : "border-gray-100 text-gray-500"
@@ -765,7 +843,31 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => 
                             </button>
                           </div>
                         ) : (
-                          <div className="flex items-center justify-center gap-1.5">
+                          <div className="flex items-center justify-center gap-1.5 flex-wrap sm:flex-nowrap">
+                            {getNormalizedStatus(r.status) === "cancelado" && (
+                              <button
+                                id={`btn-reorder-receipt-${r.consecutive}`}
+                                type="button"
+                                onClick={() => onSelectReceipt(r, false)}
+                                className="inline-flex items-center gap-1 text-[11px] font-bold px-2 py-1 rounded-md shadow-2xs cursor-pointer border bg-purple-600 hover:bg-purple-700 text-white border-purple-700 active:scale-95 transition"
+                                title="Reordenar con nuevo proveedor o tramitar garantía"
+                              >
+                                <RotateCcw className="w-3 h-3" />
+                                Reordenar
+                              </button>
+                            )}
+                            {getNormalizedStatus(r.status) === "garantia_en_proceso" && (
+                              <button
+                                id={`btn-warranty-receipt-${r.consecutive}`}
+                                type="button"
+                                onClick={() => onSelectReceipt(r, false)}
+                                className="inline-flex items-center gap-1 text-[11px] font-bold px-2 py-1 rounded-md shadow-2xs cursor-pointer border bg-amber-600 hover:bg-amber-700 text-white border-amber-700 active:scale-95 transition"
+                                title="Ver seguimiento de garantía"
+                              >
+                                <ShieldCheck className="w-3 h-3" />
+                                Garantía
+                              </button>
+                            )}
                             <button
                               id={`btn-view-receipt-${r.consecutive}`}
                               onClick={() => onSelectReceipt(r, false)}

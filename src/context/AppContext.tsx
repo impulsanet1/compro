@@ -95,6 +95,8 @@ interface AppContextType {
   markAllInProcessAsCompleted: () => Promise<{ updatedCount: number }>;
   updateClientTag: (clientId: string, tag: string) => Promise<void>;
   updateClient: (clientId: string, updates: Partial<Client>) => Promise<void>;
+  reassignClientCode: (clientId: string, customCode?: string) => Promise<string>;
+  resolveDuplicateClientCodes: () => Promise<{ resolvedCount: number; details: string[] }>;
   separateReceiptToNewClient: (receiptId: string, fromClientId?: string, newClientName?: string, newClientPhone?: string) => Promise<string>;
   
   // System Maintenance
@@ -416,8 +418,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   useEffect(() => {
     if (!user || loadingData || clients.length === 0) return;
 
+    // Count duplicate codes to ensure fingerprint triggers sync if collisions exist
+    const codeCounts = new Map<string, number>();
+    clients.forEach((c) => {
+      if (c.clientCode && c.clientCode.trim()) {
+        const normalized = c.clientCode.trim().padStart(4, "0");
+        codeCounts.set(normalized, (codeCounts.get(normalized) || 0) + 1);
+      }
+    });
+    const duplicateCount = Array.from(codeCounts.values()).filter((cnt) => cnt > 1).length;
+
     // Build quick fingerprint to avoid running sync when nothing structurally changed
-    const currentFingerprint = `${clients.length}_${receipts.length}_${clients.filter((c) => !c.clientCode).length}`;
+    const currentFingerprint = `${clients.length}_${receipts.length}_${clients.filter((c) => !c.clientCode).length}_${duplicateCount}`;
     if (lastSyncFingerprintRef.current === currentFingerprint) {
       return;
     }
@@ -430,23 +442,35 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         // Build fast O(N + M) index mapping clients to receipts
         const { clientToReceipts } = buildReceiptsClientIndex(clients, receipts);
 
-        // Map existing assigned numeric codes
+        // Sort clients deterministically: older clients or clients with earlier dates keep their assigned code
+        const sortedClients = [...clients].sort((a, b) => {
+          const dateA = a.createdAt ? new Date(a.createdAt).getTime() : (a.lastPurchaseDate ? new Date(a.lastPurchaseDate).getTime() : 0);
+          const dateB = b.createdAt ? new Date(b.createdAt).getTime() : (b.lastPurchaseDate ? new Date(b.lastPurchaseDate).getTime() : 0);
+          if (dateA !== dateB) return dateA - dateB;
+          return (b.purchaseCount || 0) - (a.purchaseCount || 0);
+        });
+
+        // Detect duplicate codes (e.g., if two distinct people share ID 0083) and map unique codes
+        const codeOwners = new Map<string, string>(); // code -> clientId
+        const duplicateClientIds = new Set<string>();
         const usedCodes = new Set<number>();
-        clients.forEach((c) => {
-          if (c.clientCode) {
-            const num = parseInt(c.clientCode, 10);
-            if (!isNaN(num) && num > 0) usedCodes.add(num);
+
+        sortedClients.forEach((c) => {
+          if (c.clientCode && c.clientCode.trim()) {
+            const cleanCode = c.clientCode.trim().padStart(4, "0");
+            const existingOwner = codeOwners.get(cleanCode);
+            if (!existingOwner) {
+              codeOwners.set(cleanCode, c.id);
+              const num = parseInt(cleanCode, 10);
+              if (!isNaN(num) && num > 0) usedCodes.add(num);
+            } else {
+              console.warn(`Duplicate clientCode #${cleanCode} detected between ${existingOwner} and ${c.id}`);
+              duplicateClientIds.add(c.id);
+            }
           }
         });
 
         let currentAutoId = 1;
-
-        // Sort clients deterministically for consistent code assignment if missing
-        const sortedClients = [...clients].sort((a, b) => {
-          const dateA = a.lastPurchaseDate ? new Date(a.lastPurchaseDate).getTime() : 0;
-          const dateB = b.lastPurchaseDate ? new Date(b.lastPurchaseDate).getTime() : 0;
-          return dateA - dateB;
-        });
 
         // Check which clients genuinely need document updates
         const updatesQueue: Array<{ id: string; payload: Record<string, any> }> = [];
@@ -454,12 +478,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         for (const client of sortedClients) {
           const updatePayload: Record<string, any> = {};
 
-          if (!client.clientCode) {
+          const needsNewCode = !client.clientCode || !client.clientCode.trim() || duplicateClientIds.has(client.id);
+          if (needsNewCode) {
             while (usedCodes.has(currentAutoId)) {
               currentAutoId++;
             }
             const assignedCode = String(currentAutoId).padStart(4, "0");
             usedCodes.add(currentAutoId);
+            codeOwners.set(assignedCode, client.id);
             updatePayload.clientCode = assignedCode;
           }
 
@@ -494,7 +520,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         // Apply any needed client doc updates in small controlled batches
         for (const item of updatesQueue.slice(0, 10)) {
           try {
-            await updateDoc(doc(db, "clients", item.id), item.payload);
+            await setDoc(doc(db, "clients", item.id), item.payload, { merge: true });
           } catch (e) {
             console.warn("Failed to sync client doc:", e);
           }
@@ -651,10 +677,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const updateSocialNetwork = async (sn: SocialNetwork) => {
-    await updateDoc(doc(db, "social_networks", sn.id), {
+    await setDoc(doc(db, "social_networks", sn.id), {
       name: sn.name,
       icon: sn.icon
-    });
+    }, { merge: true });
   };
 
   const deleteSocialNetwork = async (id: string) => {
@@ -681,7 +707,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (service.providerCostUSDPer1000 !== undefined && service.providerCostUSDPer1000 !== null && !isNaN(service.providerCostUSDPer1000)) {
       sDoc.providerCostUSDPer1000 = service.providerCostUSDPer1000;
     }
-    await setDoc(doc(db, "services", service.id), sDoc);
+    await setDoc(doc(db, "services", service.id), sDoc, { merge: true });
   };
 
   const updateService = async (service: Service) => {
@@ -698,7 +724,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     } else {
       sDoc.providerCostUSDPer1000 = null;
     }
-    await updateDoc(doc(db, "services", service.id), sDoc);
+    await setDoc(doc(db, "services", service.id), sDoc, { merge: true });
   };
 
   const deleteService = async (id: string) => {
@@ -716,7 +742,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       active: combo.active !== false,
       updatedAt: new Date().toISOString()
     });
-    await setDoc(doc(db, "combos", combo.id), cDoc);
+    await setDoc(doc(db, "combos", combo.id), cDoc, { merge: true });
   };
 
   const updateCombo = async (combo: ServiceCombo) => {
@@ -729,7 +755,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       active: combo.active !== false,
       updatedAt: new Date().toISOString()
     });
-    await updateDoc(doc(db, "combos", combo.id), cDoc);
+    await setDoc(doc(db, "combos", combo.id), cDoc, { merge: true });
   };
 
   const deleteCombo = async (id: string) => {
@@ -890,11 +916,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     await setDoc(doc(db, "clients", newClientId), cleanForFirestore(newClientDoc));
 
-    await updateDoc(doc(db, "receipts", targetReceipt.id), {
+    await setDoc(doc(db, "receipts", targetReceipt.id), {
       clientId: newClientId,
       clientName: clientName,
       clientPhone: clientPhone,
-    });
+    }, { merge: true });
 
     const prevClients = clients.filter(
       (c) => (fromClientId && c.id === fromClientId) || (c.receiptIds && c.receiptIds.includes(receiptId))
@@ -911,12 +937,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       );
       const newLastDate = sortedRecs.length > 0 ? sortedRecs[0].date : prev.lastPurchaseDate;
 
-      await updateDoc(doc(db, "clients", prev.id), cleanForFirestore({
+      await setDoc(doc(db, "clients", prev.id), cleanForFirestore({
         receiptIds: remainingReceiptIds,
         purchaseCount: newPurchaseCount,
         totalSpent: newTotalSpent,
         lastPurchaseDate: newLastDate,
-      }));
+      }), { merge: true });
     }
 
     return newClientId;
@@ -924,7 +950,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const updateClient = async (clientId: string, updates: Partial<Client>) => {
     const clientRef = doc(db, "clients", clientId);
-    await updateDoc(clientRef, cleanForFirestore(updates));
+    await setDoc(clientRef, cleanForFirestore(updates), { merge: true });
 
     const cleanName = updates.name !== undefined ? updates.name.trim() : undefined;
     const cleanPhone = updates.phone !== undefined ? updates.phone.trim() : undefined;
@@ -953,18 +979,105 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           if (cleanPhone !== undefined) {
             patch.clientPhone = cleanPhone;
           }
-          await updateDoc(receiptDocRef, cleanForFirestore(patch));
+          await setDoc(receiptDocRef, cleanForFirestore(patch), { merge: true });
         });
 
         // Ensure all associated receipt IDs are saved in the client's receiptIds array
         const allReceiptIds = Array.from(
           new Set([...(currentClient?.receiptIds || []), ...matchingReceipts.map((r) => r.id)])
         );
-        updatePromises.push(updateDoc(clientRef, { receiptIds: allReceiptIds }));
+        updatePromises.push(setDoc(clientRef, { receiptIds: allReceiptIds }, { merge: true }));
 
         await Promise.all(updatePromises);
       }
     }
+  };
+
+  /**
+   * Reassigns or manually sets a client's 4-digit code, checking for uniqueness and updating Firestore.
+   */
+  const reassignClientCode = async (clientId: string, customCode?: string): Promise<string> => {
+    let finalCode = "";
+    if (customCode && customCode.trim()) {
+      const normalized = customCode.trim().replace(/\D/g, "").padStart(4, "0");
+      if (normalized.length !== 4) {
+        throw new Error("El código de cliente debe contener 4 dígitos numéricos (ej. 0083)");
+      }
+      const conflict = clients.find(
+        (c) => c.id !== clientId && c.clientCode?.trim().padStart(4, "0") === normalized
+      );
+      if (conflict) {
+        throw new Error(`El código #${normalized} ya está asignado al cliente "${conflict.name}".`);
+      }
+      finalCode = normalized;
+    } else {
+      const usedCodes = new Set<number>(
+        clients
+          .filter((c) => c.id !== clientId && c.clientCode)
+          .map((c) => parseInt(c.clientCode!, 10))
+          .filter((n) => !isNaN(n) && n > 0)
+      );
+      let nextId = 1;
+      while (usedCodes.has(nextId)) {
+        nextId++;
+      }
+      finalCode = String(nextId).padStart(4, "0");
+    }
+
+    const clientRef = doc(db, "clients", clientId);
+    await setDoc(clientRef, { clientCode: finalCode }, { merge: true });
+    return finalCode;
+  };
+
+  /**
+   * Automatically resolves all duplicate client codes across the database in one pass.
+   */
+  const resolveDuplicateClientCodes = async (): Promise<{ resolvedCount: number; details: string[] }> => {
+    const codeGroups = new Map<string, Client[]>();
+    clients.forEach((c) => {
+      const code = (c.clientCode || "").trim().padStart(4, "0");
+      if (code && code !== "0000") {
+        if (!codeGroups.has(code)) codeGroups.set(code, []);
+        codeGroups.get(code)!.push(c);
+      }
+    });
+
+    const usedCodes = new Set<number>(
+      clients
+        .map((c) => parseInt(c.clientCode || "0", 10))
+        .filter((n) => !isNaN(n) && n > 0)
+    );
+
+    let nextAvailable = 1;
+    let resolvedCount = 0;
+    const details: string[] = [];
+
+    for (const [code, group] of codeGroups.entries()) {
+      if (group.length > 1) {
+        const sorted = [...group].sort((a, b) => {
+          const dateA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+          const dateB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+          if (dateA !== dateB) return dateA - dateB;
+          return (b.purchaseCount || 0) - (a.purchaseCount || 0);
+        });
+
+        const keeper = sorted[0];
+        for (let i = 1; i < sorted.length; i++) {
+          const dup = sorted[i];
+          while (usedCodes.has(nextAvailable)) {
+            nextAvailable++;
+          }
+          const newCode = String(nextAvailable).padStart(4, "0");
+          usedCodes.add(nextAvailable);
+
+          await setDoc(doc(db, "clients", dup.id), { clientCode: newCode }, { merge: true });
+          resolvedCount++;
+          details.push(`Cliente "${dup.name}" reasignado de #${code} a nuevo ID #${newCode} (se mantuvo #${code} para "${keeper.name}")`);
+        }
+      }
+    }
+
+    return { resolvedCount, details };
   };
 
   const deleteReceipt = async (id: string) => {
@@ -1025,13 +1138,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const receiptDocRef = doc(db, "receipts", id);
     const receiptSnap = await getDoc(receiptDocRef);
     if (!receiptSnap.exists()) {
-      await updateDoc(receiptDocRef, cleanForFirestore(updatedData));
+      await setDoc(receiptDocRef, cleanForFirestore(updatedData), { merge: true });
       return;
     }
     const oldReceipt = receiptSnap.data() as Receipt;
 
     // 2. Perform the update on the receipt
-    await updateDoc(receiptDocRef, cleanForFirestore(updatedData));
+    await setDoc(receiptDocRef, cleanForFirestore(updatedData), { merge: true });
 
     // 3. Find the client associated with this receipt
     const linkedClient = clients.find((c) =>
@@ -1066,10 +1179,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const clientReceiptIds = Array.from(new Set([...(linkedClient.receiptIds || []), id]));
       clientPatch.receiptIds = clientReceiptIds;
 
-      await updateDoc(clientRef, cleanForFirestore(clientPatch));
+      await setDoc(clientRef, cleanForFirestore(clientPatch), { merge: true });
 
       // Also ensure receipt document explicitly stores clientId foreign key
-      await updateDoc(receiptDocRef, { clientId: linkedClient.id });
+      await setDoc(receiptDocRef, { clientId: linkedClient.id }, { merge: true });
 
       // If name or phone changed, also propagate to any other receipts of this client
       if (cleanNewName !== undefined || cleanNewPhone !== undefined) {
@@ -1087,7 +1200,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               const otherPatch: Partial<Receipt> = { clientId: linkedClient.id };
               if (cleanNewName !== undefined) otherPatch.clientName = cleanNewName;
               if (cleanNewPhone !== undefined) otherPatch.clientPhone = cleanNewPhone;
-              await updateDoc(doc(db, "receipts", other.id), cleanForFirestore(otherPatch));
+              await setDoc(doc(db, "receipts", other.id), cleanForFirestore(otherPatch), { merge: true });
             })
           );
         }
@@ -1103,14 +1216,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       if (newClientSnap.exists()) {
         const existingData = newClientSnap.data() as Client;
-        await updateDoc(newClientRef, {
+        await setDoc(newClientRef, {
           name: targetName,
           phone: targetPhone,
           totalSpent: Math.max(0, (existingData.totalSpent || 0) + newTotalCharged),
           purchaseCount: (existingData.purchaseCount || 0) + 1,
           lastPurchaseDate: finalDate,
           receiptIds: Array.from(new Set([...(existingData.receiptIds || []), id])),
-        });
+        }, { merge: true });
       } else {
         const existingCodes = clients
           .map((c) => parseInt(c.clientCode || "0", 10))
@@ -1132,13 +1245,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         };
         await setDoc(newClientRef, cleanForFirestore(newClient));
       }
-      await updateDoc(receiptDocRef, { clientId: targetClientId });
+      await setDoc(receiptDocRef, { clientId: targetClientId }, { merge: true });
     }
   };
 
   const updateClientTag = async (clientId: string, tag: string) => {
     const clientRef = doc(db, "clients", clientId);
-    await updateDoc(clientRef, { tag });
+    await setDoc(clientRef, { tag }, { merge: true });
   };
 
   const markAllInProcessAsCompleted = async (): Promise<{ updatedCount: number }> => {
@@ -1151,7 +1264,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const norm = getNormalizedStatus(data.status);
         if (norm === "en_proceso") {
           count++;
-          updates.push(updateDoc(doc(db, "receipts", docSnap.id), { status: "completado" }));
+          updates.push(setDoc(doc(db, "receipts", docSnap.id), { status: "completado" }, { merge: true }));
         }
       });
       await Promise.all(updates);
@@ -1230,7 +1343,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         cleanDoc[key] = value;
       }
     });
-    await updateDoc(docRef, cleanDoc);
+    await setDoc(docRef, cleanDoc, { merge: true });
   };
 
   const deleteSupplierWarranty = async (id: string) => {
@@ -1246,7 +1359,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const data = snap.data() as SupplierWarrantyRecord;
         if (data.receiptId) {
           try {
-            await updateDoc(doc(db, "receipts", data.receiptId), { status: "completado" });
+            await setDoc(doc(db, "receipts", data.receiptId), { status: "completado" }, { merge: true });
           } catch (recErr) {
             console.warn("Could not update receipt on resolve warranty:", recErr);
           }
@@ -1264,7 +1377,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (notes) {
       updateData.supplierNotes = notes;
     }
-    await updateDoc(docRef, updateData);
+    await setDoc(docRef, updateData, { merge: true });
   };
 
   const resolveAllWarrantiesInProcess = async () => {
@@ -1277,7 +1390,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
     for (const r of warrantyReceipts) {
       try {
-        await updateDoc(doc(db, "receipts", r.id), { status: "completado" });
+        await setDoc(doc(db, "receipts", r.id), { status: "completado" }, { merge: true });
         updatedReceiptsCount++;
       } catch (err) {
         console.error("Error completing warranty receipt:", r.id, err);
@@ -1290,10 +1403,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
     for (const w of activeWarranties) {
       try {
-        await updateDoc(doc(db, "supplier_warranties", w.id), {
+        await setDoc(doc(db, "supplier_warranties", w.id), {
           status: "resuelto",
           resolvedDate: new Date().toISOString()
-        });
+        }, { merge: true });
         resolvedWarrantiesCount++;
       } catch (err) {
         console.error("Error resolving warranty record:", w.id, err);
@@ -1316,7 +1429,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (notes) {
       updateData.supplierNotes = notes;
     }
-    await updateDoc(docRef, updateData);
+    await setDoc(docRef, updateData, { merge: true });
   };
 
   return (
@@ -1362,6 +1475,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         markAllInProcessAsCompleted,
         updateClientTag,
         updateClient,
+        reassignClientCode,
+        resolveDuplicateClientCodes,
         separateReceiptToNewClient,
         restoreDefaults
       }}

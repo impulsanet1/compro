@@ -50,6 +50,7 @@ import {
   isTarjetaDigitalService
 } from "../types";
 import { motion } from "motion/react";
+import { safeCopyToClipboard } from "../utils";
 
 interface GeneratorViewProps {
   onReceiptGenerated: (receipt: Receipt) => void;
@@ -803,8 +804,8 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
               </div>
               <button
                 type="button"
-                onClick={() => {
-                  navigator.clipboard.writeText(whatsappCodeStats.lastCodeStr);
+                onClick={async () => {
+                  await safeCopyToClipboard(whatsappCodeStats.lastCodeStr);
                   setCopiedCode(whatsappCodeStats.lastCodeStr);
                   setTimeout(() => setCopiedCode(null), 2000);
                 }}

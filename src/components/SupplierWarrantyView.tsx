@@ -18,6 +18,7 @@ import {
   getClientCode,
   matchContacts
 } from "../types";
+import { safeCopyToClipboard } from "../utils";
 import {
   ShieldAlert,
   ShieldCheck,
@@ -158,6 +159,7 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
   const [searchTerm, setSearchTerm] = useState("");
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [copySuccessMsg, setCopySuccessMsg] = useState<string | null>(null);
+  const [formErrorMessage, setFormErrorMessage] = useState<string | null>(null);
 
   // Simplified Modal State
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -175,8 +177,8 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
   const [formServiceNameManual, setFormServiceNameManual] = useState("");
 
   // Copy helper
-  const copyToClipboard = (text: string, idForState?: string, customMsg?: string) => {
-    navigator.clipboard.writeText(text);
+  const copyToClipboard = async (text: string, idForState?: string, customMsg?: string) => {
+    await safeCopyToClipboard(text);
     if (idForState) {
       setCopiedId(idForState);
       setTimeout(() => setCopiedId(null), 2000);
@@ -522,7 +524,8 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
     }
 
     if (finalOrderIds.length === 0) {
-      alert("Por favor selecciona o escribe al menos un ID de pedido.");
+      setFormErrorMessage("Por favor selecciona o escribe al menos un ID de pedido.");
+      setTimeout(() => setFormErrorMessage(null), 3500);
       return;
     }
 
@@ -551,54 +554,59 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
     const quantity = matchingService ? matchingService.quantity : undefined;
 
     const idsCombinedString = finalOrderIds.join(", ");
-
     const parsedSentDate = parseLocalDatetimeInput(formSentDate);
 
-    if (editingRecord) {
-      await updateSupplierWarranty(editingRecord.id, {
-        providerOrderId: idsCombinedString,
-        providerOrderIds: finalOrderIds,
-        receiptId: selectedInvoice ? selectedInvoice.id : undefined,
-        receiptConsecutive: selectedInvoice ? selectedInvoice.consecutive : undefined,
-        clientId,
-        clientCode,
-        clientName,
-        clientPhone,
-        serviceName,
-        quantity,
-        sentDate: parsedSentDate.toISOString(),
-        expectedResponseHours: 48, // Fixed 48 hours
-        reason: formReason.trim()
-      });
-    } else {
-      await addSupplierWarranty({
-        providerOrderId: idsCombinedString,
-        providerOrderIds: finalOrderIds,
-        receiptId: selectedInvoice ? selectedInvoice.id : undefined,
-        receiptConsecutive: selectedInvoice ? selectedInvoice.consecutive : undefined,
-        clientId,
-        clientCode,
-        clientName,
-        clientPhone,
-        serviceName,
-        quantity,
-        sentDate: parsedSentDate.toISOString(),
-        expectedResponseHours: 48, // Fixed 48 hours
-        status: "en_espera",
-        reason: formReason.trim(),
-        claimedAgainCount: 0
-      });
-
-      // Update invoice status to 'garantia_en_proceso' automatically
-      if (selectedInvoice) {
-        await updateReceipt(selectedInvoice.id, {
-          status: "garantia_en_proceso"
+    try {
+      if (editingRecord) {
+        await updateSupplierWarranty(editingRecord.id, {
+          providerOrderId: idsCombinedString,
+          providerOrderIds: finalOrderIds,
+          receiptId: selectedInvoice ? selectedInvoice.id : undefined,
+          receiptConsecutive: selectedInvoice ? selectedInvoice.consecutive : undefined,
+          clientId,
+          clientCode,
+          clientName,
+          clientPhone,
+          serviceName,
+          quantity,
+          sentDate: parsedSentDate.toISOString(),
+          expectedResponseHours: 48, // Fixed 48 hours
+          reason: formReason.trim()
         });
-      }
-    }
+      } else {
+        await addSupplierWarranty({
+          providerOrderId: idsCombinedString,
+          providerOrderIds: finalOrderIds,
+          receiptId: selectedInvoice ? selectedInvoice.id : undefined,
+          receiptConsecutive: selectedInvoice ? selectedInvoice.consecutive : undefined,
+          clientId,
+          clientCode,
+          clientName,
+          clientPhone,
+          serviceName,
+          quantity,
+          sentDate: parsedSentDate.toISOString(),
+          expectedResponseHours: 48, // Fixed 48 hours
+          status: "en_espera",
+          reason: formReason.trim(),
+          claimedAgainCount: 0
+        });
 
-    setIsModalOpen(false);
-    copyToClipboard(idsCombinedString, undefined, `¡${finalOrderIds.length} ID(s) registrados con plazo de 48h!`);
+        // Update invoice status to 'garantia_en_proceso' automatically
+        if (selectedInvoice) {
+          await updateReceipt(selectedInvoice.id, {
+            status: "garantia_en_proceso"
+          });
+        }
+      }
+
+      setIsModalOpen(false);
+      copyToClipboard(idsCombinedString, undefined, `¡${finalOrderIds.length} ID(s) registrados con plazo de 48h!`);
+    } catch (err: any) {
+      console.error("Error saving warranty record:", err);
+      setFormErrorMessage(err.message || "Error al guardar el reclamo de garantía.");
+      setTimeout(() => setFormErrorMessage(null), 4000);
+    }
   };
 
   // Direct Delete handler
@@ -631,7 +639,8 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
       (r) => r.status === "en_espera" || r.status === "reclamado_nuevamente"
     );
     if (pending.length === 0) {
-      alert("No hay IDs pendientes de garantía actualmente.");
+      setCopySuccessMsg("No hay IDs pendientes de garantía actualmente.");
+      setTimeout(() => setCopySuccessMsg(null), 3000);
       return;
     }
     const allIds = pending.map((r) => r.providerOrderId).join(", ");
@@ -643,7 +652,8 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
     const ids = activeUnexpiredClientWarrantyItems.map((i) => i.orderId);
     const uniqueIds = Array.from(new Set(ids));
     if (uniqueIds.length === 0) {
-      alert("No hay IDs en garantía activa de clientes actualmente.");
+      setCopySuccessMsg("No hay IDs en garantía activa de clientes actualmente.");
+      setTimeout(() => setCopySuccessMsg(null), 3000);
       return;
     }
     copyToClipboard(
@@ -1723,6 +1733,13 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
                   </div>
                 </div>
               </div>
+
+              {formErrorMessage && (
+                <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-rose-700 dark:text-rose-300 text-xs flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 shrink-0" />
+                  <span>{formErrorMessage}</span>
+                </div>
+              )}
 
               {/* Submit Buttons */}
               <div className={`flex items-center justify-between gap-3 pt-3 border-t ${

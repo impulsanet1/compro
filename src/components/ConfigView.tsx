@@ -17,6 +17,7 @@ import {
   Sliders,
   Check,
   AlertCircle,
+  AlertTriangle,
   Instagram,
   Facebook,
   Youtube,
@@ -88,6 +89,7 @@ export const ConfigView: React.FC = () => {
   const [showAddSnForm, setShowAddSnForm] = useState(false);
   const [deletingSnId, setDeletingSnId] = useState<string | null>(null);
   const [deletingServiceId, setDeletingServiceId] = useState<string | null>(null);
+  const [deletingComboId, setDeletingComboId] = useState<string | null>(null);
   const [showRestoreConfirm, setShowRestoreConfirm] = useState(false);
 
   // Services state
@@ -107,6 +109,7 @@ export const ConfigView: React.FC = () => {
   const [editSuggestedPrice, setEditSuggestedPrice] = useState<string>("");
   const [editPresetsStr, setEditPresetsStr] = useState<string>("");
   const [serviceSavedSuccess, setServiceSavedSuccess] = useState<boolean>(false);
+  const [serviceErrorMessage, setServiceErrorMessage] = useState<string | null>(null);
 
   // Live calculator test quantity
   const [testQuantity, setTestQuantity] = useState<string>("3250");
@@ -123,6 +126,7 @@ export const ConfigView: React.FC = () => {
   ]);
   const [showAddComboForm, setShowAddComboForm] = useState(false);
   const [comboSuccessMessage, setComboSuccessMessage] = useState<string | null>(null);
+  const [comboErrorMessage, setComboErrorMessage] = useState<string | null>(null);
 
   // Filtered services for the currently selected social network
   const currentServices = useMemo(() => {
@@ -302,7 +306,8 @@ export const ConfigView: React.FC = () => {
     const sPrice = parseFloat(editSuggestedPrice);
 
     if (isNaN(pCost) || pCost < 0 || isNaN(sPrice) || sPrice < 0) {
-      alert("Por favor ingrese montos numéricos válidos por cada 1.000 unidades.");
+      setServiceErrorMessage("Por favor ingrese montos numéricos válidos por cada 1.000 unidades.");
+      setTimeout(() => setServiceErrorMessage(null), 3500);
       return;
     }
 
@@ -408,14 +413,14 @@ export const ConfigView: React.FC = () => {
   };
 
   const handleDeleteCombo = async (id: string) => {
-    if (confirm("¿Está seguro de eliminar este combo?")) {
-      try {
-        await deleteCombo(id);
-        setComboSuccessMessage("Combo eliminado.");
-        setTimeout(() => setComboSuccessMessage(null), 2500);
-      } catch (err) {
-        console.error(err);
-      }
+    try {
+      await deleteCombo(id);
+      setComboSuccessMessage("¡Combo eliminado exitosamente!");
+      setTimeout(() => setComboSuccessMessage(null), 2500);
+    } catch (err: any) {
+      console.error("Error al eliminar combo:", err);
+      setComboErrorMessage(err.message || "Error al eliminar combo.");
+      setTimeout(() => setComboErrorMessage(null), 3500);
     }
   };
 
@@ -1259,6 +1264,11 @@ export const ConfigView: React.FC = () => {
                             <Check className="w-4 h-4" />
                             <span>¡Costo base guardado correctamente!</span>
                           </div>
+                        ) : serviceErrorMessage ? (
+                          <div className="flex items-center gap-1.5 text-xs font-bold text-rose-400 animate-fade-in">
+                            <AlertTriangle className="w-4 h-4" />
+                            <span>{serviceErrorMessage}</span>
+                          </div>
                         ) : (
                           <div className={`text-[10.5px] italic ${isDarkMode ? "text-slate-400" : "text-gray-400"}`}>
                             Los cambios se aplicarán automáticamente a todos los cálculos de comprobantes nuevos.
@@ -1480,6 +1490,13 @@ export const ConfigView: React.FC = () => {
               </div>
             )}
 
+            {comboErrorMessage && (
+              <div className="p-3 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 rounded-lg text-rose-800 dark:text-rose-300 text-xs flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0" />
+                <span>{comboErrorMessage}</span>
+              </div>
+            )}
+
             {/* List of Combos */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {combos.map((combo) => {
@@ -1552,14 +1569,40 @@ export const ConfigView: React.FC = () => {
                         <Edit2 className="w-3.5 h-3.5" />
                         <span>Editar</span>
                       </button>
-                      <button
-                        type="button"
-                        onClick={() => handleDeleteCombo(combo.id)}
-                        className="p-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 cursor-pointer text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950/30 transition"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                        <span>Eliminar</span>
-                      </button>
+
+                      {deletingComboId === combo.id ? (
+                        <div className="flex items-center gap-1 bg-red-500/10 p-1 rounded-md border border-red-500/30 shrink-0 animate-fade-in">
+                          <span className="text-[9px] font-bold text-red-400 uppercase">¿Borrar?</span>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              await handleDeleteCombo(combo.id);
+                              setDeletingComboId(null);
+                            }}
+                            className="bg-red-600 hover:bg-red-700 text-white text-[9px] px-1.5 py-0.5 rounded font-bold cursor-pointer transition"
+                          >
+                            Sí
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setDeletingComboId(null)}
+                            className={`border text-[9px] px-1.5 py-0.5 rounded font-bold cursor-pointer transition ${
+                              isDarkMode ? "bg-slate-900 border-slate-700 text-slate-300" : "bg-white border-gray-200 text-gray-700"
+                            }`}
+                          >
+                            No
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setDeletingComboId(combo.id)}
+                          className="p-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 cursor-pointer text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950/30 transition"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          <span>Eliminar</span>
+                        </button>
+                      )}
                     </div>
                   </div>
                 );

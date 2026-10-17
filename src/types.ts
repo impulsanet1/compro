@@ -816,7 +816,25 @@ export interface SupplierWarrantyRecord {
   supplierNotes?: string; // Notas de seguimiento o respuesta del proveedor
   resolvedDate?: string; // Fecha de resolución
   claimedAgainCount?: number; // Contador de re-reclamos
+  isReopenedFromCancelled?: boolean; // Indica si proviene de un pedido o garantía cancelada
+  originalReceiptConsecutive?: number; // Consecutivo original del comprobante (ej: 45)
+  originalReceiptId?: string; // ID original del comprobante
+  previousProviderOrderId?: string; // ID(s) previos de orden del proveedor cancelados
+  previousWarrantyId?: string; // ID de garantía previa asociada si existió
+  reopenReason?: string; // Motivo de reapertura / reenvío
+  reopenDate?: string; // Fecha y hora de reapertura
+  traceabilityNotes?: string; // Bitácora y trazabilidad detallada
   createdAt: string;
+}
+
+export interface ReopenWarrantyParams {
+  receiptId: string;
+  newProviderOrderId?: string;
+  reason: string;
+  expectedResponseHours?: number;
+  previousWarrantyId?: string;
+  customNotes?: string;
+  reactivateOrderToInProcess?: boolean;
 }
 
 export function getLocalDatetimeInputValue(dateInput?: Date | string | number): string {

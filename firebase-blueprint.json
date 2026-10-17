@@ -40,7 +40,9 @@
         "clientName": { "type": "string" },
         "clientPhone": { "type": "string" },
         "totalCharged": { "type": "number" },
-        "date": { "type": "string" }
+        "date": { "type": "string" },
+        "status": { "type": "string" },
+        "internalNotes": { "type": "string" }
       }
     },
     "Client": {
@@ -108,7 +110,15 @@
         "sentDate": { "type": "string" },
         "expectedResponseHours": { "type": "number" },
         "status": { "type": "string" },
-        "reason": { "type": "string" }
+        "reason": { "type": "string" },
+        "isReopenedFromCancelled": { "type": "boolean" },
+        "originalReceiptConsecutive": { "type": "number" },
+        "originalReceiptId": { "type": "string" },
+        "previousProviderOrderId": { "type": "string" },
+        "previousWarrantyId": { "type": "string" },
+        "reopenReason": { "type": "string" },
+        "reopenDate": { "type": "string" },
+        "traceabilityNotes": { "type": "string" }
       }
     }
   },

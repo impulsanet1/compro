@@ -32,7 +32,10 @@ import {
   normalizeContact,
   matchContacts,
   matchPhones,
-  buildReceiptsClientIndex
+  buildReceiptsClientIndex,
+  getItemOrderIds,
+  getClientCode,
+  ReopenWarrantyParams
 } from "../types";
 import { DEFAULT_BUSINESS_CONFIG, DEFAULT_SOCIAL_NETWORKS, DEFAULT_SERVICES, DEFAULT_COMBOS } from "../defaultData";
 
@@ -63,6 +66,7 @@ interface AppContextType {
   resolveSupplierWarranty: (id: string, notes?: string) => Promise<void>;
   claimAgainSupplierWarranty: (id: string, notes?: string) => Promise<void>;
   resolveAllWarrantiesInProcess: () => Promise<{ updatedReceiptsCount: number; resolvedWarrantiesCount: number }>;
+  reopenOrResendWarrantyForCancelledOrder: (params: ReopenWarrantyParams) => Promise<SupplierWarrantyRecord>;
 
   // Auth actions
   login: (email: string, password: string) => Promise<void>;
@@ -97,6 +101,7 @@ interface AppContextType {
   updateClient: (clientId: string, updates: Partial<Client>) => Promise<void>;
   reassignClientCode: (clientId: string, customCode?: string) => Promise<string>;
   resolveDuplicateClientCodes: () => Promise<{ resolvedCount: number; details: string[] }>;
+  mergeDuplicateClients: () => Promise<{ mergedGroupsCount: number; deletedDocsCount: number; details: string[] }>;
   separateReceiptToNewClient: (receiptId: string, fromClientId?: string, newClientName?: string, newClientPhone?: string) => Promise<string>;
   
   // System Maintenance
@@ -442,6 +447,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         // Build fast O(N + M) index mapping clients to receipts
         const { clientToReceipts } = buildReceiptsClientIndex(clients, receipts);
 
+        // Step 0: Auto-merge any duplicate client documents sharing the same phone/handle
+        const contactGroups = new Map<string, Client[]>();
+        clients.forEach((c) => {
+          const norm = normalizeContact(c.phone);
+          if (norm.type !== "none") {
+            const gKey = `${norm.type}:${norm.key}`;
+            if (!contactGroups.has(gKey)) contactGroups.set(gKey, []);
+            contactGroups.get(gKey)!.push(c);
+          }
+        });
+
+        for (const [gKey, group] of contactGroups.entries()) {
+          if (group.length > 1) {
+            console.log(`Auto-merging duplicate clients for ${gKey}:`, group.map((c) => c.id));
+            await mergeDuplicateClients();
+            return;
+          }
+        }
+
         // Sort clients deterministically: older clients or clients with earlier dates keep their assigned code
         const sortedClients = [...clients].sort((a, b) => {
           const dateA = a.createdAt ? new Date(a.createdAt).getTime() : (a.lastPurchaseDate ? new Date(a.lastPurchaseDate).getTime() : 0);
@@ -575,8 +599,37 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             });
 
             for (const [cId, recList] of groupedByClient.entries()) {
-              // Ensure we do not overwrite an existing client
-              if (clients.some((c) => c.id === cId)) continue;
+              const sample = recList[0];
+
+              // Check if a client document already exists for this person (by ID, contact match, or receipt match)
+              const existing = clients.find(
+                (c) =>
+                  c.id === cId ||
+                  isReceiptForClient(c, sample) ||
+                  matchContacts(c.phone, sample.clientPhone)
+              );
+
+              if (existing) {
+                // Safely link unmapped receipts to the verified existing client
+                const existingRecIds = new Set(existing.receiptIds || []);
+                recList.forEach((r) => existingRecIds.add(r.id));
+                const addedSpent = recList.reduce((sum, r) => sum + (r.totalCharged || 0), 0);
+                await setDoc(
+                  doc(db, "clients", existing.id),
+                  {
+                    receiptIds: Array.from(existingRecIds),
+                    purchaseCount: (existing.purchaseCount || 0) + recList.length,
+                    totalSpent: (existing.totalSpent || 0) + addedSpent,
+                  },
+                  { merge: true }
+                );
+                for (const r of recList) {
+                  if (r.clientId !== existing.id) {
+                    await setDoc(doc(db, "receipts", r.id), { clientId: existing.id }, { merge: true });
+                  }
+                }
+                continue;
+              }
 
               while (usedCodes.has(currentAutoId)) {
                 currentAutoId++;
@@ -584,7 +637,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               const assignedCode = String(currentAutoId).padStart(4, "0");
               usedCodes.add(currentAutoId);
 
-              const sample = recList[0];
               const sortedRecs = [...recList].sort(
                 (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()
               );
@@ -1030,9 +1082,127 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   /**
+   * Automatically detects and merges duplicate client documents sharing the same phone,
+   * WhatsApp number, or social handle into a single authoritative client document.
+   * Merges receipt history, updates all receipts in Firestore, and safely removes ghost duplicate documents.
+   */
+  const mergeDuplicateClients = async (): Promise<{ mergedGroupsCount: number; deletedDocsCount: number; details: string[] }> => {
+    const contactGroups = new Map<string, Client[]>();
+    clients.forEach((c) => {
+      const norm = normalizeContact(c.phone);
+      if (norm.type !== "none") {
+        const key = `${norm.type}:${norm.key}`;
+        if (!contactGroups.has(key)) contactGroups.set(key, []);
+        contactGroups.get(key)!.push(c);
+      }
+    });
+
+    let mergedGroupsCount = 0;
+    let deletedDocsCount = 0;
+    const details: string[] = [];
+
+    const receiptsByClientId = new Map<string, Receipt[]>();
+    receipts.forEach((r) => {
+      if (r.clientId) {
+        if (!receiptsByClientId.has(r.clientId)) receiptsByClientId.set(r.clientId, []);
+        receiptsByClientId.get(r.clientId)!.push(r);
+      }
+    });
+
+    for (const [key, group] of contactGroups.entries()) {
+      if (group.length <= 1) continue;
+
+      mergedGroupsCount++;
+
+      // Sort to determine keeper:
+      // 1. Linked by r.clientId in receipts
+      // 2. Has receiptIds in stored array
+      // 3. Lowest assigned clientCode
+      // 4. Shorter doc ID
+      const sorted = [...group].sort((a, b) => {
+        const recsA = (receiptsByClientId.get(a.id) || []).length;
+        const recsB = (receiptsByClientId.get(b.id) || []).length;
+        if (recsB !== recsA) return recsB - recsA;
+
+        const storedA = (a.receiptIds || []).length;
+        const storedB = (b.receiptIds || []).length;
+        if (storedB !== storedA) return storedB - storedA;
+
+        const codeA = parseInt(a.clientCode || "9999", 10);
+        const codeB = parseInt(b.clientCode || "9999", 10);
+        if (codeA !== codeB) return codeA - codeB;
+
+        return a.id.length - b.id.length;
+      });
+
+      const keeper = sorted[0];
+      const duplicates = sorted.slice(1);
+
+      // Preserve lowest / earliest assigned clientCode
+      const allCodes = [keeper, ...duplicates]
+        .map((c) => parseInt(c.clientCode || "9999", 10))
+        .filter((n) => !isNaN(n) && n > 0);
+      const bestCodeNum = allCodes.length > 0 ? Math.min(...allCodes) : 9999;
+      const finalCode = bestCodeNum < 9999 ? String(bestCodeNum).padStart(4, "0") : (keeper.clientCode || "0001");
+
+      const combinedReceiptIds = new Set<string>(keeper.receiptIds || []);
+      duplicates.forEach((d) => {
+        (d.receiptIds || []).forEach((rid) => combinedReceiptIds.add(rid));
+      });
+
+      receipts.forEach((r) => {
+        if (r.clientId === keeper.id || duplicates.some((d) => d.id === r.clientId)) {
+          combinedReceiptIds.add(r.id);
+        }
+      });
+
+      const allPersonReceipts = receipts.filter((r) => combinedReceiptIds.has(r.id));
+      const totalSpent = allPersonReceipts.reduce((sum, r) => sum + (r.totalCharged || 0), 0);
+      const purchaseCount = allPersonReceipts.length;
+
+      const sortedRecs = [...allPersonReceipts].sort(
+        (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()
+      );
+      const lastPurchaseDate = sortedRecs.length > 0 ? sortedRecs[0].date : (keeper.lastPurchaseDate || "");
+
+      // 1. Update any receipts referencing duplicate doc IDs
+      for (const d of duplicates) {
+        const referencingReceipts = receipts.filter((r) => r.clientId === d.id);
+        for (const r of referencingReceipts) {
+          await setDoc(doc(db, "receipts", r.id), { clientId: keeper.id }, { merge: true });
+        }
+      }
+
+      // 2. Update keeper document with consolidated stats
+      await setDoc(doc(db, "clients", keeper.id), cleanForFirestore({
+        receiptIds: Array.from(combinedReceiptIds),
+        purchaseCount,
+        totalSpent,
+        lastPurchaseDate,
+        name: keeper.name || duplicates[0].name,
+        phone: keeper.phone || duplicates[0].phone,
+        clientCode: finalCode
+      }), { merge: true });
+
+      // 3. Delete duplicate client documents
+      for (const d of duplicates) {
+        await deleteDoc(doc(db, "clients", d.id));
+        deletedDocsCount++;
+        details.push(`Cliente duplicado "${d.name}" (${d.id}) unificado en #${finalCode} "${keeper.name}" (${keeper.id})`);
+      }
+    }
+
+    return { mergedGroupsCount, deletedDocsCount, details };
+  };
+
+  /**
    * Automatically resolves all duplicate client codes across the database in one pass.
    */
   const resolveDuplicateClientCodes = async (): Promise<{ resolvedCount: number; details: string[] }> => {
+    // Step 1: Merge any duplicate client records of the same person first
+    const mergeRes = await mergeDuplicateClients();
+    const details: string[] = [...mergeRes.details];
+
     const codeGroups = new Map<string, Client[]>();
     clients.forEach((c) => {
       const code = (c.clientCode || "").trim().padStart(4, "0");
@@ -1049,8 +1219,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
 
     let nextAvailable = 1;
-    let resolvedCount = 0;
-    const details: string[] = [];
+    let resolvedCount = mergeRes.deletedDocsCount;
 
     for (const [code, group] of codeGroups.entries()) {
       if (group.length > 1) {
@@ -1432,6 +1601,134 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     await setDoc(docRef, updateData, { merge: true });
   };
 
+  /**
+   * Reabre o reenvía una garantía de un pedido cancelado, asociando todo el historial del
+   * comprobante original (consecutivo, servicios, clientes, IDs anteriores del proveedor)
+   * con una nueva solicitud de garantía en supplierWarranties, preservando la trazabilidad
+   * y actualizando las notas y estado del comprobante.
+   */
+  const reopenOrResendWarrantyForCancelledOrder = async (
+    params: ReopenWarrantyParams
+  ): Promise<SupplierWarrantyRecord> => {
+    const {
+      receiptId,
+      newProviderOrderId,
+      reason,
+      expectedResponseHours = 48,
+      previousWarrantyId,
+      customNotes,
+      reactivateOrderToInProcess = true
+    } = params;
+
+    const receipt = receipts.find((r) => r.id === receiptId);
+    if (!receipt) {
+      throw new Error(`No se encontró el comprobante con ID: ${receiptId}`);
+    }
+
+    const allOldIds = (receipt.services || []).flatMap((s) => getItemOrderIds(s));
+    const previousIdsStr = allOldIds.join(", ") || (receipt.consecutive ? `PED-${receipt.consecutive}` : "");
+    const targetProviderId = (newProviderOrderId && newProviderOrderId.trim())
+      ? newProviderOrderId.trim()
+      : previousIdsStr;
+    const cleanIdsList = targetProviderId.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+
+    // Resolve client
+    const client = clients.find(
+      (c) =>
+        c.id === receipt.clientId ||
+        c.receiptIds?.includes(receipt.id) ||
+        (receipt.clientPhone && matchContacts(c.phone, receipt.clientPhone))
+    );
+    const clientCode = client ? getClientCode(client) : undefined;
+
+    // Service label and quantity
+    const sLabel = receipt.services && receipt.services[0]
+      ? `${receipt.services[0].socialNetworkName} - ${receipt.services[0].serviceName}`
+      : "Servicio General";
+    const quantity = receipt.services && receipt.services[0] ? receipt.services[0].quantity : undefined;
+
+    const nowIso = new Date().toISOString();
+    const nowFormatted = new Date().toLocaleString("es-CO", { dateStyle: "short", timeStyle: "short" });
+
+    // Build complete traceability timeline entry
+    const traceEntry = [
+      `[${nowFormatted}] 🔄 GARANTÍA REABIERTA / REENVIADA`,
+      `• Pedido Original: Factura #${receipt.consecutive} (${receipt.clientName})`,
+      `• ID(s) Originales Proveedor: ${previousIdsStr || "Sin ID previo"}`,
+      `• Nuevo ID de Orden Proveedor: ${targetProviderId}`,
+      `• Motivo: ${reason}`,
+      customNotes ? `• Detalle Adicional: ${customNotes}` : null,
+      `• Plazo de Respuesta: ${expectedResponseHours}h`
+    ].filter(Boolean).join("\n");
+
+    // Create the new warranty record linked to the original receipt
+    const colRef = collection(db, "supplier_warranties");
+    const newWarrantyPayload: Record<string, any> = {
+      providerOrderId: targetProviderId,
+      providerOrderIds: cleanIdsList.length > 0 ? cleanIdsList : [targetProviderId],
+      receiptId: receipt.id,
+      receiptConsecutive: receipt.consecutive,
+      clientId: receipt.clientId || client?.id,
+      clientCode,
+      clientName: receipt.clientName,
+      clientPhone: receipt.clientPhone,
+      serviceName: sLabel,
+      quantity,
+      sentDate: nowIso,
+      expectedResponseHours,
+      status: "en_espera",
+      reason: reason.trim(),
+      isReopenedFromCancelled: true,
+      originalReceiptConsecutive: receipt.consecutive,
+      originalReceiptId: receipt.id,
+      previousProviderOrderId: previousIdsStr,
+      previousWarrantyId: previousWarrantyId || undefined,
+      reopenReason: reason.trim(),
+      reopenDate: nowIso,
+      traceabilityNotes: traceEntry,
+      createdAt: nowIso
+    };
+
+    const docRef = await addDoc(colRef, cleanForFirestore(newWarrantyPayload));
+
+    // Update original receipt without losing data or history
+    const existingNotes = receipt.internalNotes || "";
+    const updatedNotes = existingNotes ? `${existingNotes}\n\n${traceEntry}` : traceEntry;
+
+    // If a new provider order ID was given, update the services items preserving full traceability
+    let updatedServices = receipt.services;
+    if (newProviderOrderId && newProviderOrderId.trim()) {
+      const cleanNewId = newProviderOrderId.trim();
+      updatedServices = (receipt.services || []).map((s, idx) => {
+        if (idx === 0) {
+          const ids = cleanIdsList;
+          return {
+            ...s,
+            orderId: cleanNewId,
+            orderIds: ids.length > 0 ? ids : [cleanNewId]
+          };
+        }
+        return s;
+      });
+    }
+
+    const receiptPatch: Partial<Receipt> = {
+      internalNotes: updatedNotes,
+      services: updatedServices
+    };
+
+    if (reactivateOrderToInProcess) {
+      receiptPatch.status = "garantia_en_proceso";
+    }
+
+    await setDoc(doc(db, "receipts", receipt.id), cleanForFirestore(receiptPatch), { merge: true });
+
+    return {
+      id: docRef.id,
+      ...newWarrantyPayload
+    } as SupplierWarrantyRecord;
+  };
+
   return (
     <AppContext.Provider
       value={{
@@ -1455,6 +1752,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         resolveSupplierWarranty,
         claimAgainSupplierWarranty,
         resolveAllWarrantiesInProcess,
+        reopenOrResendWarrantyForCancelledOrder,
         login,
         loginWithGoogle,
         logout,
@@ -1477,6 +1775,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updateClient,
         reassignClientCode,
         resolveDuplicateClientCodes,
+        mergeDuplicateClients,
         separateReceiptToNewClient,
         restoreDefaults
       }}

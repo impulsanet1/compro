@@ -845,16 +845,28 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => 
                         ) : (
                           <div className="flex items-center justify-center gap-1.5 flex-wrap sm:flex-nowrap">
                             {getNormalizedStatus(r.status) === "cancelado" && (
-                              <button
-                                id={`btn-reorder-receipt-${r.consecutive}`}
-                                type="button"
-                                onClick={() => onSelectReceipt(r, false)}
-                                className="inline-flex items-center gap-1 text-[11px] font-bold px-2 py-1 rounded-md shadow-2xs cursor-pointer border bg-purple-600 hover:bg-purple-700 text-white border-purple-700 active:scale-95 transition"
-                                title="Reordenar con nuevo proveedor o tramitar garantía"
-                              >
-                                <RotateCcw className="w-3 h-3" />
-                                Reordenar
-                              </button>
+                              <>
+                                <button
+                                  id={`btn-reopen-warranty-receipt-${r.consecutive}`}
+                                  type="button"
+                                  onClick={() => onSelectReceipt(r, false)}
+                                  className="inline-flex items-center gap-1 text-[11px] font-bold px-2 py-1 rounded-md shadow-2xs cursor-pointer border bg-indigo-600 hover:bg-indigo-700 text-white border-indigo-700 active:scale-95 transition"
+                                  title="Reenviar o reabrir garantía para este pedido cancelado asociando el historial"
+                                >
+                                  <ShieldAlert className="w-3 h-3" />
+                                  Reabrir Garantía
+                                </button>
+                                <button
+                                  id={`btn-reorder-receipt-${r.consecutive}`}
+                                  type="button"
+                                  onClick={() => onSelectReceipt(r, false)}
+                                  className="inline-flex items-center gap-1 text-[11px] font-bold px-2 py-1 rounded-md shadow-2xs cursor-pointer border bg-purple-600 hover:bg-purple-700 text-white border-purple-700 active:scale-95 transition"
+                                  title="Reordenar con nuevo proveedor o tramitar garantía"
+                                >
+                                  <RotateCcw className="w-3 h-3" />
+                                  Reordenar
+                                </button>
+                              </>
                             )}
                             {getNormalizedStatus(r.status) === "garantia_en_proceso" && (
                               <button

@@ -16,7 +16,7 @@ import { QuoteCalculatorView } from "./components/QuoteCalculatorView";
 import { ReceiptModal } from "./components/ReceiptModal";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Receipt, ReceiptItem, getSupplierWarrantyTimeStatus } from "./types";
-import { PWAInstallButton, LiveServerSyncBadge } from "./components/PWAInstallButton";
+import { LiveServerSyncBadge } from "./components/PWAInstallButton";
 import { OfflineIndicator } from "./components/OfflineIndicator";
 import { useOnlineStatus } from "./hooks/useOnlineStatus";
 import {
@@ -60,61 +60,58 @@ const Navigation: React.FC<{ activeTab: string; setActiveTab: (tab: string) => v
   ];
 
   return (
-    <>
-      <PWAInstallButton variant="banner" />
-      <header className={`border-b sticky top-0 z-40 no-print transition-colors duration-200 shadow-2xs ${
-        isDarkMode ? "bg-slate-900/95 border-slate-800 backdrop-blur-md" : "bg-white border-gray-200"
-      }`}>
-        <div className="max-w-7xl mx-auto px-3 sm:px-5">
-          <div className="flex justify-between h-13 sm:h-14 items-center">
-            {/* Logo and Brand */}
-            <div className="flex items-center gap-2 shrink-0">
-              <span className={`font-black text-sm sm:text-base tracking-tight ${
-                isDarkMode ? "text-white" : "text-gray-900"
-              }`}>
-                Impulsa<span className="text-indigo-500">Net</span>
-              </span>
-              <div className="hidden sm:block">
-                <LiveServerSyncBadge isOnline={isOnline} />
-              </div>
+    <header className={`border-b sticky top-0 z-40 no-print transition-colors duration-200 shadow-2xs ${
+      isDarkMode ? "bg-slate-900/95 border-slate-800 backdrop-blur-md" : "bg-white border-gray-200"
+    }`}>
+      <div className="max-w-7xl mx-auto px-3 sm:px-5">
+        <div className="flex justify-between h-13 sm:h-14 items-center">
+          {/* Logo and Brand */}
+          <div className="flex items-center gap-2 shrink-0">
+            <span className={`font-black text-sm sm:text-base tracking-tight ${
+              isDarkMode ? "text-white" : "text-gray-900"
+            }`}>
+              Impulsa<span className="text-indigo-500">Net</span>
+            </span>
+            <div className="hidden sm:block">
+              <LiveServerSyncBadge isOnline={isOnline} />
             </div>
+          </div>
 
-            {/* Core Tabs Navigation */}
-            <nav className="flex space-x-1 sm:space-x-1.5 overflow-x-auto py-1">
-              {navItems.map((item) => {
-                const Icon = item.icon;
-                const isActive = activeTab === item.id;
-                return (
-                  <button
-                    key={item.id}
-                    id={`nav-tab-${item.id}`}
-                    onClick={() => setActiveTab(item.id)}
-                    className={`flex items-center gap-1 sm:gap-1.5 px-2 sm:px-2.5 py-1.5 rounded-lg text-xs font-semibold transition relative cursor-pointer whitespace-nowrap touch-manipulation active:scale-95 ${
-                      isActive
-                        ? isDarkMode
-                          ? "bg-indigo-950/90 text-indigo-300 font-bold border border-indigo-800/60 shadow-xs"
-                          : "bg-indigo-50 text-indigo-700 font-bold border border-indigo-100"
-                        : isDarkMode
-                        ? "text-slate-400 hover:text-white hover:bg-slate-800"
-                        : "text-gray-500 hover:text-gray-900 hover:bg-gray-50"
-                    }`}
-                  >
-                    <Icon className="w-3.5 h-3.5 shrink-0 text-indigo-500" />
-                    <span className="hidden md:inline">{item.label}</span>
-                    {item.badge !== undefined && (
-                      <span className="ml-0.5 px-1.5 py-0.2 bg-red-600 text-white text-[10px] font-bold rounded-full animate-pulse">
-                        {item.badge}
-                      </span>
-                    )}
-                  </button>
-                );
-              })}
-            </nav>
+          {/* Core Tabs Navigation */}
+          <nav className="flex space-x-1 sm:space-x-1.5 overflow-x-auto py-1">
+            {navItems.map((item) => {
+              const Icon = item.icon;
+              const isActive = activeTab === item.id;
+              return (
+                <button
+                  key={item.id}
+                  id={`nav-tab-${item.id}`}
+                  onClick={() => setActiveTab(item.id)}
+                  className={`flex items-center gap-1 sm:gap-1.5 px-2 sm:px-2.5 py-1.5 rounded-lg text-xs font-semibold transition relative cursor-pointer whitespace-nowrap touch-manipulation active:scale-95 ${
+                    isActive
+                      ? isDarkMode
+                        ? "bg-indigo-950/90 text-indigo-300 font-bold border border-indigo-800/60 shadow-xs"
+                        : "bg-indigo-50 text-indigo-700 font-bold border border-indigo-100"
+                      : isDarkMode
+                      ? "text-slate-400 hover:text-white hover:bg-slate-800"
+                      : "text-gray-500 hover:text-gray-900 hover:bg-gray-50"
+                  }`}
+                >
+                  <Icon className="w-3.5 h-3.5 shrink-0 text-indigo-500" />
+                  <span className="hidden md:inline">{item.label}</span>
+                  {item.badge !== undefined && (
+                    <span className="ml-0.5 px-1.5 py-0.2 bg-red-600 text-white text-[10px] font-bold rounded-full animate-pulse">
+                      {item.badge}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </nav>
 
-            {/* Controls: Install App, Theme Toggle */}
-            <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-              <PWAInstallButton variant="header" />
-              <button
+          {/* Controls: Theme Toggle */}
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+            <button
                 id="btn-global-theme-toggle"
                 type="button"
                 onClick={toggleDarkMode}
@@ -135,7 +132,6 @@ const Navigation: React.FC<{ activeTab: string; setActiveTab: (tab: string) => v
           </div>
         </div>
       </header>
-    </>
   );
 };
 

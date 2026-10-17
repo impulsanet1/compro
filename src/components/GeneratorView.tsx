@@ -67,31 +67,65 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
   const [clientSearchQuery, setClientSearchQuery] = useState("");
   const [selectedClientObj, setSelectedClientObj] = useState<Client | null>(null);
 
-  // Client search results
+  // Client search results with strict deduplication
   const matchingClients = useMemo(() => {
     if (!clientSearchQuery.trim()) return [];
     const query = clientSearchQuery.trim().toLowerCase();
     const queryClean = query.replace(/^@+/, "");
-    return clients
+
+    // Find all matching clients with defensive null checks
+    const matched = clients
       .map((c, idx) => ({ ...c, code: getClientCode(c, idx) }))
       .filter((c) => {
+        const codeStr = (c.code || "").toLowerCase();
+        const clientCodeStr = (c.clientCode || "").toLowerCase();
+        const nameStr = (c.name || "").toLowerCase();
+        const phoneStr = (c.phone || "").toLowerCase();
+        const phoneClean = phoneStr.replace(/^@+/, "");
+        const idStr = (c.id || "").toLowerCase();
+
         return (
-          c.code.toLowerCase().includes(query) ||
-          (c.clientCode && c.clientCode.toLowerCase().includes(query)) ||
-          c.name.toLowerCase().includes(query) ||
-          c.name.toLowerCase().includes(queryClean) ||
-          (c.phone && c.phone.toLowerCase().includes(query)) ||
-          (c.phone && c.phone.toLowerCase().replace(/^@+/, "").includes(queryClean)) ||
-          (c.id && c.id.toLowerCase().includes(queryClean))
+          codeStr.includes(query) ||
+          clientCodeStr.includes(query) ||
+          nameStr.includes(query) ||
+          nameStr.includes(queryClean) ||
+          phoneStr.includes(query) ||
+          phoneClean.includes(queryClean) ||
+          idStr.includes(queryClean)
         );
-      })
-      .slice(0, 5);
+      });
+
+    // Deduplicate: If multiple records represent the same contact or same clientCode, keep the authoritative one
+    const seenContacts = new Set<string>();
+    const seenCodes = new Set<string>();
+    const uniqueList: (Client & { code: string })[] = [];
+
+    for (const c of matched) {
+      const norm = normalizeContact(c.phone);
+      const contactKey = norm.type !== "none" ? `${norm.type}:${norm.key}` : "";
+      const codeKey = (c.code || "").trim();
+
+      if (contactKey && seenContacts.has(contactKey)) {
+        continue;
+      }
+      if (codeKey && codeKey !== "0000" && seenCodes.has(codeKey)) {
+        continue;
+      }
+
+      if (contactKey) seenContacts.add(contactKey);
+      if (codeKey && codeKey !== "0000") seenCodes.add(codeKey);
+      uniqueList.push(c);
+      if (uniqueList.length >= 6) break;
+    }
+
+    return uniqueList;
   }, [clients, clientSearchQuery]);
 
   const handleSelectClient = (client: Client & { code: string }) => {
     setClientName(client.name);
     setClientPhone(client.phone);
     setSelectedClientObj(client);
+    setForceNewClient(false);
     setClientSearchQuery("");
   };
 
@@ -2145,7 +2179,7 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
                         <div className="flex justify-between items-start">
                           <div>
                             <div className={`text-xs font-bold ${isDarkMode ? "text-white" : "text-gray-900"}`}>
-                              {item.socialNetworkName && item.socialNetworkName.toLowerCase() !== item.serviceName.toLowerCase()
+                              {item.socialNetworkName && (item.socialNetworkName || "").toLowerCase() !== (item.serviceName || "").toLowerCase()
                                 ? `${item.socialNetworkName} - ${item.serviceName}`
                                 : (item.serviceName || item.socialNetworkName)}
                             </div>

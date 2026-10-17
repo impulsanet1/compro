@@ -24,7 +24,7 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
   whatsapp,
   initialIsEditing = false,
 }) => {
-  const { updateReceipt, socialNetworks, services, addSupplierWarranty } = useApp();
+  const { updateReceipt, socialNetworks, services, addSupplierWarranty, reopenOrResendWarrantyForCancelledOrder } = useApp();
   const receiptRef = useRef<HTMLDivElement>(null);
   
   // Format utility
@@ -555,46 +555,54 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
     try {
       const allExistingIds = (receipt.services || []).flatMap((s) => getItemOrderIds(s));
       const targetId = newProviderIdInput.trim() || (allExistingIds.length > 0 ? allExistingIds.join(", ") : `PED-${receipt.consecutive}`);
-      const cleanIdsList = targetId.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
-      
-      const sLabel = receipt.services && receipt.services[0]
-        ? `${receipt.services[0].socialNetworkName} - ${receipt.services[0].serviceName}`
-        : "Servicio General";
+      const finalReason = claimReasonInput.trim() || (getNormalizedStatus(receipt.status) === "cancelado" ? "Reenvío / Reapertura de garantía por cancelación de proveedor" : "Garantía de reposición / Refill solicitado");
 
-      const finalReason = claimReasonInput.trim() || "Garantía de reposición / Refill solicitado";
+      if (getNormalizedStatus(receipt.status) === "cancelado") {
+        await reopenOrResendWarrantyForCancelledOrder({
+          receiptId: receipt.id,
+          newProviderOrderId: newProviderIdInput.trim() || undefined,
+          reason: finalReason,
+          expectedResponseHours: warrantyResponseHours,
+          reactivateOrderToInProcess: true
+        });
+      } else {
+        const cleanIdsList = targetId.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+        const sLabel = receipt.services && receipt.services[0]
+          ? `${receipt.services[0].socialNetworkName} - ${receipt.services[0].serviceName}`
+          : "Servicio General";
 
-      await addSupplierWarranty({
-        providerOrderId: targetId,
-        providerOrderIds: cleanIdsList.length > 0 ? cleanIdsList : [targetId],
-        receiptId: receipt.id,
-        receiptConsecutive: receipt.consecutive,
-        clientId: receipt.clientId,
-        clientName: receipt.clientName,
-        clientPhone: receipt.clientPhone,
-        serviceName: sLabel,
-        quantity: receipt.services?.[0]?.quantity,
-        sentDate: new Date().toISOString(),
-        expectedResponseHours: warrantyResponseHours,
-        status: "en_espera",
-        reason: finalReason,
-        claimedAgainCount: 0,
-      });
+        await addSupplierWarranty({
+          providerOrderId: targetId,
+          providerOrderIds: cleanIdsList.length > 0 ? cleanIdsList : [targetId],
+          receiptId: receipt.id,
+          receiptConsecutive: receipt.consecutive,
+          clientId: receipt.clientId,
+          clientName: receipt.clientName,
+          clientPhone: receipt.clientPhone,
+          serviceName: sLabel,
+          quantity: receipt.services?.[0]?.quantity,
+          sentDate: new Date().toISOString(),
+          expectedResponseHours: warrantyResponseHours,
+          status: "en_espera",
+          reason: finalReason,
+          claimedAgainCount: 0,
+        });
 
-      const nowFormatted = new Date().toLocaleString("es-CO", { dateStyle: "short", timeStyle: "short" });
-      const noteEntry = `[${nowFormatted}] 🛡️ Garantía enviada a proveedor (${warrantyResponseHours}h) - ID: ${targetId} - Motivo: ${finalReason}`;
-      const updatedNotes = editedInternalNotes ? `${editedInternalNotes}\n${noteEntry}` : noteEntry;
+        const nowFormatted = new Date().toLocaleString("es-CO", { dateStyle: "short", timeStyle: "short" });
+        const noteEntry = `[${nowFormatted}] 🛡️ Garantía enviada a proveedor (${warrantyResponseHours}h) - ID: ${targetId} - Motivo: ${finalReason}`;
+        const updatedNotes = editedInternalNotes ? `${editedInternalNotes}\n${noteEntry}` : noteEntry;
 
-      await updateReceipt(receipt.id, {
-        status: "garantia_en_proceso",
-        internalNotes: updatedNotes,
-      });
+        await updateReceipt(receipt.id, {
+          status: "garantia_en_proceso",
+          internalNotes: updatedNotes,
+        });
+        setEditedInternalNotes(updatedNotes);
+      }
 
       setEditedStatus("garantia_en_proceso");
-      setEditedInternalNotes(updatedNotes);
-      
       const waUrl = getWhatsAppLink("warranty_claim");
       setLastActionWhatsAppUrl(waUrl);
-      setResendSuccess(`¡Garantía radicada (plazo ${warrantyResponseHours}h) y pedido en 'Garantía en proceso'!`);
+      setResendSuccess(`¡Garantía radicada (plazo ${warrantyResponseHours}h) y pedido reactivado con trazabilidad completa!`);
       setNewProviderIdInput("");
       setClaimReasonInput("");
       setTimeout(() => setResendSuccess(null), 6000);

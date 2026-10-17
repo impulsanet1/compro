@@ -28,7 +28,7 @@ import {
   X,
   Sparkles
 } from "lucide-react";
-import { Client, Receipt, getClientCode, getNormalizedStatus, isWarrantyForClient, buildReceiptsClientIndex, resolveReceiptWarranty } from "../types";
+import { Client, Receipt, getClientCode, getNormalizedStatus, isWarrantyForClient, buildReceiptsClientIndex, resolveReceiptWarranty, normalizeContact } from "../types";
 import { RepurchaseModal } from "./RepurchaseModal";
 import { safeCopyToClipboard } from "../utils";
 
@@ -37,7 +37,7 @@ interface ClientsViewProps {
 }
 
 export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => {
-  const { clients, receipts, supplierWarranties, updateClientTag, updateClient, reassignClientCode, resolveDuplicateClientCodes, separateReceiptToNewClient, isDarkMode } = useApp();
+  const { clients, receipts, supplierWarranties, updateClientTag, updateClient, reassignClientCode, resolveDuplicateClientCodes, mergeDuplicateClients, separateReceiptToNewClient, isDarkMode } = useApp();
   const formatCOP = (val: number) => "$" + Math.round(val).toLocaleString("es-CO");
 
   const [searchText, setSearchText] = useState("");
@@ -261,6 +261,26 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
     };
   }, [enrichedClients, clients]);
 
+  // Detect duplicate contact groups (same person registered multiple times)
+  const duplicateContactGroups = useMemo(() => {
+    const contactMap = new Map<string, Client[]>();
+    clients.forEach((c) => {
+      const norm = normalizeContact(c.phone);
+      if (norm.type !== "none") {
+        const key = `${norm.type}:${norm.key}`;
+        if (!contactMap.has(key)) contactMap.set(key, []);
+        contactMap.get(key)!.push(c);
+      }
+    });
+    const res: Array<{ contact: string; clients: Client[] }> = [];
+    contactMap.forEach((cList, contact) => {
+      if (cList.length > 1) {
+        res.push({ contact, clients: cList });
+      }
+    });
+    return res;
+  }, [clients]);
+
   // Detect any clients sharing the same code (e.g., ID 0083 assigned to two people)
   const duplicateGroups = useMemo(() => {
     const codeMap = new Map<string, Client[]>();
@@ -280,20 +300,24 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
     return res;
   }, [clients]);
 
+  const hasAnyDuplicates = duplicateGroups.length > 0 || duplicateContactGroups.length > 0;
+
   const handleResolveDuplicates = async () => {
     setIsResolvingDuplicates(true);
     try {
-      const res = await resolveDuplicateClientCodes();
+      const mergeRes = await mergeDuplicateClients();
+      const codeRes = await resolveDuplicateClientCodes();
+      const totalResolved = mergeRes.deletedDocsCount + codeRes.resolvedCount;
       setUserNotification({
         type: "success",
-        message: res.resolvedCount > 0
-          ? `¡Conflicto resuelto! Se reasignaron ${res.resolvedCount} cliente(s) con nuevos IDs únicos automáticos.`
-          : "Todos los clientes tienen IDs únicos y verificados."
+        message: totalResolved > 0
+          ? `¡Clientes unificados! Se fusionaron y limpiaron ${mergeRes.deletedDocsCount} perfil(es) duplicados y se verificaron los códigos únicos.`
+          : "Todos los clientes tienen perfiles e IDs únicos y verificados sin duplicados."
       });
     } catch (err: any) {
       setUserNotification({
         type: "error",
-        message: err?.message || "No se pudo resolver el conflicto de IDs."
+        message: err?.message || "No se pudo resolver el conflicto de duplicados."
       });
     } finally {
       setIsResolvingDuplicates(false);
@@ -395,8 +419,8 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
         </button>
       </div>
 
-      {/* Alerta Destacada para IDs Duplicados (ej. Dos personas con ID 0083) */}
-      {duplicateGroups.length > 0 && (
+      {/* Alerta Destacada para Clientes e IDs Duplicados */}
+      {hasAnyDuplicates && (
         <div className="bg-amber-500/10 dark:bg-amber-950/40 border-2 border-amber-500/40 rounded-2xl p-4 sm:p-5 shadow-sm space-y-3 animate-in fade-in">
           <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
             <div className="flex items-start gap-3">
@@ -405,10 +429,14 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
               </div>
               <div>
                 <h4 className="text-sm font-bold text-amber-900 dark:text-amber-200">
-                  Conflicto Detectado: {duplicateGroups.length === 1 ? `Hay 2 personas distintas con el ID #${duplicateGroups[0].code}` : "Existen clientes con IDs duplicados"}
+                  {duplicateContactGroups.length > 0 && duplicateGroups.length > 0
+                    ? `Perfiles Duplicados Detectados: ${duplicateContactGroups.length} cliente(s) con mismo contacto y ${duplicateGroups.length} IDs compartidos`
+                    : duplicateContactGroups.length > 0
+                    ? `Perfiles Duplicados Detectados: ${duplicateContactGroups.length} cliente(s) registrados más de una vez con el mismo contacto`
+                    : `Conflicto Detectado: ${duplicateGroups.length === 1 ? `Hay 2 personas con el ID #${duplicateGroups[0].code}` : "Existen clientes con IDs duplicados"}`}
                 </h4>
                 <p className="text-xs text-amber-800/80 dark:text-amber-300/80 mt-0.5">
-                  Se detectaron clientes diferentes registrados con el mismo código. Puedes resolverlo en 1 clic manteniendo el ID para el cliente original y asignando un nuevo ID único y libre al segundo.
+                  Puedes unificar y resolver los duplicados en 1 solo clic. El sistema fusionará todas las compras, comprobantes y garantías en un perfil único consolidado, preservando su código e historial de datos intacto.
                 </p>
               </div>
             </div>
@@ -420,11 +448,32 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
               className="px-4 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-extrabold text-xs shadow-md transition active:scale-95 shrink-0 flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
             >
               <Sparkles className="w-4 h-4" />
-              {isResolvingDuplicates ? "Resolviendo..." : "Resolver en 1 Clic"}
+              {isResolvingDuplicates ? "Unificando..." : "Unificar y Resolver en 1 Clic"}
             </button>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
+            {duplicateContactGroups.map((group) => (
+              <div key={group.contact} className="bg-white/90 dark:bg-slate-900/90 border border-amber-300 dark:border-amber-800/60 rounded-xl p-3 text-xs space-y-2">
+                <div className="flex items-center justify-between font-bold text-slate-800 dark:text-slate-100">
+                  <span className="font-mono bg-indigo-100 dark:bg-indigo-950 px-2 py-0.5 rounded text-indigo-800 dark:text-indigo-300 font-extrabold">
+                    Contacto: {group.contact}
+                  </span>
+                  <span className="text-[11px] text-amber-700 dark:text-amber-400 font-bold">
+                    {group.clients.length} perfiles repetidos
+                  </span>
+                </div>
+                <div className="space-y-1.5 pl-1">
+                  {group.clients.map((c, i) => (
+                    <div key={c.id} className="flex items-center justify-between gap-2 text-[11px] text-slate-700 dark:text-slate-300 bg-slate-50 dark:bg-slate-800/50 p-1.5 rounded-lg border border-slate-200/50 dark:border-slate-700/50">
+                      <span className="font-semibold truncate">
+                        {i + 1}. {c.name} {c.clientCode ? `(#${c.clientCode})` : ""} - {c.phone}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
             {duplicateGroups.map((group) => (
               <div key={group.code} className="bg-white/90 dark:bg-slate-900/90 border border-amber-300 dark:border-amber-800/60 rounded-xl p-3 text-xs space-y-2">
                 <div className="flex items-center justify-between font-bold text-slate-800 dark:text-slate-100">

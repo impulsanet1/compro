@@ -106,6 +106,7 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
     deleteSupplierWarranty,
     resolveSupplierWarranty,
     updateReceipt,
+    reopenOrResendWarrantyForCancelledOrder,
     isDarkMode
   } = useApp();
 
@@ -155,7 +156,7 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
 
   // Navigation & View state
   const [activeSubTab, setActiveSubTab] = useState<"tracking" | "active_ids">("tracking");
-  const [statusFilter, setStatusFilter] = useState<"all" | "overdue" | "pending">("all");
+  const [statusFilter, setStatusFilter] = useState<"all" | "overdue" | "pending" | "reopened">("all");
   const [searchTerm, setSearchTerm] = useState("");
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [copySuccessMsg, setCopySuccessMsg] = useState<string | null>(null);
@@ -175,6 +176,19 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
   const [customReasonInput, setCustomReasonInput] = useState("");
   const [formClientNameManual, setFormClientNameManual] = useState("");
   const [formServiceNameManual, setFormServiceNameManual] = useState("");
+
+  // Reopen Cancelled Order Warranty Modal State
+  const [isReopenModalOpen, setIsReopenModalOpen] = useState(false);
+  const [reopenReceiptSearch, setReopenReceiptSearch] = useState("");
+  const [selectedCancelledReceipt, setSelectedCancelledReceipt] = useState<Receipt | null>(null);
+  const [reopenNewProviderId, setReopenNewProviderId] = useState("");
+  const [reopenReason, setReopenReason] = useState("Cancelado por proveedor / Reenvío con nuevo servidor");
+  const [reopenCustomReason, setReopenCustomReason] = useState("");
+  const [reopenResponseHours, setReopenResponseHours] = useState<number>(48);
+  const [reopenCustomNotes, setReopenCustomNotes] = useState("");
+  const [reopenReactivateOrder, setReopenReactivateOrder] = useState(true);
+  const [isSubmittingReopen, setIsSubmittingReopen] = useState(false);
+  const [expandedTraceabilityId, setExpandedTraceabilityId] = useState<string | null>(null);
 
   // Copy helper
   const copyToClipboard = async (text: string, idForState?: string, customMsg?: string) => {
@@ -217,6 +231,28 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
       (r) => (r.status === "en_espera" || r.status === "reclamado_nuevamente") && !r.timeInfo.isOverdue
     ).length;
   }, [warrantyRecordsWithStatus]);
+
+  const countReopened = useMemo(() => {
+    return warrantyRecordsWithStatus.filter((r) => r.isReopenedFromCancelled).length;
+  }, [warrantyRecordsWithStatus]);
+
+  // Cancelled receipts list and filter for reopening warranties
+  const cancelledReceipts = useMemo(() => {
+    return receipts.filter((r) => getNormalizedStatus(r.status) === "cancelado");
+  }, [receipts]);
+
+  const filteredCancelledReceipts = useMemo(() => {
+    if (!reopenReceiptSearch.trim()) return cancelledReceipts;
+    const q = reopenReceiptSearch.toLowerCase().trim();
+    return cancelledReceipts.filter((r) => {
+      const matchConsecutive = r.consecutive.toString().includes(q) || `#${r.consecutive}`.includes(q);
+      const matchClient = (r.clientName || "").toLowerCase().includes(q);
+      const matchPhone = (r.clientPhone || "").includes(q);
+      const matchService = (r.services || []).some((s) => s.serviceName.toLowerCase().includes(q));
+      const matchIds = (r.services || []).some((s) => getItemOrderIds(s).some((id) => id.toLowerCase().includes(q)));
+      return matchConsecutive || matchClient || matchPhone || matchService || matchIds;
+    });
+  }, [cancelledReceipts, reopenReceiptSearch]);
 
   // 2. Calculate All Active Client Warranty IDs from Receipts
   const activeClientWarrantyItems = useMemo(() => {
@@ -296,6 +332,7 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
       // 1. Status Filter
       if (statusFilter === "overdue" && !record.timeInfo.isOverdue) return false;
       if (statusFilter === "pending" && (record.status === "rechazado" || record.timeInfo.isOverdue)) return false;
+      if (statusFilter === "reopened" && !record.isReopenedFromCancelled) return false;
 
       // 2. Search Term
       if (searchTerm.trim() !== "") {
@@ -609,6 +646,50 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
     }
   };
 
+  // Handler for reopening / resending warranty for a cancelled order
+  const handleExecuteReopenWarranty = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedCancelledReceipt) {
+      setFormErrorMessage("Por favor selecciona un pedido cancelado.");
+      setTimeout(() => setFormErrorMessage(null), 3500);
+      return;
+    }
+    const finalReason = reopenReason === "Otro motivo (Escribir personalizado)"
+      ? (reopenCustomReason.trim() || "Reapertura de garantía")
+      : reopenReason;
+
+    setIsSubmittingReopen(true);
+    setFormErrorMessage(null);
+
+    try {
+      const record = await reopenOrResendWarrantyForCancelledOrder({
+        receiptId: selectedCancelledReceipt.id,
+        newProviderOrderId: reopenNewProviderId.trim() || undefined,
+        reason: finalReason,
+        expectedResponseHours: reopenResponseHours,
+        customNotes: reopenCustomNotes.trim() || undefined,
+        reactivateOrderToInProcess: reopenReactivateOrder
+      });
+
+      setIsReopenModalOpen(false);
+      setSelectedCancelledReceipt(null);
+      setReopenNewProviderId("");
+      setReopenCustomReason("");
+      setReopenCustomNotes("");
+      copyToClipboard(
+        record.providerOrderId,
+        undefined,
+        `¡Garantía #${record.originalReceiptConsecutive} reabierta y vinculada exitosamente con plazo de ${reopenResponseHours}h!`
+      );
+    } catch (err: any) {
+      console.error("Error reopening warranty for cancelled order:", err);
+      setFormErrorMessage(err.message || "Error al reabrir la garantía.");
+      setTimeout(() => setFormErrorMessage(null), 4000);
+    } finally {
+      setIsSubmittingReopen(false);
+    }
+  };
+
   // Direct Delete handler
   const handleDeleteWarranty = async (id: string, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
@@ -693,14 +774,38 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
           </div>
         </div>
 
-        <button
-          id="btn-new-warranty-claim"
-          onClick={() => handleOpenNewModal()}
-          className="flex items-center justify-center gap-2 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 active:scale-[0.98] text-white rounded-xl font-bold text-xs transition shadow-sm cursor-pointer shrink-0"
-        >
-          <PlusCircle className="w-4 h-4" />
-          <span>+ Registrar Envío (Buscar Factura)</span>
-        </button>
+        <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap">
+          <button
+            id="btn-reopen-cancelled-warranty"
+            onClick={() => {
+              setSelectedCancelledReceipt(null);
+              setReopenReceiptSearch("");
+              setReopenNewProviderId("");
+              setReopenCustomReason("");
+              setReopenCustomNotes("");
+              setIsReopenModalOpen(true);
+            }}
+            className="flex items-center justify-center gap-2 px-3.5 py-2.5 bg-gradient-to-r from-purple-700 to-indigo-700 hover:from-purple-800 hover:to-indigo-800 active:scale-[0.98] text-white rounded-xl font-bold text-xs transition shadow-sm cursor-pointer shrink-0 border border-purple-500/30"
+            title="Reenviar o reabrir una garantía de un pedido que fue cancelado asociando el historial original"
+          >
+            <RotateCcw className="w-4 h-4 text-purple-200" />
+            <span>🔄 Reabrir Garantía de Pedido Cancelado</span>
+            {cancelledReceipts.length > 0 && (
+              <span className="bg-white/20 text-white text-[10px] font-black px-1.5 py-0.5 rounded-full">
+                {cancelledReceipts.length}
+              </span>
+            )}
+          </button>
+
+          <button
+            id="btn-new-warranty-claim"
+            onClick={() => handleOpenNewModal()}
+            className="flex items-center justify-center gap-2 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 active:scale-[0.98] text-white rounded-xl font-bold text-xs transition shadow-sm cursor-pointer shrink-0"
+          >
+            <PlusCircle className="w-4 h-4" />
+            <span>+ Registrar Envío (Buscar Factura)</span>
+          </button>
+        </div>
       </div>
 
       {/* Overdue Alert Banner (Only when there are overdue items) */}
@@ -857,6 +962,20 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
                 }`}
               >
                 En tiempo ({countPending})
+              </button>
+              <button
+                onClick={() => setStatusFilter("reopened")}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1 cursor-pointer ${
+                  statusFilter === "reopened"
+                    ? "bg-purple-600 text-white shadow-xs"
+                    : isDarkMode
+                    ? "bg-purple-950/60 text-purple-300 border border-purple-800 hover:bg-purple-900/80"
+                    : "bg-purple-50 text-purple-700 hover:bg-purple-100"
+                }`}
+                title="Garantías reabiertas o reenviadas de pedidos cancelados"
+              >
+                <RotateCcw className="w-3 h-3" />
+                <span>Reabiertas de Cancelados ({countReopened})</span>
               </button>
             </div>
           )}
@@ -1077,6 +1196,56 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
                             {record.reason || "Caída / Drop"}
                           </span>
                         </div>
+
+                        {/* Trazabilidad de Pedido Cancelado */}
+                        {record.isReopenedFromCancelled && (
+                          <div className={`mt-2 p-2 rounded-xl border text-xs space-y-1.5 transition ${
+                            isDarkMode ? "bg-purple-950/40 border-purple-800/80 text-purple-200" : "bg-purple-50 border-purple-200 text-purple-900"
+                          }`}>
+                            <div className="flex items-center justify-between font-bold text-[10px]">
+                              <div className="flex items-center gap-1.5">
+                                <RotateCcw className="w-3.5 h-3.5 text-purple-400 shrink-0" />
+                                <span>Reabierta de Pedido Cancelado #{record.originalReceiptConsecutive || record.receiptConsecutive}</span>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => setExpandedTraceabilityId(expandedTraceabilityId === record.id ? null : record.id)}
+                                className="text-purple-600 dark:text-purple-300 hover:underline font-bold text-[9px] cursor-pointer shrink-0 ml-1"
+                              >
+                                {expandedTraceabilityId === record.id ? "Ocultar" : "Trazabilidad"}
+                              </button>
+                            </div>
+
+                            {expandedTraceabilityId === record.id && (
+                              <div className={`p-2 rounded-lg text-[10px] space-y-1 font-mono border ${
+                                isDarkMode ? "bg-slate-900/90 border-purple-900/60 text-slate-300" : "bg-white border-purple-100 text-gray-700"
+                              }`}>
+                                <div><strong>ID(s) Previos Cancelados:</strong> {record.previousProviderOrderId || "N/A"}</div>
+                                <div><strong>Motivo Reenvío:</strong> {record.reopenReason || record.reason}</div>
+                                {record.reopenDate && (
+                                  <div><strong>Fecha Reapertura:</strong> {new Date(record.reopenDate).toLocaleString("es-CO")}</div>
+                                )}
+                                {record.receiptId && (
+                                  <div className="pt-1">
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const targetRec = receipts.find((r) => r.id === record.receiptId);
+                                        if (targetRec && onSelectReceipt) {
+                                          onSelectReceipt(targetRec);
+                                        }
+                                      }}
+                                      className="text-indigo-600 dark:text-indigo-400 font-bold hover:underline flex items-center gap-1"
+                                    >
+                                      <FileText className="w-3 h-3" />
+                                      <span>Ver Comprobante Original #{record.originalReceiptConsecutive || record.receiptConsecutive}</span>
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        )}
                       </div>
                     </div>
 
@@ -1786,6 +1955,339 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
                     </span>
                   </button>
                 </div>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL DEDICADO: REABRIR O REENVIAR GARANTÍA DE PEDIDO CANCELADO */}
+      {isReopenModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/60 backdrop-blur-xs animate-fade-in overflow-y-auto">
+          <div className={`w-full max-w-2xl rounded-2xl shadow-2xl border my-auto transition-colors duration-200 overflow-hidden ${
+            isDarkMode ? "bg-slate-900 border-slate-700 text-slate-100" : "bg-white border-gray-200 text-gray-900"
+          }`}>
+            {/* Modal Header */}
+            <div className={`p-4 sm:p-5 border-b flex items-center justify-between ${
+              isDarkMode ? "bg-slate-850 border-slate-800" : "bg-purple-50/70 border-purple-100"
+            }`}>
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-purple-600 text-white flex items-center justify-center shrink-0 shadow-sm">
+                  <RotateCcw className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm sm:text-base font-extrabold text-gray-900 dark:text-white flex items-center gap-2">
+                    <span>Reabrir / Reenviar Garantía de Pedido Cancelado</span>
+                    <span className="text-[10px] bg-purple-100 dark:bg-purple-950 text-purple-700 dark:text-purple-300 px-2 py-0.5 rounded-full font-mono font-bold">
+                      Trazabilidad Total
+                    </span>
+                  </h3>
+                  <p className="text-xs text-gray-600 dark:text-slate-400 mt-0.5">
+                    Asocia el historial del pedido original con una nueva solicitud de garantía sin perder registros ni IDs anteriores.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsReopenModalOpen(false);
+                  setSelectedCancelledReceipt(null);
+                }}
+                className="text-gray-400 hover:text-gray-700 dark:hover:text-white p-1 rounded-lg transition cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleExecuteReopenWarranty} className="p-4 sm:p-6 space-y-5 max-h-[80vh] overflow-y-auto">
+              {/* PASO 1: SELECCIONAR PEDIDO CANCELADO */}
+              <div className="space-y-2">
+                <label className="block text-xs font-bold uppercase tracking-wider text-gray-700 dark:text-slate-300">
+                  1. Seleccionar Pedido Cancelado *
+                </label>
+
+                {selectedCancelledReceipt ? (
+                  <div className={`p-3.5 rounded-xl border flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 ${
+                    isDarkMode ? "bg-slate-800 border-slate-700" : "bg-purple-50/50 border-purple-200"
+                  }`}>
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-mono font-black text-sm text-purple-600 dark:text-purple-400">
+                          Factura #{String(selectedCancelledReceipt.consecutive).padStart(4, "0")}
+                        </span>
+                        <span className="text-xs font-bold text-gray-900 dark:text-white">
+                          {selectedCancelledReceipt.clientName}
+                        </span>
+                        {selectedCancelledReceipt.clientPhone && (
+                          <span className="text-xs font-mono text-gray-500">
+                            ({selectedCancelledReceipt.clientPhone})
+                          </span>
+                        )}
+                        <span className="text-[10px] bg-rose-100 dark:bg-rose-950/80 text-rose-700 dark:text-rose-300 font-bold px-2 py-0.5 rounded-full">
+                          🔴 Cancelado
+                        </span>
+                      </div>
+                      <div className="text-xs text-gray-600 dark:text-slate-300">
+                        <strong>Servicio:</strong> {selectedCancelledReceipt.services?.[0]?.socialNetworkName} - {selectedCancelledReceipt.services?.[0]?.serviceName} ({selectedCancelledReceipt.services?.[0]?.quantity?.toLocaleString()} un.)
+                      </div>
+                      <div className="text-xs text-purple-700 dark:text-purple-300 font-mono">
+                        <strong>ID(s) Proveedor Originales (Cancelados):</strong>{" "}
+                        {selectedCancelledReceipt.services?.flatMap(s => getItemOrderIds(s)).join(", ") || "Sin ID registrado"}
+                      </div>
+                      {selectedCancelledReceipt.date && (
+                        <div className="text-[11px] text-gray-500">
+                          Fecha compra original: {new Date(selectedCancelledReceipt.date).toLocaleDateString("es-ES", { day: "numeric", month: "long", year: "numeric" })}
+                        </div>
+                      )}
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => setSelectedCancelledReceipt(null)}
+                      className="px-2.5 py-1 text-xs font-bold text-purple-600 dark:text-purple-300 hover:bg-purple-100 dark:hover:bg-purple-900/50 rounded-lg transition shrink-0 cursor-pointer"
+                    >
+                      Cambiar Pedido
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <div className="relative">
+                      <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+                      <input
+                        type="text"
+                        placeholder="Buscar pedido cancelado por # factura, cliente, teléfono o ID de proveedor..."
+                        value={reopenReceiptSearch}
+                        onChange={(e) => setReopenReceiptSearch(e.target.value)}
+                        className={`w-full pl-9 pr-3 py-2 text-xs rounded-xl border outline-none transition focus:ring-2 focus:ring-purple-500 ${
+                          isDarkMode ? "bg-slate-800 border-slate-700 text-white" : "bg-white border-gray-200 text-gray-900"
+                        }`}
+                      />
+                    </div>
+
+                    <div className={`max-h-48 overflow-y-auto rounded-xl border divide-y ${
+                      isDarkMode ? "bg-slate-800/60 border-slate-700 divide-slate-700" : "bg-gray-50 border-gray-200 divide-gray-200"
+                    }`}>
+                      {filteredCancelledReceipts.length === 0 ? (
+                        <div className="p-4 text-center text-xs text-gray-500">
+                          {cancelledReceipts.length === 0
+                            ? "No hay pedidos con estado 'Cancelado' actualmente en el sistema."
+                            : "No se encontraron pedidos cancelados que coincidan con la búsqueda."}
+                        </div>
+                      ) : (
+                        filteredCancelledReceipts.map((r) => {
+                          const oldIds = (r.services || []).flatMap(s => getItemOrderIds(s)).join(", ");
+                          return (
+                            <button
+                              key={r.id}
+                              type="button"
+                              onClick={() => {
+                                setSelectedCancelledReceipt(r);
+                                const firstIds = (r.services || []).flatMap(s => getItemOrderIds(s));
+                                setReopenNewProviderId(firstIds.join(", "));
+                              }}
+                              className={`w-full p-2.5 text-left text-xs transition flex items-center justify-between gap-2 hover:bg-purple-50 dark:hover:bg-purple-950/40 cursor-pointer ${
+                                isDarkMode ? "text-slate-200" : "text-gray-900"
+                              }`}
+                            >
+                              <div>
+                                <div className="flex items-center gap-2">
+                                  <span className="font-mono font-bold text-purple-600 dark:text-purple-400">
+                                    #{String(r.consecutive).padStart(4, "0")}
+                                  </span>
+                                  <span className="font-bold">{r.clientName}</span>
+                                  <span className="text-[10px] text-gray-500 font-mono">({r.clientPhone})</span>
+                                </div>
+                                <div className="text-[11px] text-gray-500 mt-0.5">
+                                  {r.services?.[0]?.serviceName} • IDs anteriores: <span className="font-mono">{oldIds || "Ninguno"}</span>
+                                </div>
+                              </div>
+                              <span className="text-[11px] font-bold text-purple-600 dark:text-purple-400 shrink-0">
+                                Seleccionar →
+                              </span>
+                            </button>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* PASO 2: NUEVOS DATOS DE GARANTÍA */}
+              {selectedCancelledReceipt && (
+                <div className="space-y-4 pt-2 border-t border-gray-200 dark:border-slate-800">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-bold uppercase tracking-wider text-gray-700 dark:text-slate-300 mb-1">
+                        Nuevo ID de Orden del Proveedor
+                      </label>
+                      <input
+                        type="text"
+                        value={reopenNewProviderId}
+                        onChange={(e) => setReopenNewProviderId(e.target.value)}
+                        placeholder="Ej: 1048291 ó 1048291, 1048292"
+                        className={`w-full px-3 py-2 text-xs font-mono font-bold rounded-xl border outline-none transition focus:ring-2 focus:ring-purple-500 ${
+                          isDarkMode ? "bg-slate-800 border-slate-700 text-white" : "bg-white border-gray-200 text-gray-900"
+                        }`}
+                      />
+                      <p className="text-[10px] text-gray-500 mt-1">
+                        Puedes ingresar el nuevo ID del proveedor de respaldo o dejar el original si radicas reposición directa.
+                      </p>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-bold uppercase tracking-wider text-gray-700 dark:text-slate-300 mb-1">
+                        Plazo Límite de Respuesta Proveedor
+                      </label>
+                      <div className="grid grid-cols-3 gap-1.5">
+                        {[24, 48, 72].map((hrs) => (
+                          <button
+                            key={hrs}
+                            type="button"
+                            onClick={() => setReopenResponseHours(hrs)}
+                            className={`py-2 text-xs font-bold rounded-xl border transition cursor-pointer ${
+                              reopenResponseHours === hrs
+                                ? "bg-purple-600 text-white border-purple-600 shadow-sm"
+                                : isDarkMode
+                                ? "bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700"
+                                : "bg-gray-50 text-gray-700 border-gray-200 hover:bg-gray-100"
+                            }`}
+                          >
+                            {hrs} horas {hrs === 48 ? "(Estándar)" : ""}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold uppercase tracking-wider text-gray-700 dark:text-slate-300 mb-1">
+                      Motivo del Reenvío / Reapertura *
+                    </label>
+                    <select
+                      value={reopenReason}
+                      onChange={(e) => setReopenReason(e.target.value)}
+                      className={`w-full px-3 py-2 text-xs rounded-xl border outline-none transition focus:ring-2 focus:ring-purple-500 ${
+                        isDarkMode ? "bg-slate-800 border-slate-700 text-white" : "bg-white border-gray-200 text-gray-900"
+                      }`}
+                    >
+                      <option value="Cancelado por proveedor / Reenvío con nuevo servidor">
+                        Cancelado por proveedor / Reenvío con nuevo servidor
+                      </option>
+                      <option value="Caída de seguidores / Drop tras cancelación">
+                        Caída de seguidores / Drop tras cancelación
+                      </option>
+                      <option value="Reposición solicitada por cliente">
+                        Reposición solicitada por cliente
+                      </option>
+                      <option value="Servicio no inició / Atascado">
+                        Servicio no inició / Atascado
+                      </option>
+                      <option value="Entrega incompleta por proveedor">
+                        Entrega incompleta por proveedor
+                      </option>
+                      <option value="Reapertura de garantía de 30 días">
+                        Reapertura de garantía de 30 días
+                      </option>
+                      <option value="Otro motivo (Escribir personalizado)">
+                        Otro motivo (Escribir personalizado)
+                      </option>
+                    </select>
+
+                    {reopenReason === "Otro motivo (Escribir personalizado)" && (
+                      <input
+                        type="text"
+                        value={reopenCustomReason}
+                        onChange={(e) => setReopenCustomReason(e.target.value)}
+                        placeholder="Escribe el motivo detallado..."
+                        className={`w-full mt-2 px-3 py-2 text-xs rounded-xl border outline-none transition focus:ring-2 focus:ring-purple-500 ${
+                          isDarkMode ? "bg-slate-800 border-slate-700 text-white" : "bg-white border-gray-200 text-gray-900"
+                        }`}
+                      />
+                    )}
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold uppercase tracking-wider text-gray-700 dark:text-slate-300 mb-1">
+                      Notas Adicionales de Trazabilidad (Opcional)
+                    </label>
+                    <textarea
+                      rows={2}
+                      value={reopenCustomNotes}
+                      onChange={(e) => setReopenCustomNotes(e.target.value)}
+                      placeholder="Ej: El cliente solicitó reenvío por caída. Se cambió al servidor de alta retención #2."
+                      className={`w-full px-3 py-2 text-xs rounded-xl border outline-none transition focus:ring-2 focus:ring-purple-500 ${
+                        isDarkMode ? "bg-slate-800 border-slate-700 text-white" : "bg-white border-gray-200 text-gray-900"
+                      }`}
+                    />
+                  </div>
+
+                  {/* Switch Reactivar Comprobante */}
+                  <label className="flex items-center gap-2 cursor-pointer text-xs font-semibold text-gray-800 dark:text-slate-200">
+                    <input
+                      type="checkbox"
+                      checked={reopenReactivateOrder}
+                      onChange={(e) => setReopenReactivateOrder(e.target.checked)}
+                      className="w-4 h-4 rounded text-purple-600 focus:ring-purple-500 cursor-pointer"
+                    />
+                    <span>
+                      Reactivar estado del comprobante a <strong>'Garantía en proceso'</strong> (para seguimiento en línea y tableros)
+                    </span>
+                  </label>
+
+                  {/* BANNER DE TRAZABILIDAD */}
+                  <div className={`p-3.5 rounded-xl border space-y-2 ${
+                    isDarkMode ? "bg-purple-950/30 border-purple-800/60" : "bg-purple-50 border-purple-200"
+                  }`}>
+                    <div className="flex items-center gap-2 font-bold text-xs text-purple-800 dark:text-purple-300">
+                      <ShieldCheck className="w-4 h-4 text-purple-600 dark:text-purple-400" />
+                      <span>Cadena de Trazabilidad que se Guardará:</span>
+                    </div>
+                    <div className="text-[11px] text-gray-700 dark:text-slate-300 space-y-1 font-mono">
+                      <div>1. 📋 <strong>Pedido Original:</strong> Factura #{selectedCancelledReceipt.consecutive} - Cliente: {selectedCancelledReceipt.clientName}</div>
+                      <div>2. 🔴 <strong>Estado Histórico:</strong> Cancelado por proveedor (IDs previos: {selectedCancelledReceipt.services?.flatMap(s => getItemOrderIds(s)).join(", ") || "N/A"})</div>
+                      <div>3. 🔄 <strong>Nueva Garantía Vinculada:</strong> ID Proveedor: {reopenNewProviderId || "Mismo ID"} • Plazo: {reopenResponseHours}h • Motivo: {reopenCustomReason.trim() || reopenReason}</div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {formErrorMessage && (
+                <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-rose-700 dark:text-rose-300 text-xs flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 shrink-0" />
+                  <span>{formErrorMessage}</span>
+                </div>
+              )}
+
+              {/* Submit / Cancel Buttons */}
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-gray-200 dark:border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsReopenModalOpen(false);
+                    setSelectedCancelledReceipt(null);
+                  }}
+                  className="px-4 py-2 text-xs font-semibold text-gray-500 dark:text-slate-400 hover:text-gray-800 dark:hover:text-white transition cursor-pointer"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={!selectedCancelledReceipt || isSubmittingReopen}
+                  className="px-5 py-2.5 bg-gradient-to-r from-purple-700 to-indigo-700 hover:from-purple-800 hover:to-indigo-800 disabled:opacity-50 text-white font-bold text-xs rounded-xl shadow-md transition flex items-center gap-2 cursor-pointer active:scale-95"
+                >
+                  {isSubmittingReopen ? (
+                    <>
+                      <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
+                      <span>Guardando y Vinculando...</span>
+                    </>
+                  ) : (
+                    <>
+                      <RotateCcw className="w-4 h-4" />
+                      <span>🛡️ Reabrir Garantía y Guardar Trazabilidad</span>
+                    </>
+                  )}
+                </button>
               </div>
             </form>
           </div>

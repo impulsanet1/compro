@@ -671,7 +671,6 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => 
                   let tagStyle = "";
                   if (clientTag === "VIP") tagStyle = isDarkMode ? "bg-purple-950 text-purple-300 border-purple-800" : "bg-purple-100 text-purple-800 border-purple-200";
                   else if (clientTag === "Frecuente") tagStyle = isDarkMode ? "bg-blue-950 text-blue-300 border-blue-800" : "bg-blue-100 text-blue-800 border-blue-200";
-                  else if (clientTag === "Mayorista") tagStyle = isDarkMode ? "bg-emerald-950 text-emerald-300 border-emerald-800" : "bg-emerald-100 text-emerald-800 border-emerald-200";
                   else if (clientTag === "Nuevo") tagStyle = isDarkMode ? "bg-emerald-950/80 text-emerald-300 border-emerald-700" : "bg-emerald-100 text-emerald-800 border-emerald-300";
 
                   // Warranty Details

@@ -79,6 +79,34 @@ export const DEFAULT_SERVICES: Service[] = [
       { id: "ig-c-100", quantity: 100, providerCost: 5582, suggestedPrice: 18000, active: true }
     ]
   },
+  {
+    id: "ig-optimizacion",
+    socialNetworkId: "instagram",
+    name: "Optimización de Instagram",
+    providerCostPer1000: 0,
+    suggestedPricePer1000: 65000000,
+    customPresets: [1, 2, 3, 5],
+    quantities: [
+      { id: "ig-opt-1", quantity: 1, providerCost: 0, suggestedPrice: 65000, active: true },
+      { id: "ig-opt-2", quantity: 2, providerCost: 0, suggestedPrice: 120000, active: true },
+      { id: "ig-opt-3", quantity: 3, providerCost: 0, suggestedPrice: 170000, active: true },
+      { id: "ig-opt-5", quantity: 5, providerCost: 0, suggestedPrice: 260000, active: true }
+    ]
+  },
+  {
+    id: "ig-publicidad",
+    socialNetworkId: "instagram",
+    name: "Gestión de publicidad",
+    providerCostPer1000: 0,
+    suggestedPricePer1000: 120000000,
+    customPresets: [1, 2, 3, 5],
+    quantities: [
+      { id: "ig-pub-1", quantity: 1, providerCost: 0, suggestedPrice: 120000, active: true },
+      { id: "ig-pub-2", quantity: 2, providerCost: 0, suggestedPrice: 220000, active: true },
+      { id: "ig-pub-3", quantity: 3, providerCost: 0, suggestedPrice: 320000, active: true },
+      { id: "ig-pub-5", quantity: 5, providerCost: 0, suggestedPrice: 500000, active: true }
+    ]
+  },
 
   // FACEBOOK
   {
@@ -135,6 +163,20 @@ export const DEFAULT_SERVICES: Service[] = [
       { id: "fb-c-20", quantity: 20, providerCost: 3800, suggestedPrice: 9000, active: true },
       { id: "fb-c-50", quantity: 50, providerCost: 9500, suggestedPrice: 22500, active: true },
       { id: "fb-c-100", quantity: 100, providerCost: 19000, suggestedPrice: 45000, active: true }
+    ]
+  },
+  {
+    id: "fb-publicidad",
+    socialNetworkId: "facebook",
+    name: "Gestión de publicidad",
+    providerCostPer1000: 0,
+    suggestedPricePer1000: 120000000,
+    customPresets: [1, 2, 3, 5],
+    quantities: [
+      { id: "fb-pub-1", quantity: 1, providerCost: 0, suggestedPrice: 120000, active: true },
+      { id: "fb-pub-2", quantity: 2, providerCost: 0, suggestedPrice: 220000, active: true },
+      { id: "fb-pub-3", quantity: 3, providerCost: 0, suggestedPrice: 320000, active: true },
+      { id: "fb-pub-5", quantity: 5, providerCost: 0, suggestedPrice: 500000, active: true }
     ]
   },
 

@@ -104,7 +104,6 @@ export const RepurchaseModal: React.FC<RepurchaseModalProps> = ({ initialClient,
       // Loyalty tier estimation
       const isHighVolume =
         c.tag === "VIP" ||
-        c.tag === "Mayorista" ||
         c.tag === "Frecuente" ||
         clientReceipts.length >= 4 ||
         totalSpent >= 100000;

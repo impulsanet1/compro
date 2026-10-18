@@ -35,6 +35,7 @@ import {
   buildReceiptsClientIndex,
   getItemOrderIds,
   getClientCode,
+  getClientTagForSpending,
   ReopenWarrantyParams
 } from "../types";
 import { DEFAULT_BUSINESS_CONFIG, DEFAULT_SOCIAL_NETWORKS, DEFAULT_SERVICES, DEFAULT_COMBOS } from "../defaultData";
@@ -526,6 +527,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             if (Math.abs((client.totalSpent || 0) - actualSpent) > 0.01) updatePayload.totalSpent = actualSpent;
             if (client.lastPurchaseDate !== actualLastDate) updatePayload.lastPurchaseDate = actualLastDate;
 
+            // Automatically assign tier tags: >300k => VIP, >150k => Frecuente, else => Nuevo
+            const targetTag = getClientTagForSpending(actualSpent);
+            if (client.tag !== targetTag) {
+              updatePayload.tag = targetTag;
+            }
+
             const actualReceiptIds = matchingReceipts.map((r) => r.id).filter(Boolean);
             const currentIds = client.receiptIds || [];
             const idsChanged =
@@ -533,6 +540,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               !actualReceiptIds.every((id) => currentIds.includes(id));
             if (idsChanged) {
               updatePayload.receiptIds = actualReceiptIds;
+            }
+          } else {
+            const currentSpent = client.totalSpent || 0;
+            const targetTag = getClientTagForSpending(currentSpent);
+            if (client.tag === "Mayorista" || client.tag !== targetTag) {
+              updatePayload.tag = targetTag;
             }
           }
 
@@ -895,12 +908,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         existingCode = String(maxCode + 1).padStart(4, "0");
       }
 
+      const newTotal = (existingClient.totalSpent || 0) + receiptData.totalCharged;
+      const targetTag = getClientTagForSpending(newTotal);
+
       await setDoc(clientRef, cleanForFirestore({
         ...existingClient,
         clientCode: existingCode,
         purchaseCount: (existingClient.purchaseCount || 0) + 1,
-        totalSpent: (existingClient.totalSpent || 0) + receiptData.totalCharged,
+        totalSpent: newTotal,
         lastPurchaseDate: receiptData.date,
+        tag: targetTag,
         receiptIds: [...(existingClient.receiptIds || []).filter((rId) => rId !== receiptId), receiptId]
       }));
     } else {
@@ -909,6 +926,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         .filter((n) => !isNaN(n) && n > 0);
       const maxCode = existingCodes.length > 0 ? Math.max(...existingCodes) : 0;
       const newCode = String(maxCode + 1).padStart(4, "0");
+
+      const targetTag = getClientTagForSpending(receiptData.totalCharged);
 
       const newClient: Client = {
         id: clientId,
@@ -920,7 +939,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         lastPurchaseDate: receiptData.date,
         receiptIds: [receiptId],
         createdAt: receiptData.date,
-        tag: "Nuevo",
+        tag: targetTag,
       };
       await setDoc(clientRef, cleanForFirestore(newClient));
     }

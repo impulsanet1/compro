@@ -60,7 +60,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
   const [editClientName, setEditClientName] = useState("");
   const [editClientPhone, setEditClientPhone] = useState("");
   const [editClientCode, setEditClientCode] = useState("");
-  const [editClientTag, setEditClientTag] = useState<"Nuevo" | "VIP" | "Frecuente" | "Mayorista" | undefined>(undefined);
+  const [editClientTag, setEditClientTag] = useState<"Nuevo" | "VIP" | "Frecuente" | undefined>(undefined);
   const [isUpdatingClient, setIsUpdatingClient] = useState(false);
   const [isResolvingDuplicates, setIsResolvingDuplicates] = useState(false);
 
@@ -140,6 +140,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
         daysSinceLastPurchase,
         isEligibleByDays,
         isRecentPurchase,
+        isPromoEligible,
         actualFirstPurchaseDate: firstDate,
         actualProfitGenerated: profitGenerated,
         actualAveragePurchase: averagePurchase,
@@ -151,9 +152,8 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
         receiptsInProcess,
         hasActiveWarranty,
         totalWarrantiesCount,
-        isPromoEligible,
-        isNewClient: c.tag === "Nuevo" || (actualReceipts.length <= 1 && !c.tag),
-        effectiveTag: c.tag || (actualReceipts.length <= 1 && !c.tag ? "Nuevo" : undefined)
+        isNewClient: totalSpent > 150000 ? false : (c.tag === "Nuevo" || actualReceipts.length <= 1),
+        effectiveTag: totalSpent > 300000 ? "VIP" : totalSpent > 150000 ? "Frecuente" : (c.tag && c.tag !== "Mayorista" ? c.tag : "Nuevo")
       };
     });
   }, [clients, clientToReceipts, supplierWarranties]);
@@ -693,15 +693,13 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
                         </span>
                         <User className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
                         <span className="truncate">{client.name}</span>
-                        {(client.tag || client.isNewClient) && (
+                        {(client.effectiveTag || client.tag || client.isNewClient) && (
                           <span className={`text-[8px] px-1.5 py-0.5 rounded-sm font-extrabold border shrink-0 ${
-                            client.tag === "VIP" ? (isDarkMode ? "bg-purple-950 text-purple-300 border-purple-800" : "bg-purple-100 text-purple-800 border-purple-200") :
-                            client.tag === "Frecuente" ? (isDarkMode ? "bg-blue-950 text-blue-300 border-blue-800" : "bg-blue-100 text-blue-800 border-blue-200") :
-                            client.tag === "Mayorista" ? (isDarkMode ? "bg-emerald-950 text-emerald-300 border-emerald-800" : "bg-emerald-100 text-emerald-800 border-emerald-200") :
-                            (client.tag === "Nuevo" || client.isNewClient) ? (isDarkMode ? "bg-emerald-950/80 text-emerald-300 border-emerald-700" : "bg-emerald-100 text-emerald-800 border-emerald-300") :
-                            (isDarkMode ? "bg-slate-800 text-slate-300 border-slate-700" : "bg-gray-100 text-gray-700 border-gray-200")
+                            (client.effectiveTag || client.tag) === "VIP" ? (isDarkMode ? "bg-purple-950 text-purple-300 border-purple-800" : "bg-purple-100 text-purple-800 border-purple-200") :
+                            (client.effectiveTag || client.tag) === "Frecuente" ? (isDarkMode ? "bg-blue-950 text-blue-300 border-blue-800" : "bg-blue-100 text-blue-800 border-blue-200") :
+                            (isDarkMode ? "bg-emerald-950/80 text-emerald-300 border-emerald-700" : "bg-emerald-100 text-emerald-800 border-emerald-300")
                           }`}>
-                            {(client.tag === "Nuevo" || (!client.tag && client.isNewClient)) ? "🌱 Nuevo" : client.tag}
+                            {(client.effectiveTag || client.tag) === "VIP" ? "💎 VIP" : (client.effectiveTag || client.tag) === "Frecuente" ? "⭐ Frecuente" : "🌱 Nuevo"}
                           </span>
                         )}
                       </div>
@@ -937,15 +935,13 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
                       <h3 className={`text-lg font-bold ${isDarkMode ? "text-white" : "text-gray-950"}`}>{selectedClient.name}</h3>
-                      {(selectedClient.tag || selectedClient.isNewClient) && (
+                      {(selectedClient.effectiveTag || selectedClient.tag || selectedClient.isNewClient) && (
                         <span className={`text-[10px] font-extrabold px-2 py-0.5 rounded-md border ${
-                          selectedClient.tag === "VIP" ? (isDarkMode ? "bg-purple-950 text-purple-300 border-purple-800" : "bg-purple-100 text-purple-800 border-purple-200") :
-                          selectedClient.tag === "Frecuente" ? (isDarkMode ? "bg-blue-950 text-blue-300 border-blue-800" : "bg-blue-100 text-blue-800 border-blue-200") :
-                          selectedClient.tag === "Mayorista" ? (isDarkMode ? "bg-emerald-950 text-emerald-300 border-emerald-800" : "bg-emerald-100 text-emerald-800 border-emerald-200") :
-                          (selectedClient.tag === "Nuevo" || selectedClient.isNewClient) ? (isDarkMode ? "bg-emerald-950/80 text-emerald-300 border-emerald-700" : "bg-emerald-100 text-emerald-800 border-emerald-300") :
-                          (isDarkMode ? "bg-slate-800 text-slate-300 border-slate-700" : "bg-gray-100 text-gray-700 border-gray-200")
+                          (selectedClient.effectiveTag || selectedClient.tag) === "VIP" ? (isDarkMode ? "bg-purple-950 text-purple-300 border-purple-800" : "bg-purple-100 text-purple-800 border-purple-200") :
+                          (selectedClient.effectiveTag || selectedClient.tag) === "Frecuente" ? (isDarkMode ? "bg-blue-950 text-blue-300 border-blue-800" : "bg-blue-100 text-blue-800 border-blue-200") :
+                          (isDarkMode ? "bg-emerald-950/80 text-emerald-300 border-emerald-700" : "bg-emerald-100 text-emerald-800 border-emerald-300")
                         }`}>
-                          {(selectedClient.tag === "Nuevo" || (!selectedClient.tag && selectedClient.isNewClient)) ? "🌱 Nuevo" : selectedClient.tag}
+                          {(selectedClient.effectiveTag || selectedClient.tag) === "VIP" ? "💎 VIP (> $300k)" : (selectedClient.effectiveTag || selectedClient.tag) === "Frecuente" ? "⭐ Frecuente (> $150k)" : "🌱 Nuevo"}
                         </span>
                       )}
                     </div>
@@ -1035,11 +1031,10 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
                               : "bg-white border-gray-200 text-gray-800"
                           }`}
                         >
-                          <option value="">Sin Etiqueta</option>
-                          <option value="VIP">👑 VIP</option>
-                          <option value="Frecuente">⭐ Frecuente</option>
-                          <option value="Mayorista">💼 Mayorista</option>
-                          <option value="Nuevo">🌱 Nuevo</option>
+                          <option value="">Automática por compras</option>
+                          <option value="VIP">💎 VIP (&gt; $300.000)</option>
+                          <option value="Frecuente">⭐ Frecuente (&gt; $150.000)</option>
+                          <option value="Nuevo">🌱 Nuevo (&le; $150.000)</option>
                         </select>
                       </div>
                     </div>
@@ -1515,11 +1510,10 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
                     isDarkMode ? "bg-slate-800 border-slate-700 text-white" : "bg-white border-gray-200 text-gray-900"
                   }`}
                 >
-                  <option value="">Sin Etiqueta</option>
-                  <option value="Nuevo">🌱 Nuevo</option>
-                  <option value="Frecuente">⭐ Frecuente</option>
-                  <option value="VIP">👑 VIP</option>
-                  <option value="Mayorista">💼 Mayorista</option>
+                  <option value="">Automática por compras</option>
+                  <option value="Nuevo">🌱 Nuevo (&le; $150.000)</option>
+                  <option value="Frecuente">⭐ Frecuente (&gt; $150.000)</option>
+                  <option value="VIP">💎 VIP (&gt; $300.000)</option>
                 </select>
               </div>
 

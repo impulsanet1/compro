@@ -115,8 +115,20 @@ export interface Client {
   totalSpent: number;
   lastPurchaseDate: string;
   receiptIds: string[];
-  tag?: string; // e.g. "VIP", "Frecuente", "Mayorista", "Nuevo"
+  tag?: string; // e.g. "VIP", "Frecuente", "Nuevo"
   createdAt?: string; // Registration date
+}
+
+/**
+ * Returns automatic client tier tag based on cumulative spending:
+ * - > 300,000 COP => "VIP"
+ * - > 150,000 COP => "Frecuente"
+ * - Otherwise => "Nuevo"
+ */
+export function getClientTagForSpending(totalSpent: number = 0): "VIP" | "Frecuente" | "Nuevo" {
+  if (totalSpent > 300000) return "VIP";
+  if (totalSpent > 150000) return "Frecuente";
+  return "Nuevo";
 }
 
 export function getClientCode(client: Partial<Client>, fallbackIndex: number = 0): string {
@@ -967,15 +979,12 @@ export function getSupplierWarrantyTimeStatus(record: SupplierWarrantyRecord): {
 
 /**
  * Prefix determination for custom/differentiated services
- * (Tarjetas Digitales, Alertas Digitales, Diseño, Web, etc.)
+ * (Tarjetas Digitales, Diseño, Web, Optimización, Publicidad, etc.)
  * Completely distinct from standard SMM follower order IDs.
  */
 export function getCustomServicePrefix(category: string = "", serviceName: string = ""): string {
   const text = `${category} ${serviceName}`.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   
-  if (text.includes("alerta") || text.includes("notificacion")) {
-    return "ALRT"; // Alertas Digitales
-  }
   if (text.includes("tarjeta") || text.includes("card") || text.includes("nfc") || text.includes("perfil")) {
     return "TDIG"; // Tarjetas Digitales
   }
@@ -987,6 +996,12 @@ export function getCustomServicePrefix(category: string = "", serviceName: strin
   }
   if (text.includes("app") || text.includes("software") || text.includes("bot")) {
     return "SOFT"; // Software / App
+  }
+  if (text.includes("optimiz") || text.includes("auditoria") || text.includes("seo")) {
+    return "OPTM"; // Optimización
+  }
+  if (text.includes("publicidad") || text.includes("pauta") || text.includes("ads") || text.includes("campana") || text.includes("gestion")) {
+    return "PUBL"; // Gestión de Publicidad
   }
   if (text.includes("servicio digital") || text.includes("digital")) {
     return "SDIG"; // Servicios Digitales

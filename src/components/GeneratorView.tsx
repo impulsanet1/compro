@@ -47,6 +47,8 @@ import {
   getCustomServicePrefix,
   normalizeContact,
   matchPhones,
+  matchContacts,
+  getPhoneDigits,
   isTarjetaDigitalService
 } from "../types";
 import { motion } from "motion/react";
@@ -96,25 +98,39 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
       });
 
     // Deduplicate: If multiple records represent the same contact or same clientCode, keep the authoritative one
-    const seenContacts = new Set<string>();
-    const seenCodes = new Set<string>();
     const uniqueList: (Client & { code: string })[] = [];
 
     for (const c of matched) {
-      const norm = normalizeContact(c.phone);
-      const contactKey = norm.type !== "none" ? `${norm.type}:${norm.key}` : "";
-      const codeKey = (c.code || "").trim();
+      const isDuplicate = uniqueList.some((existing) => {
+        // 1. Same client code or consecutive
+        if (c.code && existing.code && c.code !== "0000" && c.code === existing.code) return true;
+        if (c.clientCode && existing.clientCode && c.clientCode.trim() === existing.clientCode.trim()) return true;
 
-      if (contactKey && seenContacts.has(contactKey)) {
-        continue;
-      }
-      if (codeKey && codeKey !== "0000" && seenCodes.has(codeKey)) {
-        continue;
-      }
+        // 2. Same contact (handle or phone)
+        if (matchContacts(c.phone, existing.phone)) return true;
 
-      if (contactKey) seenContacts.add(contactKey);
-      if (codeKey && codeKey !== "0000") seenCodes.add(codeKey);
-      uniqueList.push(c);
+        // 3. Same phone digits
+        const cDigits = getPhoneDigits(c.phone);
+        const exDigits = getPhoneDigits(existing.phone);
+        if (cDigits.length >= 7 && exDigits.length >= 7 && (cDigits === exDigits || matchPhones(c.phone, existing.phone))) {
+          return true;
+        }
+
+        // 4. Same exact client name and phone
+        const cName = (c.name || "").trim().toLowerCase();
+        const exName = (existing.name || "").trim().toLowerCase();
+        if (cName && exName && cName === exName) {
+          if (!cDigits || !exDigits || cDigits === exDigits || matchPhones(c.phone, existing.phone)) {
+            return true;
+          }
+        }
+
+        return false;
+      });
+
+      if (!isDuplicate) {
+        uniqueList.push(c);
+      }
       if (uniqueList.length >= 6) break;
     }
 
@@ -129,7 +145,7 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
     setClientSearchQuery("");
   };
 
-  // Entry mode: "catalog" (redes sociales predeterminadas) vs "combo" (paquetes combinados automatizados) vs "custom" (tarjetas digitales, alertas digitales, diseño, etc.)
+  // Entry mode: "catalog" (redes sociales predeterminadas) vs "combo" (paquetes combinados automatizados) vs "custom" (tarjetas digitales, diseño, etc.)
   const [serviceEntryMode, setServiceEntryMode] = useState<"catalog" | "combo" | "custom">("catalog");
 
   // Combo Selection State
@@ -140,7 +156,6 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
   const [customItemName, setCustomItemName] = useState("");
   const [customItemQty, setCustomItemQty] = useState("1");
   const [customItemChargedPrice, setCustomItemChargedPrice] = useState("");
-  const [customItemProviderCost, setCustomItemProviderCost] = useState("0");
   const [autoServiceCode, setAutoServiceCode] = useState<string>(() => generateCustomServiceCode("Tarjetas Digitales", ""));
   const [useAutoServiceCode, setUseAutoServiceCode] = useState<boolean>(true);
 
@@ -391,14 +406,14 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
         return;
       }
 
-      const provCostNum = parseFloat(customItemProviderCost);
-      const providerCostToSave = !isNaN(provCostNum) && provCostNum >= 0 ? provCostNum : 0;
+      // Los servicios personalizados no llevan costo de inversión (0 costo, 100% ganancia)
+      const providerCostToSave = 0;
 
       let finalOrderIds: string[] = [];
       const autoCode = autoServiceCode || generateCustomServiceCode(customItemCategory, customItemName);
 
       if (useAutoServiceCode) {
-        // Automatic mode: uses the dedicated differentiated code (e.g. TDIG-48291, ALRT-29184)
+        // Automatic mode: uses the dedicated differentiated code
         finalOrderIds = [autoCode];
       } else {
         // Manual mode: if user provided something, use it; otherwise fallback to autoCode
@@ -434,7 +449,6 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
       setAddedItems((prev) => [...prev, newItem]);
       setCustomItemName("");
       setCustomItemChargedPrice("");
-      setCustomItemProviderCost("0");
       setCustomItemQty("1");
       setCustomOrderId("");
       setCustomOrderId2("");
@@ -1331,7 +1345,7 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
                     </label>
                   </div>
                   <div className="flex flex-wrap gap-1.5 mb-2">
-                    {["Tarjetas Digitales", "Alertas Digitales", "Diseño Gráfico", "Servicios Digitales", "Páginas Web", "Otro"].map((cat) => (
+                    {["Tarjetas Digitales", "Diseño Gráfico", "Optimización", "Publicidad", "Servicios Digitales", "Páginas Web", "Otro"].map((cat) => (
                       <button
                         key={cat}
                         type="button"
@@ -1366,7 +1380,7 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
                         setAutoServiceCode(generateCustomServiceCode(newCat, customItemName));
                       }
                     }}
-                    placeholder="Ej. Tarjetas Digitales o Alertas Digitales"
+                    placeholder="Ej. Tarjetas Digitales, Diseño Gráfico o Páginas Web"
                     className={`block w-full px-3.5 py-2 border rounded-lg text-sm transition focus:outline-hidden focus:ring-2 focus:ring-indigo-500/20 ${
                       isDarkMode
                         ? "bg-slate-800 border-slate-700 text-white placeholder-slate-500 focus:border-indigo-400"
@@ -1447,44 +1461,26 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
                   </div>
                 </div>
 
-                {/* Provider / Supplier Cost */}
-                <div>
-                  <div className="flex justify-between items-center">
-                    <label className={`block text-[11px] font-semibold uppercase ${
-                      isDarkMode ? "text-slate-400" : "text-gray-600"
-                    }`}>
-                      Costo Inversión / Proveedor (COP)
-                    </label>
-                    <span className={`text-[10px] ${isDarkMode ? "text-slate-500" : "text-gray-400"}`}>
-                      (0 si es ganancia pura)
+                {/* 100% Ganancia Neta (Servicios personalizados sin costo de inversión) */}
+                {parseFloat(customItemChargedPrice) > 0 ? (
+                  <div className={`p-3 rounded-xl border text-xs flex justify-between items-center ${
+                    isDarkMode ? "bg-emerald-950/30 border-emerald-900/50 text-emerald-300" : "bg-emerald-50 border-emerald-200 text-emerald-800"
+                  }`}>
+                    <span className="font-semibold flex items-center gap-1.5">
+                      <span>✨ Ganancia neta (100%):</span>
+                    </span>
+                    <span className="font-bold font-mono text-emerald-500 text-sm">
+                      {formatCOP(parseFloat(customItemChargedPrice) || 0)}
+                      <span className="text-[10px] ml-1.5 font-normal text-emerald-600 dark:text-emerald-400">(Sin costo de inversión)</span>
                     </span>
                   </div>
-                  <input
-                    type="number"
-                    min="0"
-                    value={customItemProviderCost}
-                    onChange={(e) => setCustomItemProviderCost(e.target.value)}
-                    placeholder="0"
-                    className={`mt-1 block w-full px-3.5 py-2 border rounded-lg text-sm font-medium transition focus:outline-hidden focus:ring-2 focus:ring-indigo-500/20 ${
-                      isDarkMode
-                        ? "bg-slate-800 border-slate-700 text-slate-200 placeholder-slate-500 focus:border-indigo-400"
-                        : "bg-white border-gray-200 text-gray-800 placeholder-gray-400 focus:border-indigo-500"
-                    }`}
-                  />
-                  {/* Real-time Profit Preview */}
-                  {parseFloat(customItemChargedPrice) > 0 && (
-                    <div className={`mt-2 p-2.5 rounded-lg border text-xs flex justify-between items-center ${
-                      isDarkMode ? "bg-emerald-950/30 border-emerald-900/50 text-emerald-300" : "bg-emerald-50 border-emerald-200 text-emerald-800"
-                    }`}>
-                      <span>Ganancia estimada:</span>
-                      <span className="font-bold font-mono">
-                        {formatCOP((parseFloat(customItemChargedPrice) || 0) - (parseFloat(customItemProviderCost) || 0))}
-                        {" "}
-                        ({Math.round((((parseFloat(customItemChargedPrice) || 0) - (parseFloat(customItemProviderCost) || 0)) / (parseFloat(customItemChargedPrice) || 1)) * 100)}% margen)
-                      </span>
-                    </div>
-                  )}
-                </div>
+                ) : (
+                  <div className={`text-[11px] px-3 py-2 rounded-lg border ${
+                    isDarkMode ? "bg-slate-800/40 border-slate-700/60 text-slate-400" : "bg-gray-50 border-gray-200/70 text-gray-500"
+                  }`}>
+                    ℹ️ Los servicios personalizados no llevan costo de inversión (100% ganancia).
+                  </div>
+                )}
 
                 {/* Automatic Differentiated Service Code Section */}
                 <div className={`p-3.5 rounded-xl border transition-all ${

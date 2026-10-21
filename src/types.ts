@@ -1011,7 +1011,7 @@ export function getCustomServicePrefix(category: string = "", serviceName: strin
 
 /**
  * Generates an automatic, unique, differentiated code for custom services.
- * Format: PREFIX-XXXXX (e.g. TDIG-48201, ALRT-93821)
+ * Format: PREFIX-XXXXX (e.g. TDIG-48201, OPTM-93821, PUBL-52910)
  * Never overlaps or collides with SMM follower order numbers.
  */
 export function generateCustomServiceCode(category: string = "", serviceName: string = ""): string {
@@ -1028,7 +1028,8 @@ export function isCustomServiceCode(code: string = ""): boolean {
   const upper = code.trim().toUpperCase();
   return (
     upper.startsWith("TDIG-") ||
-    upper.startsWith("ALRT-") ||
+    upper.startsWith("OPTM-") ||
+    upper.startsWith("PUBL-") ||
     upper.startsWith("DSGN-") ||
     upper.startsWith("WEB-") ||
     upper.startsWith("SOFT-") ||
@@ -1039,13 +1040,14 @@ export function isCustomServiceCode(code: string = ""): boolean {
 }
 
 /**
- * Returns human-readable label for the code (e.g., Cód. Tarjeta Digital, Cód. Alerta Digital, ID Pedido)
+ * Returns human-readable label for the code (e.g., Cód. Tarjeta Digital, Cód. Optimización, ID Pedido)
  */
 export function getOrderIdTypeLabel(code: string = "", isCustomItem?: boolean): string {
   if (isCustomItem || isCustomServiceCode(code)) {
     const upper = code.trim().toUpperCase();
     if (upper.startsWith("TDIG-")) return "Cód. Tarjeta Digital";
-    if (upper.startsWith("ALRT-")) return "Cód. Alerta Digital";
+    if (upper.startsWith("OPTM-")) return "Cód. Optimización";
+    if (upper.startsWith("PUBL-")) return "Cód. Publicidad";
     if (upper.startsWith("WEB-")) return "Cód. Servicio Web";
     if (upper.startsWith("DSGN-")) return "Cód. Diseño";
     if (upper.startsWith("SDIG-")) return "Cód. Servicio Digital";

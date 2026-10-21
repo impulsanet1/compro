@@ -313,9 +313,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           };
         });
 
-        const customServices = srvsFromDb.filter(
-          (s) => !DEFAULT_SERVICES.some((def) => def.id === s.id)
-        );
+        const customServices = srvsFromDb.filter((s) => {
+          if (DEFAULT_SERVICES.some((def) => def.id === s.id)) return false;
+          const sName = (s.name || "").toLowerCase();
+          const sId = (s.id || "").toLowerCase();
+          if (sName.includes("alerta") || sId.includes("alrt")) return false;
+          return true;
+        });
 
         setServices([...mergedServices, ...customServices]);
       },
@@ -467,6 +471,116 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           }
         }
 
+        // ---------------------------------------------------------------------
+        // REPAIR 1: Fix Client 0097 -> Reassign to 0130, subsequent to 0131+, eliminate 0097
+        // ---------------------------------------------------------------------
+        const client0097 = clients.find((c) => (c.clientCode || "").trim().padStart(4, "0") === "0097");
+        if (client0097) {
+          console.log("Auto-repair: Reassigning client 0097 to 0130 and reordering subsequent clients...");
+          const date0097 = client0097.createdAt 
+            ? new Date(client0097.createdAt).getTime() 
+            : (client0097.lastPurchaseDate ? new Date(client0097.lastPurchaseDate).getTime() : 0);
+
+          const subsequentClients = clients
+            .filter((c) => {
+              if (c.id === client0097.id) return false;
+              const cNum = parseInt(c.clientCode || "0", 10);
+              const cDate = c.createdAt ? new Date(c.createdAt).getTime() : (c.lastPurchaseDate ? new Date(c.lastPurchaseDate).getTime() : 0);
+              return cNum >= 130 || (date0097 > 0 && cDate >= date0097);
+            })
+            .sort((a, b) => {
+              const dA = a.createdAt ? new Date(a.createdAt).getTime() : (a.lastPurchaseDate ? new Date(a.lastPurchaseDate).getTime() : 0);
+              const dB = b.createdAt ? new Date(b.createdAt).getTime() : (b.lastPurchaseDate ? new Date(b.lastPurchaseDate).getTime() : 0);
+              return dA - dB;
+            });
+
+          // Reassign client 0097 to 0130
+          await setDoc(doc(db, "clients", client0097.id), { clientCode: "0130" }, { merge: true });
+
+          // Subsequent clients get 0131, 0132...
+          let nextSub = 131;
+          for (const sub of subsequentClients) {
+            const newCode = String(nextSub).padStart(4, "0");
+            if (sub.clientCode !== newCode) {
+              await setDoc(doc(db, "clients", sub.id), { clientCode: newCode }, { merge: true });
+            }
+            nextSub++;
+          }
+          return;
+        }
+
+        // ---------------------------------------------------------------------
+        // REPAIR 2: Fix Client 0120's receipts -> Set service to Optimización de Instagram
+        // ---------------------------------------------------------------------
+        const client0120 = clients.find((c) => (c.clientCode || "").trim().padStart(4, "0") === "0120");
+        if (client0120) {
+          const recs0120 = receipts.filter(
+            (r) =>
+              (client0120.receiptIds || []).includes(r.id) ||
+              isReceiptForClient(r, client0120) ||
+              (r.clientPhone && matchPhones(r.clientPhone, client0120.phone))
+          );
+
+          for (const rec of recs0120) {
+            let receiptNeedsFix = false;
+            const fixedServices = (rec.services || []).map((s) => {
+              const isAlreadyOpt = s.serviceId === "ig-optimizacion" && s.serviceName === "Optimización de Instagram";
+              if (!isAlreadyOpt) {
+                receiptNeedsFix = true;
+                return {
+                  ...s,
+                  socialNetworkId: "instagram",
+                  socialNetworkName: "Instagram",
+                  serviceId: "ig-optimizacion",
+                  serviceName: "Optimización de Instagram",
+                  providerCostAtPurchase: 0,
+                  providerCostCOP: 0,
+                  providerCostUSD: null,
+                  quantity: s.quantity || 1,
+                  suggestedPrice: s.chargedPrice || s.suggestedPrice || 65000,
+                  chargedPrice: s.chargedPrice || 65000,
+                };
+              }
+              if (s.providerCostAtPurchase !== 0 || s.providerCostCOP !== 0) {
+                receiptNeedsFix = true;
+                return {
+                  ...s,
+                  providerCostAtPurchase: 0,
+                  providerCostCOP: 0,
+                  providerCostUSD: null,
+                };
+              }
+              return s;
+            });
+
+            if (receiptNeedsFix || rec.totalProviderCost !== 0) {
+              console.log(`Auto-repair: Updating receipt ${rec.id} for client 0120 to Optimización de Instagram...`);
+              await setDoc(
+                doc(db, "receipts", rec.id),
+                {
+                  services: fixedServices,
+                  totalProviderCost: 0,
+                  totalProfit: rec.totalCharged || 0,
+                },
+                { merge: true }
+              );
+            }
+          }
+        }
+
+        // ---------------------------------------------------------------------
+        // REPAIR 3: Remove deprecated Alertas Digitales from Firestore if exists
+        // ---------------------------------------------------------------------
+        const deprecatedServices = services.filter((s) => {
+          const sName = (s.name || "").toLowerCase();
+          const sId = (s.id || "").toLowerCase();
+          return sName.includes("alerta") || sId.includes("alrt") || sId.includes("alerta");
+        });
+        for (const dep of deprecatedServices) {
+          console.log("Auto-repair: Removing deprecated Alertas Digitales service:", dep.id);
+          await deleteDoc(doc(db, "services", dep.id));
+        }
+
         // Sort clients deterministically: older clients or clients with earlier dates keep their assigned code
         const sortedClients = [...clients].sort((a, b) => {
           const dateA = a.createdAt ? new Date(a.createdAt).getTime() : (a.lastPurchaseDate ? new Date(a.lastPurchaseDate).getTime() : 0);
@@ -483,11 +597,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         sortedClients.forEach((c) => {
           if (c.clientCode && c.clientCode.trim()) {
             const cleanCode = c.clientCode.trim().padStart(4, "0");
+            if (cleanCode === "0097") {
+              duplicateClientIds.add(c.id);
+              return;
+            }
             const existingOwner = codeOwners.get(cleanCode);
             if (!existingOwner) {
               codeOwners.set(cleanCode, c.id);
               const num = parseInt(cleanCode, 10);
-              if (!isNaN(num) && num > 0) usedCodes.add(num);
+              if (!isNaN(num) && num > 0 && num !== 97) usedCodes.add(num);
             } else {
               console.warn(`Duplicate clientCode #${cleanCode} detected between ${existingOwner} and ${c.id}`);
               duplicateClientIds.add(c.id);
@@ -495,7 +613,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           }
         });
 
-        let currentAutoId = 1;
+        // Always assign codes strictly sequential after max existing code, never filling gaps or using 97
+        const validCodesArray = Array.from(usedCodes).filter((n) => n !== 97);
+        let nextSequentialCode = validCodesArray.length > 0 ? Math.max(...validCodesArray) + 1 : 1;
+        if (nextSequentialCode === 97) nextSequentialCode = 98;
 
         // Check which clients genuinely need document updates
         const updatesQueue: Array<{ id: string; payload: Record<string, any> }> = [];
@@ -503,15 +624,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         for (const client of sortedClients) {
           const updatePayload: Record<string, any> = {};
 
-          const needsNewCode = !client.clientCode || !client.clientCode.trim() || duplicateClientIds.has(client.id);
+          const is0097 = (client.clientCode || "").trim().padStart(4, "0") === "0097";
+          const needsNewCode = !client.clientCode || !client.clientCode.trim() || duplicateClientIds.has(client.id) || is0097;
           if (needsNewCode) {
-            while (usedCodes.has(currentAutoId)) {
-              currentAutoId++;
+            while (usedCodes.has(nextSequentialCode) || nextSequentialCode === 97) {
+              nextSequentialCode++;
             }
-            const assignedCode = String(currentAutoId).padStart(4, "0");
-            usedCodes.add(currentAutoId);
+            const assignedCode = String(nextSequentialCode).padStart(4, "0");
+            usedCodes.add(nextSequentialCode);
             codeOwners.set(assignedCode, client.id);
             updatePayload.clientCode = assignedCode;
+            nextSequentialCode++;
+            if (nextSequentialCode === 97) nextSequentialCode = 98;
           }
 
           const matchingReceipts = clientToReceipts.get(client.id) || [];
@@ -644,11 +768,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 continue;
               }
 
-              while (usedCodes.has(currentAutoId)) {
-                currentAutoId++;
+              while (usedCodes.has(nextSequentialCode) || nextSequentialCode === 97) {
+                nextSequentialCode++;
               }
-              const assignedCode = String(currentAutoId).padStart(4, "0");
-              usedCodes.add(currentAutoId);
+              const assignedCode = String(nextSequentialCode).padStart(4, "0");
+              usedCodes.add(nextSequentialCode);
+              nextSequentialCode++;
+              if (nextSequentialCode === 97) nextSequentialCode = 98;
 
               const sortedRecs = [...recList].sort(
                 (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()
@@ -903,9 +1029,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (!existingCode) {
         const existingCodes = clients
           .map((c) => parseInt(c.clientCode || "0", 10))
-          .filter((n) => !isNaN(n) && n > 0);
+          .filter((n) => !isNaN(n) && n > 0 && n !== 97);
         const maxCode = existingCodes.length > 0 ? Math.max(...existingCodes) : 0;
-        existingCode = String(maxCode + 1).padStart(4, "0");
+        let nextCode = maxCode + 1;
+        if (nextCode === 97) nextCode = 98;
+        existingCode = String(nextCode).padStart(4, "0");
       }
 
       const newTotal = (existingClient.totalSpent || 0) + receiptData.totalCharged;
@@ -923,9 +1051,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     } else {
       const existingCodes = clients
         .map((c) => parseInt(c.clientCode || "0", 10))
-        .filter((n) => !isNaN(n) && n > 0);
+        .filter((n) => !isNaN(n) && n > 0 && n !== 97);
       const maxCode = existingCodes.length > 0 ? Math.max(...existingCodes) : 0;
-      const newCode = String(maxCode + 1).padStart(4, "0");
+      let nextCode = maxCode + 1;
+      if (nextCode === 97) nextCode = 98;
+      const newCode = String(nextCode).padStart(4, "0");
 
       const targetTag = getClientTagForSpending(receiptData.totalCharged);
 
@@ -968,9 +1098,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const existingCodes = clients
       .map((c) => parseInt(c.clientCode || "0", 10))
-      .filter((n) => !isNaN(n) && n > 0);
+      .filter((n) => !isNaN(n) && n > 0 && n !== 97);
     const maxCode = existingCodes.length > 0 ? Math.max(...existingCodes) : 0;
-    const newCode = String(maxCode + 1).padStart(4, "0");
+    let nextCode = maxCode + 1;
+    if (nextCode === 97) nextCode = 98;
+    const newCode = String(nextCode).padStart(4, "0");
 
     const newClientDoc: Client = {
       id: newClientId,
@@ -1071,6 +1203,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     let finalCode = "";
     if (customCode && customCode.trim()) {
       const normalized = customCode.trim().replace(/\D/g, "").padStart(4, "0");
+      if (normalized === "0097") {
+        throw new Error("El código #0097 está reservado y deshabilitado.");
+      }
       if (normalized.length !== 4) {
         throw new Error("El código de cliente debe contener 4 dígitos numéricos (ej. 0083)");
       }
@@ -1082,16 +1217,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
       finalCode = normalized;
     } else {
-      const usedCodes = new Set<number>(
-        clients
-          .filter((c) => c.id !== clientId && c.clientCode)
-          .map((c) => parseInt(c.clientCode!, 10))
-          .filter((n) => !isNaN(n) && n > 0)
-      );
-      let nextId = 1;
-      while (usedCodes.has(nextId)) {
-        nextId++;
-      }
+      const existingCodes = clients
+        .filter((c) => c.id !== clientId && c.clientCode && c.clientCode.trim().padStart(4, "0") !== "0097")
+        .map((c) => parseInt(c.clientCode!, 10))
+        .filter((n) => !isNaN(n) && n > 0 && n !== 97);
+      const maxCode = existingCodes.length > 0 ? Math.max(...existingCodes) : 0;
+      let nextId = maxCode + 1;
+      if (nextId === 97) nextId = 98;
       finalCode = String(nextId).padStart(4, "0");
     }
 
@@ -1234,10 +1366,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const usedCodes = new Set<number>(
       clients
         .map((c) => parseInt(c.clientCode || "0", 10))
-        .filter((n) => !isNaN(n) && n > 0)
+        .filter((n) => !isNaN(n) && n > 0 && n !== 97)
     );
 
-    let nextAvailable = 1;
+    const validNums = Array.from(usedCodes).filter((n) => n !== 97);
+    let nextAvailable = validNums.length > 0 ? Math.max(...validNums) + 1 : 1;
+    if (nextAvailable === 97) nextAvailable = 98;
     let resolvedCount = mergeRes.deletedDocsCount;
 
     for (const [code, group] of codeGroups.entries()) {
@@ -1252,11 +1386,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const keeper = sorted[0];
         for (let i = 1; i < sorted.length; i++) {
           const dup = sorted[i];
-          while (usedCodes.has(nextAvailable)) {
+          while (usedCodes.has(nextAvailable) || nextAvailable === 97) {
             nextAvailable++;
           }
           const newCode = String(nextAvailable).padStart(4, "0");
           usedCodes.add(nextAvailable);
+          nextAvailable++;
+          if (nextAvailable === 97) nextAvailable = 98;
 
           await setDoc(doc(db, "clients", dup.id), { clientCode: newCode }, { merge: true });
           resolvedCount++;

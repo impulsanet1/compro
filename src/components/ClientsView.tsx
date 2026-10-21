@@ -1527,19 +1527,18 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
                   <button
                     type="button"
                     onClick={() => {
-                      const used = new Set(
-                        clients
-                          .filter((c) => c.id !== selectedClient.id && c.clientCode)
-                          .map((c) => parseInt(c.clientCode!, 10))
-                          .filter((n) => !isNaN(n) && n > 0)
-                      );
-                      let n = 1;
-                      while (used.has(n)) n++;
-                      setEditClientCode(String(n).padStart(4, "0"));
+                      const existingCodes = clients
+                        .filter((c) => c.id !== selectedClient.id && c.clientCode && c.clientCode.trim().padStart(4, "0") !== "0097")
+                        .map((c) => parseInt(c.clientCode!, 10))
+                        .filter((n) => !isNaN(n) && n > 0 && n !== 97);
+                      const maxCode = existingCodes.length > 0 ? Math.max(...existingCodes) : 0;
+                      let nextCode = maxCode + 1;
+                      if (nextCode === 97) nextCode = 98;
+                      setEditClientCode(String(nextCode).padStart(4, "0"));
                     }}
                     className="text-[10px] text-indigo-600 dark:text-indigo-400 hover:underline font-bold cursor-pointer"
                   >
-                    Asignar siguiente ID libre
+                    Asignar siguiente ID consecutivo
                   </button>
                 </div>
                 <input

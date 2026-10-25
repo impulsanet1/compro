@@ -257,6 +257,9 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
       </head>
       <body>
         <div class="top-bar">
+          <button onclick="downloadAsPngImage(event)" class="btn btn-primary" style="background-color: #0284c7;">
+            📸 Descargar Imagen PNG
+          </button>
           <a href="${waLink}" target="_blank" class="btn btn-emerald">
             📱 Enviar por WhatsApp
           </a>
@@ -321,6 +324,44 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
             "${receiptData.thankYouMessage || '¡Gracias por su preferencia!'}"
           </div>
         </div>
+
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+        <script>
+          function downloadAsPngImage(e) {
+            const btn = e.target;
+            const originalText = btn.innerHTML;
+            btn.innerHTML = '⏳ Generando imagen...';
+            btn.disabled = true;
+
+            const card = document.querySelector('.receipt-card');
+            if (!card) {
+              btn.innerHTML = originalText;
+              btn.disabled = false;
+              return;
+            }
+
+            html2canvas(card, {
+              scale: 2,
+              useCORS: true,
+              logging: false,
+              backgroundColor: '#ffffff'
+            }).then(function(canvas) {
+              const link = document.createElement('a');
+              link.download = 'Comprobante_${receiptData.consecutive || 'pago'}.png';
+              link.href = canvas.toDataURL('image/png');
+              link.click();
+              btn.innerHTML = '✅ ¡Descargado!';
+              setTimeout(() => {
+                btn.innerHTML = originalText;
+                btn.disabled = false;
+              }, 2000);
+            }).catch(function(err) {
+              console.error('Error al generar imagen:', err);
+              btn.innerHTML = originalText;
+              btn.disabled = false;
+            });
+          }
+        </script>
       </body>
       </html>
     `;

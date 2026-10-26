@@ -4,7 +4,7 @@
  */
 
 import React, { useRef, useState, useEffect, useMemo } from "react";
-import { X, ShieldCheck, Edit3, Save, Trash2, ShieldAlert, Calendar, ChevronDown, ChevronUp, MessageSquare, Send, PhoneCall, ExternalLink, Bell, Plus, DollarSign, Layers, Check, RotateCcw, AlertCircle, Clock, Sparkles, ArrowRight } from "lucide-react";
+import { X, ShieldCheck, Edit3, Save, Trash2, ShieldAlert, Calendar, ChevronDown, ChevronUp, MessageSquare, Send, PhoneCall, ExternalLink, Bell, Plus, DollarSign, Layers, Check, RotateCcw, AlertCircle, Clock, Sparkles, ArrowRight, Hash, RefreshCw } from "lucide-react";
 import { Receipt, ReceiptItem, getNormalizedStatus, getItemOrderIds, getItemOrderIdDisplay, getOrderIdTypeLabel, isCustomServiceCode, resolveReceiptWarranty } from "../types";
 import { motion, AnimatePresence } from "motion/react";
 import { useApp } from "../context/AppContext";
@@ -130,6 +130,13 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
   const [warrantyResponseHours, setWarrantyResponseHours] = useState<number>(48);
   const [isSubmittingReorder, setIsSubmittingReorder] = useState(false);
   const [lastActionWhatsAppUrl, setLastActionWhatsAppUrl] = useState<string | null>(null);
+
+  // Quick Touch-to-Edit Service ID States
+  const [quickEditServiceIndex, setQuickEditServiceIndex] = useState<number | null>(null);
+  const [quickNewOrderId, setQuickNewOrderId] = useState<string>("");
+  const [quickReactivateStatus, setQuickReactivateStatus] = useState<"en_proceso" | "completado" | "garantia_en_proceso" | "cancelado">("en_proceso");
+  const [isSavingQuickId, setIsSavingQuickId] = useState(false);
+  const [quickIdSuccess, setQuickIdSuccess] = useState<string | null>(null);
 
   // Sync state with prop changes when receipt or initial mode changes
   useEffect(() => {
@@ -581,6 +588,68 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
     }
   };
 
+  const handleOpenQuickEditService = (index: number) => {
+    const service = receipt?.services?.[index];
+    if (!service) return;
+    setQuickEditServiceIndex(index);
+    setQuickNewOrderId(getItemOrderIdDisplay(service) || "");
+    const curStatus = getNormalizedStatus(receipt.status);
+    setQuickReactivateStatus(curStatus === "cancelado" ? "en_proceso" : curStatus);
+    setError(null);
+  };
+
+  const handleSaveQuickOrderId = async () => {
+    if (quickEditServiceIndex === null) return;
+    const targetService = receipt?.services?.[quickEditServiceIndex];
+    if (!targetService) return;
+
+    const cleanId = quickNewOrderId.trim();
+    if (!cleanId) {
+      setError("Por favor ingresa un ID válido para el proveedor.");
+      return;
+    }
+
+    setIsSavingQuickId(true);
+    setError(null);
+    try {
+      const cleanIdsList = cleanId.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+      const updatedServices = (receipt.services || []).map((s, idx) => {
+        if (idx === quickEditServiceIndex) {
+          return {
+            ...s,
+            orderId: cleanId,
+            orderIds: cleanIdsList.length > 0 ? cleanIdsList : [cleanId]
+          };
+        }
+        return s;
+      });
+
+      const nowFormatted = new Date().toLocaleString("es-CO", { dateStyle: "short", timeStyle: "short" });
+      const prevId = getItemOrderIdDisplay(targetService) || "sin ID previo";
+      const noteEntry = `[${nowFormatted}] 🔄 Servicio "${targetService.serviceName}" reenviado con nuevo ID Proveedor: ${cleanId} (anterior: ${prevId})`;
+      const updatedNotes = receipt.internalNotes ? `${receipt.internalNotes}\n${noteEntry}` : noteEntry;
+
+      const patch: Partial<Receipt> = {
+        services: updatedServices,
+        internalNotes: updatedNotes,
+        status: quickReactivateStatus as any
+      };
+
+      await updateReceipt(receipt.id, patch);
+      setEditedServices(updatedServices);
+      setEditedStatus(quickReactivateStatus);
+      setEditedInternalNotes(updatedNotes);
+      setQuickIdSuccess(`¡Servicio actualizado con nuevo ID #${cleanId}! Nueva factura lista.`);
+      setQuickEditServiceIndex(null);
+      setTimeout(() => setQuickIdSuccess(null), 5000);
+    } catch (err: any) {
+      console.error("Error al actualizar ID del servicio:", err);
+      setError(err.message || "Error al actualizar el ID del proveedor.");
+    } finally {
+      setIsSavingQuickId(false);
+    }
+  };
+
   return (
     <div 
       id="receipt-modal-overlay" 
@@ -934,6 +1003,34 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                 <div className="no-print bg-emerald-50 border border-emerald-200 p-3 rounded-xl flex items-center gap-2.5 text-xs text-emerald-800 font-semibold animate-fade-in shadow-2xs">
                   <Check className="w-4 h-4 text-emerald-600 shrink-0" />
                   <span>{resendSuccess}</span>
+                </div>
+              )}
+
+              {/* Success Feedback for Quick ID update & new invoice ready */}
+              {quickIdSuccess && (
+                <div className="no-print bg-emerald-50 border border-emerald-300 p-3.5 rounded-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs text-emerald-900 font-semibold animate-fade-in shadow-2xs">
+                  <div className="flex items-center gap-2">
+                    <Check className="w-4 h-4 text-emerald-600 shrink-0" />
+                    <span>{quickIdSuccess}</span>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => openReceiptInNewTab(receipt, businessName, totals)}
+                      className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-bold text-[11px] transition cursor-pointer flex items-center gap-1 shadow-2xs"
+                    >
+                      <ExternalLink className="w-3 h-3" />
+                      <span>Ver / Descargar Nueva Factura</span>
+                    </button>
+                    <a
+                      href={getWhatsAppLink("confirm")}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="px-2.5 py-1 bg-white hover:bg-emerald-50 text-emerald-700 border border-emerald-300 rounded-lg font-bold text-[11px] transition cursor-pointer flex items-center gap-1"
+                    >
+                      <span>📱 WhatsApp</span>
+                    </a>
+                  </div>
                 </div>
               )}
 
@@ -1423,23 +1520,50 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                         })
                       ) : (
                         (receipt?.services || []).map((item, index) => (
-                          <tr key={item?.id || index} className="hover:bg-gray-50/30 transition">
-                            <td className="py-3.5 px-4">
-                              <div className="font-medium text-gray-900">
-                                {item?.socialNetworkName && item.socialNetworkName.toLowerCase() !== (item?.serviceName || '').toLowerCase()
-                                  ? `${item.socialNetworkName} - ${item.serviceName}`
-                                  : (item?.serviceName || item?.socialNetworkName || 'Servicio')}
+                          <tr 
+                            key={item?.id || index} 
+                            onClick={() => handleOpenQuickEditService(index)}
+                            className="hover:bg-indigo-50/40 transition cursor-pointer group"
+                            title="Tocar este servicio para cambiar su ID de proveedor y actualizar la factura"
+                          >
+                            <td className="py-3 px-3 sm:py-3.5 sm:px-4">
+                              <div className="font-semibold text-gray-900 flex items-center justify-between">
+                                <span>
+                                  {item?.socialNetworkName && item.socialNetworkName.toLowerCase() !== (item?.serviceName || '').toLowerCase()
+                                    ? `${item.socialNetworkName} - ${item.serviceName}`
+                                    : (item?.serviceName || item?.socialNetworkName || 'Servicio')}
+                                </span>
+                                <span className="opacity-0 group-hover:opacity-100 text-[10px] font-bold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-md transition border border-indigo-200">
+                                  ✏️ Tocar para cambiar ID
+                                </span>
                               </div>
-                              {getItemOrderIds(item).length > 0 && (
-                                <div className="text-[10px] font-mono text-gray-400 mt-0.5">
-                                  {getOrderIdTypeLabel(getItemOrderIdDisplay(item), item?.socialNetworkId === "custom")}: {getItemOrderIdDisplay(item)}
-                                </div>
-                              )}
+                              <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                                <span className={`inline-flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded-md border font-medium transition ${
+                                  getItemOrderIds(item).length > 0
+                                    ? "bg-slate-50 text-slate-700 border-slate-200 group-hover:bg-indigo-50 group-hover:border-indigo-300 group-hover:text-indigo-800"
+                                    : "bg-amber-50 text-amber-800 border-amber-200"
+                                }`}>
+                                  <Hash className="w-3 h-3 text-indigo-500" />
+                                  <span>
+                                    {getItemOrderIds(item).length > 0
+                                      ? `${getOrderIdTypeLabel(getItemOrderIdDisplay(item), item?.socialNetworkId === "custom")}: ${getItemOrderIdDisplay(item)}`
+                                      : "Sin ID de proveedor"}
+                                  </span>
+                                  <span className="text-[10px] text-indigo-600 underline ml-1 font-sans font-bold">
+                                    (cambiar)
+                                  </span>
+                                </span>
+                                {getNormalizedStatus(receipt.status) === "cancelado" && (
+                                  <span className="inline-flex items-center gap-0.5 text-[10px] font-bold text-rose-700 bg-rose-50 border border-rose-200 px-1.5 py-0.5 rounded-md">
+                                    🔴 Cancelado - Reenviar
+                                  </span>
+                                )}
+                              </div>
                             </td>
-                            <td className="py-3.5 px-4 text-center font-mono text-gray-600">
+                            <td className="py-3 px-2 sm:py-3.5 sm:px-4 text-center font-mono text-gray-600">
                               {Number(item?.quantity || 0).toLocaleString()}
                             </td>
-                            <td className="py-3.5 px-4 text-right font-mono font-medium text-gray-900">
+                            <td className="py-3 px-3 sm:py-3.5 sm:px-4 text-right font-mono font-medium text-gray-900">
                               {formatCOP(item?.chargedPrice)}
                             </td>
                           </tr>
@@ -1616,6 +1740,137 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
             </div>
           </div>
         </motion.div>
+
+        {/* Modal Rápido: Tocar Servicio para Cambiar ID y Reenviar Factura */}
+        {quickEditServiceIndex !== null && receipt?.services?.[quickEditServiceIndex] && (
+          <div 
+            className="fixed inset-0 bg-black/60 backdrop-blur-xs z-60 flex items-center justify-center p-3 sm:p-4 animate-fade-in"
+            onClick={() => setQuickEditServiceIndex(null)}
+          >
+            <div 
+              className="bg-white rounded-2xl shadow-2xl border border-gray-200 max-w-md w-full p-5 sm:p-6 space-y-4 relative"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-start justify-between pb-3 border-b border-gray-100">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-9 h-9 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center font-bold text-base shadow-2xs">
+                    🔄
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-gray-900">Cambiar ID y Reenviar Pedido</h3>
+                    <p className="text-[11px] text-gray-500">Actualiza el ID de este servicio específico</p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setQuickEditServiceIndex(null)}
+                  className="text-gray-400 hover:text-gray-600 p-1.5 rounded-lg hover:bg-gray-100 transition cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Servicio Info */}
+              <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs space-y-1.5">
+                <div className="font-bold text-slate-800 text-sm">
+                  {receipt.services[quickEditServiceIndex].socialNetworkName} - {receipt.services[quickEditServiceIndex].serviceName}
+                </div>
+                <div className="flex items-center justify-between text-slate-600 text-[11px]">
+                  <span>Cantidad: <strong className="text-slate-800 font-mono">{Number(receipt.services[quickEditServiceIndex].quantity || 0).toLocaleString()}</strong></span>
+                  <span>ID Actual: <strong className="text-slate-800 font-mono">{getItemOrderIdDisplay(receipt.services[quickEditServiceIndex]) || "Sin ID"}</strong></span>
+                </div>
+              </div>
+
+              {/* Nuevo ID Input */}
+              <div className="space-y-1.5">
+                <label className="block text-xs font-bold text-gray-700">
+                  Nuevo ID de Orden del Proveedor *
+                </label>
+                <div className="relative">
+                  <Hash className="w-4 h-4 text-indigo-500 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    autoFocus
+                    required
+                    value={quickNewOrderId}
+                    onChange={(e) => setQuickNewOrderId(e.target.value)}
+                    placeholder="Ej: 1548293"
+                    className="w-full pl-9 pr-3 py-2.5 border-2 border-indigo-200 rounded-xl text-sm font-mono font-bold text-gray-900 placeholder-gray-400 focus:outline-hidden focus:border-indigo-500 transition shadow-2xs"
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        handleSaveQuickOrderId();
+                      }
+                    }}
+                  />
+                </div>
+                <p className="text-[10px] text-gray-500">
+                  Ingresa el número de orden generado por el nuevo proveedor al reordenar.
+                </p>
+              </div>
+
+              {/* Estado del pedido */}
+              <div className="space-y-1.5">
+                <label className="block text-xs font-bold text-gray-700">
+                  Estado del Pedido en la Factura
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setQuickReactivateStatus("en_proceso")}
+                    className={`py-2 px-3 rounded-xl border text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer ${
+                      quickReactivateStatus === "en_proceso"
+                        ? "bg-amber-500 text-white border-amber-600 shadow-2xs"
+                        : "bg-gray-50 text-gray-700 border-gray-200 hover:bg-gray-100"
+                    }`}
+                  >
+                    <span>⏳ En proceso</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setQuickReactivateStatus("completado")}
+                    className={`py-2 px-3 rounded-xl border text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer ${
+                      quickReactivateStatus === "completado"
+                        ? "bg-emerald-600 text-white border-emerald-700 shadow-2xs"
+                        : "bg-gray-50 text-gray-700 border-gray-200 hover:bg-gray-100"
+                    }`}
+                  >
+                    <span>✅ Completado</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Acciones */}
+              <div className="flex items-center gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setQuickEditServiceIndex(null)}
+                  className="flex-1 py-2.5 px-3 border border-gray-200 rounded-xl text-xs font-bold text-gray-600 hover:bg-gray-50 transition cursor-pointer"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="button"
+                  disabled={isSavingQuickId || !quickNewOrderId.trim()}
+                  onClick={handleSaveQuickOrderId}
+                  className="flex-1 py-2.5 px-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition cursor-pointer shadow-md disabled:opacity-50 flex items-center justify-center gap-1.5"
+                >
+                  {isSavingQuickId ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      <span>Guardando...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Save className="w-3.5 h-3.5" />
+                      <span>Guardar y Entregar Factura</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
   );
 };

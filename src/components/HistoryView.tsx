@@ -21,7 +21,8 @@ import {
   ChevronRight,
   RotateCcw,
   ShieldAlert,
-  ShieldCheck
+  ShieldCheck,
+  RefreshCw
 } from "lucide-react";
 import { Receipt, getNormalizedStatus, getItemOrderIds, buildReceiptsClientIndex, isCustomServiceCode, resolveReceiptWarranty, getClientCode } from "../types";
 
@@ -30,7 +31,7 @@ interface HistoryViewProps {
 }
 
 export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => {
-  const { receipts, deleteReceipt, updateReceipt, markAllInProcessAsCompleted, clients, isDarkMode, businessConfig } = useApp();
+  const { receipts, deleteReceipt, updateReceipt, markAllInProcessAsCompleted, syncAllInProcessOrdersWithProvider, clients, isDarkMode, businessConfig } = useApp();
   const formatCOP = (val: number) => "$" + Math.round(val).toLocaleString("es-CO");
 
   const [searchText, setSearchText] = useState("");
@@ -44,6 +45,13 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => 
   const [bulkSuccessMessage, setBulkSuccessMessage] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
+  const [isSyncingHistory, setIsSyncingHistory] = useState(false);
+  const [syncHistoryFeedback, setSyncHistoryFeedback] = useState<{
+    checkedCount: number;
+    updatedCount: number;
+    details: string[];
+  } | null>(null);
+  const [hasAutoSyncedOnMount, setHasAutoSyncedOnMount] = useState(false);
 
   // Status counts for quick filter buttons
   const statusCounts = useMemo(() => {
@@ -298,6 +306,60 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => 
     }
   };
 
+  const handleSyncHistoryWithProvider = async () => {
+    setIsSyncingHistory(true);
+    setBulkSuccessMessage(null);
+    setSyncHistoryFeedback(null);
+    try {
+      const res = await syncAllInProcessOrdersWithProvider();
+      setSyncHistoryFeedback(res);
+      if (res.updatedCount > 0) {
+        setBulkSuccessMessage(
+          `¡Sincronización completada! ${res.updatedCount} pedido(s) en proceso fueron actualizados con MazSocialMarket.`
+        );
+      } else {
+        setBulkSuccessMessage(
+          `Se consultaron ${res.checkedCount} IDs en MazSocialMarket. Todos se encuentran al día.`
+        );
+      }
+      setTimeout(() => setBulkSuccessMessage(null), 7000);
+    } catch (err: any) {
+      console.error("Error al sincronizar historial con proveedor:", err);
+      setBulkSuccessMessage(err.message || "Error al conectar con MazSocialMarket");
+      setTimeout(() => setBulkSuccessMessage(null), 7000);
+    } finally {
+      setIsSyncingHistory(false);
+    }
+  };
+
+  // Background auto-sync on mount when there are receipts with numeric provider IDs
+  useEffect(() => {
+    if (hasAutoSyncedOnMount || receipts.length === 0) return;
+    const hasAnyReceiptWithNumericIds = receipts.some((r) =>
+      (r.services || []).some((s) => getItemOrderIds(s).some((id) => /^\d{3,}$/.test(id.trim())))
+    );
+
+    if (hasAnyReceiptWithNumericIds) {
+      setHasAutoSyncedOnMount(true);
+      setIsSyncingHistory(true);
+      syncAllInProcessOrdersWithProvider()
+        .then((res) => {
+          if (res.updatedCount > 0) {
+            setBulkSuccessMessage(
+              `¡Historial sincronizado con MazSocialMarket! Se corrigieron ${res.updatedCount} comprobantes que diferían del proveedor.`
+            );
+            setTimeout(() => setBulkSuccessMessage(null), 8000);
+          }
+        })
+        .catch((err) => {
+          console.warn("Auto sync history on mount error:", err);
+        })
+        .finally(() => {
+          setIsSyncingHistory(false);
+        });
+    }
+  }, [receipts.length, hasAutoSyncedOnMount]);
+
   // Total charged, cost, and profit of filtered receipts
   const filteredMetrics = useMemo(() => {
     let totalCharged = 0;
@@ -344,6 +406,17 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => 
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={handleSyncHistoryWithProvider}
+            disabled={isSyncingHistory}
+            className="bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white font-bold px-3.5 py-2 rounded-xl text-xs flex items-center gap-1.5 shadow-sm transition cursor-pointer disabled:opacity-50"
+            title="Sincronizar automáticamente el historial de pedidos con la API de MazSocialMarket"
+          >
+            <RefreshCw className={`w-4 h-4 ${isSyncingHistory ? "animate-spin" : ""}`} />
+            <span>{isSyncingHistory ? "Sincronizando MazSocial..." : "Sincronizar con MazSocialMarket"}</span>
+          </button>
+
           {inProcessCount > 0 && (
             <button
               type="button"
@@ -447,7 +520,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => 
               }`}
             >
               <option value="">Todos los Estados</option>
-              <option value="en_proceso">🟢 En proceso</option>
+              <option value="en_proceso">🔵 En proceso</option>
               <option value="completado">✅ Completado</option>
               <option value="garantia_en_proceso">🟡 Garantía en proceso</option>
               <option value="cancelado">🔴 Cancelado</option>
@@ -558,7 +631,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => 
                 : isDarkMode ? "bg-slate-800 text-blue-400 border-blue-900/60 hover:bg-blue-950/40" : "bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100"
             }`}
           >
-            <span>🟢 En proceso ({statusCounts.enProceso})</span>
+            <span>🔵 En proceso ({statusCounts.enProceso})</span>
           </button>
           <button
             type="button"
@@ -724,27 +797,45 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => 
 
                       {/* Status select editor */}
                       <td className="py-3 px-4">
-                        <select
-                          value={getNormalizedStatus(r.status)}
-                          onChange={async (e) => {
-                            const newStatus = e.target.value;
-                            try {
-                              await updateReceipt(r.id, { status: newStatus as any });
-                            } catch (err) {
-                              console.error("Error updating status in history row:", err);
-                            }
-                          }}
-                          className={`text-[11px] font-semibold rounded-md border px-2 py-1 focus:outline-hidden cursor-pointer ${
-                            isDarkMode
-                              ? "bg-slate-800 border-slate-700 text-slate-200"
-                              : "bg-white border-gray-200 text-gray-800"
-                          }`}
-                        >
-                          <option value="en_proceso">🟢 En proceso</option>
-                          <option value="completado">✅ Completado</option>
-                          <option value="garantia_en_proceso">🟡 Garantía en proceso</option>
-                          <option value="cancelado">🔴 Cancelado</option>
-                        </select>
+                        {(() => {
+                          const norm = getNormalizedStatus(r.status);
+                          const badgeColor =
+                            norm === "completado"
+                              ? isDarkMode
+                                ? "bg-emerald-950/80 border-emerald-700 text-emerald-300"
+                                : "bg-emerald-50 border-emerald-300 text-emerald-800"
+                              : norm === "cancelado"
+                              ? isDarkMode
+                                ? "bg-rose-950/80 border-rose-800 text-rose-300"
+                                : "bg-rose-50 border-rose-300 text-rose-800"
+                              : norm === "garantia_en_proceso"
+                              ? isDarkMode
+                                ? "bg-amber-950/80 border-amber-800 text-amber-300"
+                                : "bg-amber-50 border-amber-300 text-amber-800"
+                              : isDarkMode
+                              ? "bg-blue-950/80 border-blue-800 text-blue-300"
+                              : "bg-blue-50 border-blue-300 text-blue-800";
+
+                          return (
+                            <select
+                              value={norm}
+                              onChange={async (e) => {
+                                const newStatus = e.target.value;
+                                try {
+                                  await updateReceipt(r.id, { status: newStatus as any });
+                                } catch (err) {
+                                  console.error("Error updating status in history row:", err);
+                                }
+                              }}
+                              className={`text-[11px] font-bold rounded-lg border px-2 py-1 focus:outline-hidden cursor-pointer transition ${badgeColor}`}
+                            >
+                              <option value="en_proceso" className="bg-white text-gray-900 dark:bg-slate-800 dark:text-white">🔵 En proceso</option>
+                              <option value="completado" className="bg-white text-emerald-700 dark:bg-slate-800 dark:text-emerald-300">✅ Completado</option>
+                              <option value="garantia_en_proceso" className="bg-white text-gray-900 dark:bg-slate-800 dark:text-white">🟡 Garantía en proceso</option>
+                              <option value="cancelado" className="bg-white text-gray-900 dark:bg-slate-800 dark:text-white">🔴 Cancelado</option>
+                            </select>
+                          );
+                        })()}
                       </td>
 
                       {/* Provider IDs */}

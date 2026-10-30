@@ -14,6 +14,7 @@ import { ConfigView } from "./components/ConfigView";
 import { SupplierWarrantyView } from "./components/SupplierWarrantyView";
 import { QuoteCalculatorView } from "./components/QuoteCalculatorView";
 import { ReceiptModal } from "./components/ReceiptModal";
+import { PublicTrackingView } from "./components/PublicTrackingView";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Receipt, ReceiptItem, getSupplierWarrantyTimeStatus } from "./types";
 import { LiveServerSyncBadge } from "./components/PWAInstallButton";
@@ -261,6 +262,22 @@ const MainLayout: React.FC = () => {
 
 const AppContent: React.FC = () => {
   const { user, loadingAuth, isDarkMode } = useApp();
+  const [trackingId, setTrackingId] = useState<string | null>(() => {
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      return params.get("rastreo") || params.get("tracking") || null;
+    }
+    return null;
+  });
+
+  // If in public tracking mode (via QR or link)
+  if (trackingId) {
+    return (
+      <ErrorBoundary>
+        <PublicTrackingView initialTrackingId={trackingId} />
+      </ErrorBoundary>
+    );
+  }
 
   if (loadingAuth) {
     return (

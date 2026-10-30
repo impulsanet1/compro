@@ -27,12 +27,14 @@ import {
   MessageSquare,
   CreditCard,
   Hash,
-  PackageOpen
+  PackageOpen,
+  Instagram
 } from "lucide-react";
 import {
   ReceiptItem,
   Receipt,
   Client,
+  Service,
   ServiceCombo,
   ServiceComboItem,
   getServiceBaseCosts,
@@ -49,10 +51,13 @@ import {
   matchPhones,
   matchContacts,
   getPhoneDigits,
-  isTarjetaDigitalService
+  isTarjetaDigitalService,
+  extractInstagramUsername,
+  InstagramProfileData
 } from "../types";
 import { motion } from "motion/react";
 import { safeCopyToClipboard } from "../utils";
+import { syncOrderWithProvider, fetchInstagramProfile } from "../services/providerApi";
 
 interface GeneratorViewProps {
   onReceiptGenerated: (receipt: Receipt) => void;
@@ -179,6 +184,126 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
   const [status, setStatus] = useState<"en_proceso" | "completado" | "garantia_en_proceso" | "cancelado">("completado");
   const [internalNotes, setInternalNotes] = useState("");
 
+  // Live Instagram Verification & Start Count State (Option A)
+  const [itemTargetAccount, setItemTargetAccount] = useState("");
+  const [itemStartCount, setItemStartCount] = useState<string>("");
+  const [isCheckingIg, setIsCheckingIg] = useState<boolean>(false);
+  const [igProfileFeedback, setIgProfileFeedback] = useState<InstagramProfileData | null>(null);
+
+  // Auto-sync target account from client phone or contact if it looks like an Instagram handle
+  useEffect(() => {
+    if (!itemTargetAccount && clientPhone) {
+      const u = extractInstagramUsername(clientPhone);
+      if (u) {
+        setItemTargetAccount(`@${u}`);
+      }
+    }
+  }, [clientPhone, itemTargetAccount]);
+
+  const handleVerifyInstagramInitialCount = async () => {
+    if (!itemTargetAccount.trim()) return;
+    setIsCheckingIg(true);
+    setIgProfileFeedback(null);
+    try {
+      const res = await fetchInstagramProfile(itemTargetAccount);
+      if (res.success && res.profile) {
+        setIgProfileFeedback(res.profile as any);
+        if (res.profile.followersCount !== null && res.profile.followersCount !== undefined) {
+          setItemStartCount(String(res.profile.followersCount));
+        }
+      } else {
+        setIgProfileFeedback({
+          username: extractInstagramUsername(itemTargetAccount) || itemTargetAccount,
+          followersCount: null,
+          source: 'not_found',
+          error: res.error || 'No se pudo consultar el conteo en vivo de este perfil.',
+          updatedAt: new Date().toISOString()
+        });
+      }
+    } catch (err: any) {
+      setIgProfileFeedback({
+        username: extractInstagramUsername(itemTargetAccount) || itemTargetAccount,
+        followersCount: null,
+        source: 'not_found',
+        error: err.message || 'Error de conexión.',
+        updatedAt: new Date().toISOString()
+      });
+    } finally {
+      setIsCheckingIg(false);
+    }
+  };
+
+  // Live Provider Sync Feedback State (MazSocialMarket)
+  const [providerSyncChecking, setProviderSyncChecking] = useState(false);
+  const [providerOrderFeedback, setProviderOrderFeedback] = useState<{
+    orderId: string;
+    found: boolean;
+    rawStatus: string;
+    mappedStatus: "en_proceso" | "completado" | "cancelado";
+    error?: string;
+  } | null>(null);
+
+  // Debounced auto-sync as soon as user types or pastes ID in Emitir comprobante
+  useEffect(() => {
+    const rawId = (customOrderId || customOrderId2 || "").trim();
+    const matches = rawId.match(/\d{3,}/g);
+    if (!matches || matches.length === 0) {
+      setProviderOrderFeedback(null);
+      setProviderSyncChecking(false);
+      return;
+    }
+
+    const targetId = matches[0];
+    setProviderSyncChecking(true);
+
+    const timer = setTimeout(async () => {
+      try {
+        const res = await syncOrderWithProvider(targetId);
+        if (res.success && res.results && res.results.length > 0) {
+          const item = res.results[0];
+          if (item.found) {
+            setProviderOrderFeedback({
+              orderId: item.orderId,
+              found: true,
+              rawStatus: item.rawStatus,
+              mappedStatus: item.mappedStatus,
+            });
+            // Automatically update receipt status to what the provider reports!
+            setStatus(item.mappedStatus);
+          } else {
+            setProviderOrderFeedback({
+              orderId: targetId,
+              found: false,
+              rawStatus: item.rawStatus || "No encontrado",
+              mappedStatus: "en_proceso",
+              error: item.error || "ID aún no registrado en MazSocialMarket"
+            });
+          }
+        } else {
+          setProviderOrderFeedback({
+            orderId: targetId,
+            found: false,
+            rawStatus: "Sin respuesta",
+            mappedStatus: "en_proceso",
+            error: res.error || "No encontrado en MazSocialMarket"
+          });
+        }
+      } catch (err: any) {
+        setProviderOrderFeedback({
+          orderId: targetId,
+          found: false,
+          rawStatus: "Error",
+          mappedStatus: "en_proceso",
+          error: err.message
+        });
+      } finally {
+        setProviderSyncChecking(false);
+      }
+    }, 550);
+
+    return () => clearTimeout(timer);
+  }, [customOrderId, customOrderId2]);
+
   // Receipt items array
   const [addedItems, setAddedItems] = useState<ReceiptItem[]>(() => {
     if (initialItems && initialItems.length > 0) {
@@ -256,10 +381,75 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
     }) || null;
   }, [selectedClientObj, clientName, clientPhone, clients]);
 
+  // Detect if selected network is Instagram
+  const isInstagramSelected = useMemo(() => {
+    if (!selectedSocialId) return false;
+    if (selectedSocialId.toLowerCase() === "instagram") return true;
+    const sn = socialNetworks.find((n) => n.id === selectedSocialId);
+    return (sn?.name || "").toLowerCase().includes("instagram");
+  }, [selectedSocialId, socialNetworks]);
+
   // Filtered services for selected social network
+  // For Instagram: STRICTLY ONLY "Seguidores", "Likes", "Vistas", "Comentarios" are allowed.
+  // Any custom services (tarjetas, optimización, publicidad, diseño, etc.) are strictly excluded.
   const availableServices = useMemo(() => {
-    return services.filter((s) => s.socialNetworkId === selectedSocialId);
-  }, [services, selectedSocialId]);
+    const rawServices = services.filter((s) => s.socialNetworkId === selectedSocialId);
+    if (!isInstagramSelected) {
+      return rawServices;
+    }
+
+    const filtered = rawServices.filter((s) => {
+      const name = (s.name || "").toLowerCase().trim();
+      const id = (s.id || "").toLowerCase();
+
+      // Disallow any custom or non-core services
+      if (
+        name.includes("optimiz") ||
+        name.includes("publicidad") ||
+        name.includes("tarjeta") ||
+        name.includes("diseño") ||
+        name.includes("personaliz") ||
+        name.includes("web") ||
+        name.includes("servicio") ||
+        id.includes("opt") ||
+        id.includes("pub")
+      ) {
+        return false;
+      }
+
+      const isSeguidores = name.includes("seguidor") || id.includes("follower");
+      const isLikes = name.includes("like") || name.includes("me gusta");
+      const isVistas = name.includes("vista") || name.includes("view") || name.includes("reproducci");
+      const isComentarios = name.includes("comentario") || id.includes("comment");
+
+      return isSeguidores || isLikes || isVistas || isComentarios;
+    });
+
+    // Sort in consistent standard order: Seguidores -> Likes -> Vistas -> Comentarios
+    const orderScore = (s: Service) => {
+      const name = (s.name || "").toLowerCase();
+      const id = (s.id || "").toLowerCase();
+      if (name.includes("seguidor") || id.includes("follower")) return 1;
+      if (name.includes("like") || name.includes("me gusta")) return 2;
+      if (name.includes("vista") || name.includes("view") || name.includes("reproducci")) return 3;
+      if (name.includes("comentario") || id.includes("comment")) return 4;
+      return 5;
+    };
+
+    return [...filtered].sort((a, b) => orderScore(a) - orderScore(b));
+  }, [services, selectedSocialId, isInstagramSelected]);
+
+  // Clear selectedServiceId if it becomes invalid under the filtered list
+  useEffect(() => {
+    if (selectedServiceId && availableServices.length > 0) {
+      const exists = availableServices.some((s) => s.id === selectedServiceId);
+      if (!exists) {
+        setSelectedServiceId("");
+        setSelectedQtyMode("");
+        setCustomQtyValue("");
+      }
+    }
+  }, [availableServices, selectedServiceId]);
 
   // Selected Service object
   const selectedServiceObj = useMemo(() => {
@@ -530,6 +720,8 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
       trmDate: trmState.fecha || undefined,
       orderId: primaryOrderId,
       orderIds: finalOrderIds,
+      targetAccount: itemTargetAccount.trim() || undefined,
+      startCount: itemStartCount ? Number(itemStartCount) : undefined,
     };
 
     setAddedItems((prev) => [...prev, newItem]);
@@ -755,6 +947,8 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
         thankYouMessage: "¡Gracias por confiar en ImpulsaNet para potenciar sus redes!",
         status: status,
         internalNotes: internalNotes.trim(),
+        targetAccount: (addedItems.find(i => i.targetAccount)?.targetAccount || itemTargetAccount.trim() || undefined),
+        initialFollowers: (addedItems.find(i => i.startCount !== undefined)?.startCount || (itemStartCount ? Number(itemStartCount) : undefined)),
       };
 
       const result = await createReceipt(receiptData);
@@ -1157,7 +1351,7 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
                       : "bg-white border-gray-200 text-gray-800 focus:border-indigo-500"
                   }`}
                 >
-                  <option value="en_proceso">🟢 En proceso</option>
+                  <option value="en_proceso">🔵 En proceso</option>
                   <option value="completado">✅ Completado</option>
                   <option value="garantia_en_proceso">🟡 Garantía en proceso</option>
                   <option value="cancelado">🔴 Cancelado</option>
@@ -1755,7 +1949,12 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
                 </label>
                 <select
                   value={selectedSocialId}
-                  onChange={(e) => setSelectedSocialId(e.target.value)}
+                  onChange={(e) => {
+                    setSelectedSocialId(e.target.value);
+                    setSelectedServiceId("");
+                    setSelectedQtyMode("");
+                    setCustomQtyValue("");
+                  }}
                   className={`mt-1 block w-full px-3.5 py-2 border rounded-lg text-sm transition focus:outline-hidden focus:ring-2 focus:ring-indigo-500/20 ${
                     isDarkMode
                       ? "bg-slate-800 border-slate-700 text-white focus:border-indigo-400"
@@ -2078,7 +2277,137 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
                     </div>
                   </div>
                 )}
-              </div>
+
+                {/* Live MazSocialMarket Provider Feedback Banner */}
+                {providerSyncChecking && (
+                  <div className="flex items-center gap-1.5 text-[11px] text-indigo-500 font-semibold py-1 animate-pulse">
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin text-indigo-500" />
+                    <span>Consultando estado en MazSocialMarket...</span>
+                  </div>
+                )}
+                {providerOrderFeedback && !providerSyncChecking && (
+                  <div className={`mt-1.5 p-2 rounded-lg border text-xs flex items-center justify-between gap-2 ${
+                    providerOrderFeedback.found
+                      ? providerOrderFeedback.mappedStatus === "completado"
+                        ? isDarkMode ? "bg-emerald-950/40 border-emerald-800 text-emerald-300" : "bg-emerald-50 border-emerald-200 text-emerald-800"
+                        : providerOrderFeedback.mappedStatus === "cancelado"
+                        ? isDarkMode ? "bg-rose-950/40 border-rose-800 text-rose-300" : "bg-rose-50 border-rose-200 text-rose-800"
+                        : isDarkMode ? "bg-blue-950/40 border-blue-800 text-blue-300" : "bg-blue-50 border-blue-200 text-blue-800"
+                      : isDarkMode ? "bg-slate-800/80 border-slate-700 text-slate-400" : "bg-gray-50 border-gray-200 text-gray-500"
+                  }`}>
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span className="text-xs">
+                        {providerOrderFeedback.found
+                          ? (providerOrderFeedback.mappedStatus === "completado" ? "✅" : providerOrderFeedback.mappedStatus === "cancelado" ? "🔴" : "🔵")
+                          : "ℹ️"}
+                      </span>
+                      <span className="truncate">
+                        <strong>MazSocialMarket:</strong> {providerOrderFeedback.rawStatus}
+                        {providerOrderFeedback.found && (
+                          <span className="ml-1 opacity-90 font-semibold">
+                            (Estado fijado a {providerOrderFeedback.mappedStatus === "completado" ? "Completado" : providerOrderFeedback.mappedStatus === "cancelado" ? "Cancelado" : "En proceso"})
+                          </span>
+                        )}
+                      </span>
+                    </div>
+                    {providerOrderFeedback.found && (
+                      <span className="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-black/10 shrink-0">
+                        Auto-sincronizado
+                      </span>
+                    )}
+                  </div>
+                )}
+
+                {/* Live Instagram Profile Verification & Initial Follower Check (Option A) */}
+                {(() => {
+                  const currentSn = socialNetworks.find((s) => s.id === selectedSocialId);
+                  const isIg = selectedSocialId === "instagram" || (currentSn && currentSn.name.toLowerCase().includes("instagram"));
+                  if (!isIg) return null;
+                  return (
+                    <div className={`p-3.5 rounded-xl border space-y-2.5 transition ${
+                      isDarkMode ? "bg-slate-800/90 border-slate-700" : "bg-gradient-to-br from-pink-50/50 via-purple-50/30 to-indigo-50/40 border-purple-200/80 shadow-2xs"
+                    }`}>
+                    <div className="flex items-center justify-between">
+                      <span className={`text-[11px] font-bold uppercase tracking-wider flex items-center gap-1.5 ${
+                        isDarkMode ? "text-purple-300" : "text-purple-900"
+                      }`}>
+                        <Instagram className="w-3.5 h-3.5 text-pink-500" />
+                        Cuenta de Instagram del Cliente (Conteo Exacto en Vivo)
+                      </span>
+                      {itemStartCount && (
+                        <span className="text-[10px] font-bold font-mono px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-300">
+                          Inicial: {Number(itemStartCount).toLocaleString()} seg.
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={itemTargetAccount}
+                        onChange={(e) => {
+                          setItemTargetAccount(e.target.value);
+                          setIgProfileFeedback(null);
+                        }}
+                        placeholder="Ej. @juanperez o instagram.com/juanperez"
+                        className={`flex-1 px-3 py-1.5 border rounded-lg text-xs font-medium focus:outline-hidden focus:ring-2 ${
+                          isDarkMode
+                            ? "bg-slate-900 border-slate-700 text-white placeholder-slate-500 focus:border-purple-400 focus:ring-purple-500/20"
+                            : "bg-white border-purple-200 text-gray-800 placeholder-gray-400 focus:border-purple-500 focus:ring-purple-500/20"
+                        }`}
+                      />
+                      <button
+                        type="button"
+                        disabled={isCheckingIg || !itemTargetAccount.trim()}
+                        onClick={handleVerifyInstagramInitialCount}
+                        className="px-3 py-1.5 rounded-lg text-xs font-bold text-white bg-gradient-to-r from-pink-500 to-purple-600 hover:from-pink-600 hover:to-purple-700 disabled:opacity-50 transition cursor-pointer flex items-center gap-1.5 active:scale-95 shadow-2xs shrink-0"
+                      >
+                        <RefreshCw className={`w-3 h-3 ${isCheckingIg ? "animate-spin" : ""}`} />
+                        <span>{isCheckingIg ? "Consultando..." : "Consultar Inicial"}</span>
+                      </button>
+                    </div>
+
+                    {/* Manual start count adjustment */}
+                    <div className="flex items-center gap-2 pt-0.5 text-xs">
+                      <span className={`text-[10px] uppercase font-semibold ${isDarkMode ? "text-slate-400" : "text-gray-500"}`}>
+                        Conteo Inicial:
+                      </span>
+                      <input
+                        type="number"
+                        value={itemStartCount}
+                        onChange={(e) => setItemStartCount(e.target.value)}
+                        placeholder="Ej. 1420"
+                        className={`w-24 px-2 py-1 border rounded text-xs font-mono font-bold ${
+                          isDarkMode ? "bg-slate-900 border-slate-700 text-white" : "bg-white border-gray-300 text-gray-800"
+                        }`}
+                      />
+                      <span className={`text-[10px] ${isDarkMode ? "text-slate-400" : "text-gray-500"}`}>
+                        (Permite calcular en vivo los seguidores que van llegando)
+                      </span>
+                    </div>
+
+                    {igProfileFeedback && (
+                      <div className={`text-xs p-2.5 rounded-lg border flex items-center justify-between ${
+                        igProfileFeedback.followersCount !== null
+                          ? isDarkMode
+                            ? "bg-emerald-950/40 border-emerald-800 text-emerald-300"
+                            : "bg-emerald-50 border-emerald-200 text-emerald-800"
+                          : isDarkMode
+                          ? "bg-amber-950/40 border-amber-800 text-amber-300"
+                          : "bg-amber-50 border-amber-200 text-amber-800"
+                      }`}>
+                        <div>
+                          <span className="font-bold">@{igProfileFeedback.username}:</span>{" "}
+                          {igProfileFeedback.followersCount !== null
+                            ? `${igProfileFeedback.followersCount.toLocaleString()} seguidores detectados en vivo.`
+                            : igProfileFeedback.error || "Perfil no detectado o privado."}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+            </div>
 
               <button
                 type="submit"

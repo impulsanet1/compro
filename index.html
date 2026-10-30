@@ -16,6 +16,72 @@
     <meta name="description" content="Sistema interno de administración de ventas, control financiero y generación de comprobantes para ImpulsaNet." />
     <meta property="og:title" content="ImpulsaNet" />
     <meta property="og:description" content="Sistema interno de administración de ventas, control financiero y generación de comprobantes para ImpulsaNet." />
+    <script>
+      // In AI Studio iframe, Vite HMR WebSockets are disabled.
+      // Suppress Vite HMR WebSocket connection attempts and error logs.
+      (function() {
+        var _origConsoleError = console.error;
+        console.error = function() {
+          var args = Array.prototype.slice.call(arguments);
+          var fullMsg = args.map(function(a) {
+            if (!a) return '';
+            if (typeof a === 'object' && a.stack) return a.stack;
+            if (typeof a === 'object' && a.message) return a.message;
+            return String(a);
+          }).join(' ');
+
+          if (fullMsg.indexOf('WebSocket') !== -1 || fullMsg.indexOf('[vite]') !== -1 || fullMsg.indexOf('vite-hmr') !== -1) {
+            return;
+          }
+          return _origConsoleError.apply(console, args);
+        };
+
+        if (typeof window !== 'undefined' && window.WebSocket) {
+          var _OrigWebSocket = window.WebSocket;
+          var DummyWebSocket = function(url, protocols) {
+            this.readyState = 1; // OPEN
+            this.OPEN = 1;
+            this.CONNECTING = 0;
+            this.CLOSING = 2;
+            this.CLOSED = 3;
+            this.url = url;
+            this.protocol = Array.isArray(protocols) ? protocols.join(', ') : (protocols || '');
+            this.addEventListener = function(evt, cb) {
+              if (evt === 'open' && typeof cb === 'function') {
+                setTimeout(cb, 0);
+              }
+            };
+            this.removeEventListener = function() {};
+            this.dispatchEvent = function() { return false; };
+            this.send = function() {};
+            this.close = function() {};
+            this.onopen = null;
+            this.onclose = null;
+            this.onerror = null;
+            this.onmessage = null;
+          };
+          DummyWebSocket.prototype = _OrigWebSocket.prototype;
+          DummyWebSocket.CONNECTING = 0;
+          DummyWebSocket.OPEN = 1;
+          DummyWebSocket.CLOSING = 2;
+          DummyWebSocket.CLOSED = 3;
+          window.WebSocket = DummyWebSocket;
+        }
+
+        window.addEventListener('error', function(event) {
+          if (event && event.message && (event.message.indexOf('WebSocket') !== -1 || event.message.indexOf('websocket') !== -1 || event.message.indexOf('[vite]') !== -1)) {
+            event.stopImmediatePropagation();
+            event.preventDefault();
+          }
+        }, true);
+        window.addEventListener('unhandledrejection', function(event) {
+          if (event && event.reason && String(event.reason).indexOf('WebSocket') !== -1) {
+            event.stopImmediatePropagation();
+            event.preventDefault();
+          }
+        }, true);
+      })();
+    </script>
   </head>
   <body class="notranslate" translate="no">
     <div id="root" class="notranslate" translate="no"></div>

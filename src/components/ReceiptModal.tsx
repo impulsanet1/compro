@@ -4,10 +4,12 @@
  */
 
 import React, { useRef, useState, useEffect, useMemo } from "react";
-import { X, ShieldCheck, Edit3, Save, Trash2, ShieldAlert, Calendar, ChevronDown, ChevronUp, MessageSquare, Send, PhoneCall, ExternalLink, Bell, Plus, DollarSign, Layers, Check, RotateCcw, AlertCircle, Clock, Sparkles, ArrowRight, Hash, RefreshCw } from "lucide-react";
-import { Receipt, ReceiptItem, getNormalizedStatus, getItemOrderIds, getItemOrderIdDisplay, getOrderIdTypeLabel, isCustomServiceCode, resolveReceiptWarranty } from "../types";
+import { X, ShieldCheck, Edit3, Save, Trash2, ShieldAlert, Calendar, ChevronDown, ChevronUp, MessageSquare, Send, PhoneCall, ExternalLink, Bell, Plus, DollarSign, Layers, Check, RotateCcw, AlertCircle, Clock, Sparkles, ArrowRight, Hash, RefreshCw, Radio, QrCode, Instagram } from "lucide-react";
+import { Receipt, ReceiptItem, getNormalizedStatus, getItemOrderIds, getItemOrderIdDisplay, getOrderIdTypeLabel, isCustomServiceCode, resolveReceiptWarranty, ProviderOrderSyncResult } from "../types";
 import { motion, AnimatePresence } from "motion/react";
 import { useApp } from "../context/AppContext";
+import { syncOrderWithProvider } from "../services/providerApi";
+import { getCustomerTrackingUrl } from "../utils/trackingUrl";
 
 interface ReceiptModalProps {
   receipt: Receipt;
@@ -24,7 +26,7 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
   whatsapp,
   initialIsEditing = false,
 }) => {
-  const { updateReceipt, socialNetworks, services, addSupplierWarranty, reopenOrResendWarrantyForCancelledOrder } = useApp();
+  const { businessConfig, updateReceipt, socialNetworks, services, addSupplierWarranty, reopenOrResendWarrantyForCancelledOrder, syncReceiptWithProvider } = useApp();
   const receiptRef = useRef<HTMLDivElement>(null);
   
   // Format utility
@@ -112,6 +114,9 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
   const [editedServices, setEditedServices] = useState<ReceiptItem[]>(receipt.services || []);
   const [editedStatus, setEditedStatus] = useState(getNormalizedStatus(receipt.status));
   const [editedInternalNotes, setEditedInternalNotes] = useState(receipt.internalNotes || "");
+  const [editedTargetAccount, setEditedTargetAccount] = useState(receipt.targetAccount || "");
+  const [quickTargetAccount, setQuickTargetAccount] = useState(receipt.targetAccount || "");
+  const [isSavingQuickAccount, setIsSavingQuickAccount] = useState(false);
   const [showAdminPanel, setShowAdminPanel] = useState(false);
   
   const [isSaving, setIsSaving] = useState(false);
@@ -119,6 +124,27 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
   const [resendSuccess, setResendSuccess] = useState<string | null>(null);
   const [showCancelConfirm, setShowCancelConfirm] = useState(false);
   const [isResendingWarranty, setIsResendingWarranty] = useState(false);
+  const [copiedTracking, setCopiedTracking] = useState(false);
+
+  const handleSaveQuickTargetAccount = async () => {
+    const clean = quickTargetAccount.trim();
+    if (!clean) return;
+    setIsSavingQuickAccount(true);
+    try {
+      await updateReceipt(receipt.id, {
+        targetAccount: clean
+      });
+      receipt.targetAccount = clean;
+      setEditedTargetAccount(clean);
+      setResendSuccess(`¡Cuenta de Instagram ${clean} vinculada al pedido exitosamente!`);
+      setTimeout(() => setResendSuccess(null), 4000);
+    } catch (err: any) {
+      console.error("Error saving target account:", err);
+      setError("Error al vincular cuenta: " + err.message);
+    } finally {
+      setIsSavingQuickAccount(false);
+    }
+  };
 
   // Quick Reorder & Supplier Warranty States
   const [showReorderPanel, setShowReorderPanel] = useState(getNormalizedStatus(receipt.status) === "cancelado");
@@ -135,8 +161,92 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
   const [quickEditServiceIndex, setQuickEditServiceIndex] = useState<number | null>(null);
   const [quickNewOrderId, setQuickNewOrderId] = useState<string>("");
   const [quickReactivateStatus, setQuickReactivateStatus] = useState<"en_proceso" | "completado" | "garantia_en_proceso" | "cancelado">("en_proceso");
+  const [quickIsResent, setQuickIsResent] = useState<boolean>(true);
+  const [quickResendNote, setQuickResendNote] = useState<string>("Servicio reenviado con nuevo ID del servidor para asegurar la entrega completa.");
   const [isSavingQuickId, setIsSavingQuickId] = useState(false);
   const [quickIdSuccess, setQuickIdSuccess] = useState<string | null>(null);
+
+  // Provider API Sync States
+  const [showSyncModal, setShowSyncModal] = useState(false);
+  const [isSyncingProvider, setIsSyncingProvider] = useState(false);
+  const [syncResults, setSyncResults] = useState<ProviderOrderSyncResult[]>([]);
+  const [syncError, setSyncError] = useState<string | null>(null);
+  const [syncIsSimulated, setSyncIsSimulated] = useState(false);
+  const [syncSuccessMsg, setSyncSuccessMsg] = useState<string | null>(null);
+  const [syncTargetServiceName, setSyncTargetServiceName] = useState<string | null>(null);
+  const [isApplyingSync, setIsApplyingSync] = useState(false);
+
+  // Automatic Background Provider Sync State
+  const [autoSyncStatus, setAutoSyncStatus] = useState<{
+    loading: boolean;
+    checkedAt?: Date;
+    rawStatus?: string;
+    mappedStatus?: string;
+    message?: string;
+    updated?: boolean;
+  } | null>(null);
+
+  // Helper to reliably detect if a service was resent (even previously before flags)
+  const getIsItemResent = (item: ReceiptItem, rec?: Receipt): boolean => {
+    if (!item) return false;
+    if (item.isResent) return true;
+    if (item.previousOrderId && item.previousOrderId !== item.orderId) return true;
+    if (item.orderIds && item.orderIds.length > 1) return true;
+    if (rec?.internalNotes) {
+      const sName = (item.serviceName || "").toLowerCase();
+      const notesLower = rec.internalNotes.toLowerCase();
+      if (
+        notesLower.includes(`"${sName}" reenviado`) ||
+        notesLower.includes(`para "${sName}":`) ||
+        notesLower.includes(`actualizado para "${sName}"`)
+      ) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  // Automatic Background Sync with MazSocialMarket when opening receipt
+  useEffect(() => {
+    let isCancelled = false;
+    const executeAutoSync = async () => {
+      const numericIds = (receipt.services || [])
+        .flatMap((s) => getItemOrderIds(s))
+        .filter((id) => /^\d{3,}$/.test(id.trim()));
+
+      if (numericIds.length === 0) return;
+
+      setAutoSyncStatus({ loading: true });
+      try {
+        const res = await syncReceiptWithProvider(receipt.id);
+        if (isCancelled) return;
+
+        setAutoSyncStatus({
+          loading: false,
+          checkedAt: new Date(),
+          rawStatus: res.rawStatus,
+          mappedStatus: res.newStatus || getNormalizedStatus(receipt.status),
+          message: res.message,
+          updated: res.updated
+        });
+
+        if (res.newStatus) {
+          setEditedStatus(res.newStatus as any);
+        }
+      } catch (err: any) {
+        if (isCancelled) return;
+        setAutoSyncStatus({
+          loading: false,
+          message: err.message || "Error al verificar MazSocialMarket."
+        });
+      }
+    };
+
+    executeAutoSync();
+    return () => {
+      isCancelled = true;
+    };
+  }, [receipt.id]);
 
   // Sync state with prop changes when receipt or initial mode changes
   useEffect(() => {
@@ -197,18 +307,47 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
       return false;
     }
 
+    const resentServices = (receiptData.services || []).filter((s) => getIsItemResent(s, receiptData));
+    const hasResentServices = resentServices.length > 0;
+
     const itemsHtml = (receiptData.services || []).map((item) => {
       const orderIdsStr = getItemOrderIdDisplay(item);
+      const isResent = getIsItemResent(item, receiptData);
       const title = item.socialNetworkName && item.socialNetworkName.toLowerCase() !== (item.serviceName || '').toLowerCase()
         ? `${item.socialNetworkName} - ${item.serviceName || ''}`
         : (item.serviceName || item.socialNetworkName || 'Servicio');
+
       return `
-        <tr>
+        <tr style="${isResent ? 'background-color: #fffdf5;' : ''}">
           <td style="padding: 12px 16px; border-bottom: 1px solid #f1f5f9; font-weight: 600; color: #0f172a;">
-            ${title}
-            ${orderIdsStr ? `<div style="font-size: 12px; font-weight: 400; color: #64748b; margin-top: 3px;">${getOrderIdTypeLabel(orderIdsStr, item.socialNetworkId === 'custom')}: ${orderIdsStr}</div>` : ''}
+            <div style="font-size: 13.5px; font-weight: 700; color: #0f172a;">${title}</div>
+            ${isResent ? `
+              <div style="margin-top: 5px;">
+                <span style="display: inline-block; background-color: #fef3c7; color: #92400e; border: 1px solid #fde68a; font-size: 10px; font-weight: 800; padding: 2px 8px; border-radius: 6px; letter-spacing: 0.2px;">
+                  🔄 SERVICIO REENVIADO / REPOSICIÓN
+                </span>
+                <div style="font-size: 11.5px; color: #334155; font-family: monospace; font-weight: 600; margin-top: 3px;">
+                  Nuevo ID Proveedor: ${item.orderId || orderIdsStr}
+                  ${item.previousOrderId ? `<span style="color: #94a3b8; font-size: 10px; font-weight: 400; margin-left: 6px;">(ID anterior: ${item.previousOrderId})</span>` : ''}
+                </div>
+                ${item.resendNote ? `<div style="font-size: 10.5px; color: #b45309; font-style: italic; font-weight: 500; margin-top: 2px;">📌 ${item.resendNote}</div>` : ''}
+              </div>
+            ` : `
+              <div style="margin-top: 4px; display: flex; align-items: center; gap: 6px;">
+                ${orderIdsStr ? `
+                  <span style="font-size: 11.5px; font-weight: 500; color: #64748b; font-family: monospace;">
+                    ${getOrderIdTypeLabel(orderIdsStr, item.socialNetworkId === 'custom')}: ${orderIdsStr}
+                  </span>
+                ` : ''}
+                ${hasResentServices ? `
+                  <span style="font-size: 9.5px; font-weight: 700; color: #047857; background-color: #ecfdf5; border: 1px solid #a7f3d0; padding: 1px 6px; border-radius: 4px;">
+                    Orden original
+                  </span>
+                ` : ''}
+              </div>
+            `}
           </td>
-          <td style="padding: 12px 16px; border-bottom: 1px solid #f1f5f9; text-align: center; color: #334155; font-weight: 500;">
+          <td style="padding: 12px 16px; border-bottom: 1px solid #f1f5f9; text-align: center; color: #334155; font-weight: 600;">
             ${(item.quantity || 0).toLocaleString()}
           </td>
           <td style="padding: 12px 16px; border-bottom: 1px solid #f1f5f9; text-align: right; font-weight: 700; color: #0f172a;">
@@ -311,6 +450,18 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
             </tbody>
           </table>
 
+          ${hasResentServices ? `
+            <div style="background-color: #fffbeb; border: 1.5px dashed #f59e0b; border-radius: 12px; padding: 12px 16px; margin-bottom: 20px;">
+              <div style="display: flex; align-items: center; gap: 8px; font-weight: 800; font-size: 12px; color: #92400e;">
+                <span style="font-size: 14px;">🔄</span>
+                <span>ACLARACIÓN DE SERVICIOS EN ESTE COMPROBANTE</span>
+              </div>
+              <div style="font-size: 11px; color: #78350f; margin-top: 5px; line-height: 1.5;">
+                El servicio identificado con la etiqueta <span style="background-color: #fef3c7; color: #92400e; font-weight: 700; padding: 1px 5px; border-radius: 4px; border: 1px solid #fde68a;">🔄 SERVICIO REENVIADO / REPOSICIÓN</span> fue reordenado con un nuevo ID de orden ante el proveedor para garantizar su entrega completa. Los demás servicios facturados en este mismo documento corresponden a sus órdenes originales y continúan su curso sin alteración.
+              </div>
+            </div>
+          ` : ''}
+
           <div class="totals-box">
             <div class="total-row">
               <span>Subtotal:</span>
@@ -325,6 +476,21 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
           <div class="warranty-box">
             <span>🛡️ Garantía Activa del Servicio:</span>
             <span>${resolveReceiptWarranty(receiptData, 30).warrantyText}</span>
+          </div>
+
+          <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 14px; padding: 12px 16px; margin-top: 18px; display: flex; align-items: center; justify-content: space-between; gap: 14px; text-align: left;">
+            <div>
+              <div style="font-size: 13px; font-weight: 700; color: #1e1b4b; display: flex; align-items: center; gap: 6px;">
+                <span>📲</span> Rastreo en Vivo
+              </div>
+              <div style="font-size: 11px; color: #64748b; margin-top: 2px; max-width: 360px; line-height: 1.4;">
+                Escanea el código QR con tu celular para consultar el estado y avance de tu pedido en tiempo real.
+              </div>
+            </div>
+            <div style="background: #ffffff; padding: 6px; border-radius: 10px; border: 1px solid #cbd5e1; display: flex; flex-direction: column; align-items: center; flex-shrink: 0;">
+              <img src="https://api.qrserver.com/v1/create-qr-code/?size=140x140&margin=2&data=${encodeURIComponent(getCustomerTrackingUrl(receiptData.id, businessConfig?.customTrackingUrl))}" alt="QR Rastreo" style="width: 64px; height: 64px; border-radius: 6px;" crossOrigin="anonymous" />
+              <span style="font-size: 8px; font-weight: 700; color: #4338ca; text-transform: uppercase; margin-top: 3px; letter-spacing: 0.5px;">Escanear</span>
+            </div>
           </div>
 
           <div class="footer-note">
@@ -425,6 +591,7 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
         totalProfit: totals.totalProfit,
         status: editedStatus,
         internalNotes: editedInternalNotes.trim(),
+        targetAccount: editedTargetAccount.trim() || undefined,
       };
 
       await updateReceipt(receipt.id, updatedData);
@@ -595,6 +762,10 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
     setQuickNewOrderId(getItemOrderIdDisplay(service) || "");
     const curStatus = getNormalizedStatus(receipt.status);
     setQuickReactivateStatus(curStatus === "cancelado" ? "en_proceso" : curStatus);
+    setQuickIsResent(true);
+    setQuickResendNote(
+      service.resendNote || (curStatus === "cancelado" ? "Reposición por cancelación de proveedor" : "Servicio reenviado con nuevo ID")
+    );
     setError(null);
   };
 
@@ -613,20 +784,28 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
     setError(null);
     try {
       const cleanIdsList = cleanId.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+      const prevId = getItemOrderIdDisplay(targetService) || "sin ID previo";
+
       const updatedServices = (receipt.services || []).map((s, idx) => {
         if (idx === quickEditServiceIndex) {
+          const existingIds = getItemOrderIds(s);
+          const combined = Array.from(new Set([cleanId, ...existingIds]));
           return {
             ...s,
             orderId: cleanId,
-            orderIds: cleanIdsList.length > 0 ? cleanIdsList : [cleanId]
+            orderIds: combined,
+            isResent: quickIsResent,
+            previousOrderId: prevId !== "sin ID previo" && prevId !== cleanId ? prevId : (s.previousOrderId || undefined),
+            resendDate: quickIsResent ? new Date().toISOString() : undefined,
+            resendNote: quickIsResent && quickResendNote.trim() ? quickResendNote.trim() : undefined,
           };
         }
         return s;
       });
 
       const nowFormatted = new Date().toLocaleString("es-CO", { dateStyle: "short", timeStyle: "short" });
-      const prevId = getItemOrderIdDisplay(targetService) || "sin ID previo";
-      const noteEntry = `[${nowFormatted}] 🔄 Servicio "${targetService.serviceName}" reenviado con nuevo ID Proveedor: ${cleanId} (anterior: ${prevId})`;
+      const resentLabel = quickIsResent ? " [REENVIADO]" : "";
+      const noteEntry = `[${nowFormatted}] 🔄 Servicio "${targetService.serviceName}"${resentLabel} actualizado con nuevo ID Proveedor: ${cleanId} (anterior: ${prevId})${quickIsResent && quickResendNote.trim() ? ` - Nota: ${quickResendNote.trim()}` : ""}`;
       const updatedNotes = receipt.internalNotes ? `${receipt.internalNotes}\n${noteEntry}` : noteEntry;
 
       const patch: Partial<Receipt> = {
@@ -639,7 +818,7 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
       setEditedServices(updatedServices);
       setEditedStatus(quickReactivateStatus);
       setEditedInternalNotes(updatedNotes);
-      setQuickIdSuccess(`¡Servicio actualizado con nuevo ID #${cleanId}! Nueva factura lista.`);
+      setQuickIdSuccess(`¡Servicio actualizado con nuevo ID #${cleanId}! Factura actualizada.`);
       setQuickEditServiceIndex(null);
       setTimeout(() => setQuickIdSuccess(null), 5000);
     } catch (err: any) {
@@ -647,6 +826,71 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
       setError(err.message || "Error al actualizar el ID del proveedor.");
     } finally {
       setIsSavingQuickId(false);
+    }
+  };
+
+  const handleSyncOrders = async (targetOrderIds?: string[], serviceName?: string) => {
+    let idsToSync: string[] = [];
+    if (targetOrderIds && targetOrderIds.length > 0) {
+      idsToSync = targetOrderIds;
+    } else {
+      idsToSync = (receipt.services || []).flatMap((s) => getItemOrderIds(s)).filter(Boolean);
+    }
+
+    if (idsToSync.length === 0) {
+      setError("No hay IDs de orden de proveedor registrados en este comprobante para sincronizar.");
+      return;
+    }
+
+    setShowSyncModal(true);
+    setIsSyncingProvider(true);
+    setSyncError(null);
+    setSyncSuccessMsg(null);
+    setSyncTargetServiceName(serviceName || null);
+
+    try {
+      const response = await syncOrderWithProvider(idsToSync, true);
+      if (!response.success && response.error) {
+        setSyncError(response.error);
+        setSyncResults([]);
+      } else {
+        setSyncResults(response.results || []);
+        setSyncIsSimulated(Boolean(response.simulated));
+      }
+    } catch (err: any) {
+      setSyncError(err.message || "Error al sincronizar con el proveedor.");
+      setSyncResults([]);
+    } finally {
+      setIsSyncingProvider(false);
+    }
+  };
+
+  const handleApplySyncToReceipt = async (targetStatus: "completado" | "en_proceso" | "cancelado") => {
+    setIsApplyingSync(true);
+    try {
+      const nowFormatted = new Date().toLocaleString("es-CO", { dateStyle: "short", timeStyle: "short" });
+      const summaryList = syncResults.map((r) => `#${r.orderId}: ${r.rawStatus}`).join(", ");
+      const simTag = syncIsSimulated ? " [Simulado]" : "";
+      const statusLabel = targetStatus === "completado" ? "Completado" : targetStatus === "cancelado" ? "Cancelado" : "En proceso";
+      const noteEntry = `[${nowFormatted}] 📡 Sincronización API Proveedor${simTag}: ${summaryList}. Estado actualizado a "${statusLabel}".`;
+      const updatedNotes = editedInternalNotes ? `${editedInternalNotes}\n${noteEntry}` : noteEntry;
+
+      await updateReceipt(receipt.id, {
+        status: targetStatus,
+        internalNotes: updatedNotes
+      });
+
+      setEditedStatus(targetStatus);
+      setEditedInternalNotes(updatedNotes);
+      setSyncSuccessMsg(`¡Factura actualizada a "${statusLabel}" y sincronizada con el proveedor!`);
+      setTimeout(() => {
+        setShowSyncModal(false);
+        setSyncSuccessMsg(null);
+      }, 2000);
+    } catch (err: any) {
+      setSyncError(err.message || "Error al aplicar el estado.");
+    } finally {
+      setIsApplyingSync(false);
     }
   };
 
@@ -783,6 +1027,16 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                     <span>Reenviar / Garantía</span>
                   </button>
                   <button
+                    id="btn-sync-all-provider-api"
+                    type="button"
+                    onClick={() => handleSyncOrders()}
+                    className="flex-1 sm:flex-none flex items-center justify-center gap-1.5 text-xs font-bold text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 transition px-2.5 py-2 rounded-xl cursor-pointer touch-manipulation shadow-2xs"
+                    title="Sincronizar estado de las órdenes de este comprobante con el proveedor vía API"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 text-blue-600 ${isSyncingProvider ? 'animate-spin' : ''}`} />
+                    <span>Sincronizar API</span>
+                  </button>
+                  <button
                     id="btn-open-receipt-new-tab"
                     type="button"
                     onClick={() => openReceiptInNewTab(receipt, businessName, totals)}
@@ -791,6 +1045,27 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                   >
                     <ExternalLink className="w-3.5 h-3.5 text-sky-700" />
                     <span>Pestaña</span>
+                  </button>
+                  <button
+                    id="btn-copy-customer-tracking-link"
+                    type="button"
+                    onClick={() => {
+                      const trackingUrl = getCustomerTrackingUrl(receipt.id, businessConfig?.customTrackingUrl);
+                      if (navigator?.clipboard?.writeText) {
+                        navigator.clipboard.writeText(trackingUrl);
+                        setCopiedTracking(true);
+                        setTimeout(() => setCopiedTracking(false), 2500);
+                      }
+                    }}
+                    className={`flex-1 sm:flex-none flex items-center justify-center gap-1.5 text-xs font-bold transition px-3 py-2 rounded-xl shadow-2xs cursor-pointer touch-manipulation border ${
+                      copiedTracking
+                        ? "bg-emerald-600 text-white border-emerald-700"
+                        : "bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border-indigo-200"
+                    }`}
+                    title="Copiar enlace de rastreo en vivo para el cliente (muestra progreso, tiempo de entrega y conteo)"
+                  >
+                    {copiedTracking ? <Check className="w-3.5 h-3.5" /> : <QrCode className="w-3.5 h-3.5 text-indigo-600" />}
+                    <span>{copiedTracking ? "¡Link Copiado!" : "Rastreo Cliente"}</span>
                   </button>
                   <button
                     id="btn-toggle-admin-panel"
@@ -859,7 +1134,7 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                     }}
                     className="px-2 py-0.5 text-xs font-semibold rounded-md bg-white border border-gray-200 text-gray-800 focus:outline-hidden focus:ring-1 focus:ring-indigo-500 cursor-pointer"
                   >
-                    <option value="en_proceso">🟢 En proceso</option>
+                    <option value="en_proceso">🔵 En proceso</option>
                     <option value="completado">✅ Completado</option>
                     <option value="garantia_en_proceso">🟡 Garantía en proceso</option>
                     <option value="cancelado">🔴 Cancelado</option>
@@ -926,6 +1201,37 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                     }}
                     className="w-full flex-1 p-1.5 border border-gray-200 rounded text-xs bg-gray-50 focus:bg-white focus:outline-hidden focus:ring-1 focus:ring-indigo-500 resize-none h-10"
                   />
+                </div>
+              </div>
+
+              {/* Quick Instagram Account Linking for In-Progress Orders */}
+              <div className="bg-purple-50/80 border border-purple-200 p-2.5 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+                <div className="flex items-center gap-2">
+                  <div className="w-6 h-6 rounded-md bg-gradient-to-tr from-pink-500 to-purple-600 flex items-center justify-center text-white shrink-0 shadow-2xs">
+                    <Instagram className="w-3.5 h-3.5" />
+                  </div>
+                  <div>
+                    <span className="font-bold text-gray-900 block leading-tight">Cuenta de Instagram Vinculada:</span>
+                    <span className="text-[10px] text-gray-500">Permite al cliente ver en su QR los seguidores llegando en tiempo real.</span>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <input
+                    type="text"
+                    placeholder="Ej: @tienda_co"
+                    value={quickTargetAccount}
+                    onChange={(e) => setQuickTargetAccount(e.target.value)}
+                    className="px-2.5 py-1 bg-white border border-purple-200 rounded-lg text-xs font-semibold w-36 sm:w-44 focus:ring-1 focus:ring-purple-500 focus:outline-hidden"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleSaveQuickTargetAccount}
+                    disabled={isSavingQuickAccount || !quickTargetAccount.trim() || quickTargetAccount === receipt.targetAccount}
+                    className="px-3 py-1 bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-white font-bold text-[11px] rounded-lg transition cursor-pointer"
+                  >
+                    {isSavingQuickAccount ? "..." : "Vincular"}
+                  </button>
                 </div>
               </div>
 
@@ -1308,7 +1614,7 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
 
               {/* Client Info (Conditional View/Edit) */}
               {isEditing ? (
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 bg-indigo-50/30 p-4 rounded-xl border border-indigo-100">
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-4 bg-indigo-50/30 p-4 rounded-xl border border-indigo-100">
                   <div>
                     <label className="block text-[10px] font-bold text-gray-500 uppercase tracking-wider">Nombre del Cliente</label>
                     <input
@@ -1328,13 +1634,26 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                     />
                   </div>
                   <div>
+                    <label className="block text-[10px] font-bold text-purple-700 uppercase tracking-wider flex items-center gap-1">
+                      <Instagram className="w-3 h-3 text-pink-500" />
+                      Perfil Instagram
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="Ej. @tienda_co"
+                      value={editedTargetAccount}
+                      onChange={(e) => setEditedTargetAccount(e.target.value)}
+                      className="mt-1 block w-full px-3.5 py-1.5 border border-purple-200 rounded-lg text-sm bg-white focus:outline-hidden focus:ring-2 focus:ring-purple-500/10 focus:border-purple-500 transition font-semibold text-purple-800"
+                    />
+                  </div>
+                  <div>
                     <label className="block text-[10px] font-bold text-gray-500 uppercase tracking-wider">Estado del Pedido</label>
                     <select
                       value={editedStatus}
                       onChange={(e) => setEditedStatus(e.target.value as any)}
                       className="mt-1 block w-full px-3.5 py-1.5 border border-gray-200 rounded-lg text-sm bg-white focus:outline-hidden focus:ring-2 focus:ring-indigo-500/10 focus:border-indigo-500 transition font-semibold text-gray-900 cursor-pointer"
                     >
-                      <option value="en_proceso">🟢 En proceso</option>
+                      <option value="en_proceso">🔵 En proceso</option>
                       <option value="completado">✅ Completado</option>
                       <option value="garantia_en_proceso">🟡 Garantía en proceso</option>
                       <option value="cancelado">🔴 Cancelado</option>
@@ -1359,27 +1678,82 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                       {receipt.clientPhone || "No especificado"}
                     </div>
                   </div>
-                  <div className="col-span-2 md:col-span-1">
-                    <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">
-                      Estado
+                  {receipt.targetAccount && (
+                    <div>
+                      <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">
+                        Perfil Instagram
+                      </div>
+                      <div className="text-sm font-semibold text-purple-700 mt-0.5 truncate">
+                        {receipt.targetAccount}
+                      </div>
                     </div>
-                    <div className="mt-0.5">
-                      {getNormalizedStatus(receipt.status) === "cancelado" ? (
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-bold bg-rose-50 text-rose-700 border border-rose-200">
-                          🔴 Cancelado
+                  )}
+                  <div className="col-span-2 md:col-span-1">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">
+                        Estado
+                      </span>
+                      {autoSyncStatus?.loading ? (
+                        <span className="inline-flex items-center gap-1 text-[9px] font-semibold text-blue-600">
+                          <RefreshCw className="w-2.5 h-2.5 animate-spin" />
+                          <span>MazSocialMarket...</span>
                         </span>
-                      ) : getNormalizedStatus(receipt.status) === "garantia_en_proceso" ? (
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-bold bg-amber-50 text-amber-700 border border-amber-200">
-                          🟡 Garantía en proceso
-                        </span>
-                      ) : getNormalizedStatus(receipt.status) === "completado" ? (
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
-                          ✅ Completado
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-bold bg-blue-50 text-blue-700 border border-blue-200">
-                          🟢 En proceso
-                        </span>
+                      ) : autoSyncStatus?.rawStatus ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setAutoSyncStatus({ loading: true });
+                            syncReceiptWithProvider(receipt.id).then((res) => {
+                              setAutoSyncStatus({
+                                loading: false,
+                                checkedAt: new Date(),
+                                rawStatus: res.rawStatus,
+                                mappedStatus: res.newStatus || getNormalizedStatus(receipt.status),
+                                message: res.message,
+                                updated: res.updated
+                              });
+                              if (res.newStatus) setEditedStatus(res.newStatus as any);
+                            });
+                          }}
+                          className="inline-flex items-center gap-1 text-[9px] font-semibold text-gray-500 hover:text-indigo-600 transition cursor-pointer"
+                          title="Volver a consultar MazSocialMarket"
+                        >
+                          <RefreshCw className="w-2.5 h-2.5" />
+                          <span>API Proveedor</span>
+                        </button>
+                      ) : null}
+                    </div>
+                    <div className="mt-0.5 flex flex-col gap-1">
+                      <div>
+                        {getNormalizedStatus(receipt.status) === "cancelado" ? (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold bg-rose-50 text-rose-700 border border-rose-300">
+                            🔴 Cancelado
+                          </span>
+                        ) : getNormalizedStatus(receipt.status) === "garantia_en_proceso" ? (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold bg-amber-50 text-amber-700 border border-amber-300">
+                            🟡 Garantía en proceso
+                          </span>
+                        ) : getNormalizedStatus(receipt.status) === "completado" ? (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold bg-emerald-50 text-emerald-800 border border-emerald-300">
+                            ✅ Completado
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold bg-blue-50 text-blue-800 border border-blue-300">
+                            🔵 En proceso
+                          </span>
+                        )}
+                      </div>
+
+                      {autoSyncStatus && !autoSyncStatus.loading && autoSyncStatus.rawStatus && (
+                        <div className="text-[10px] text-slate-600 bg-white/90 border border-slate-200/80 rounded px-2 py-0.5 flex items-center gap-1 font-mono">
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0"></span>
+                          <span className="truncate">Proveedor: <strong>{autoSyncStatus.rawStatus}</strong></span>
+                          {autoSyncStatus.updated && (
+                            <span className="text-[9px] font-sans font-bold text-emerald-700 bg-emerald-50 px-1 rounded ml-auto">
+                              ¡Actualizado!
+                            </span>
+                          )}
+                        </div>
                       )}
                     </div>
                   </div>
@@ -1398,6 +1772,24 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                     </span>
                   )}
                 </div>
+
+                {!isEditing && (receipt?.services || []).some((s) => getIsItemResent(s, receipt)) && (
+                  <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl flex items-start gap-2.5 text-xs text-amber-900 shadow-2xs">
+                    <span className="text-base leading-none mt-0.5">🔄</span>
+                    <div className="space-y-0.5">
+                      <div className="font-bold flex items-center gap-2">
+                        <span>Aclaración de Reenvío en esta Factura</span>
+                        <span className="text-[10px] bg-amber-200/80 text-amber-950 font-bold px-2 py-0.5 rounded-full">
+                          Reposición de servicio
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-amber-800 leading-relaxed">
+                        El servicio señalado con <strong className="text-amber-950 font-bold">«Reenviado / Reposición»</strong> fue procesado nuevamente con un nuevo ID de orden ante el proveedor. Los demás servicios de esta factura corresponden a sus órdenes originales y continúan sin cambios.
+                      </p>
+                    </div>
+                  </div>
+                )}
+
                 <div className="border border-gray-100 rounded-xl overflow-hidden shadow-2xs bg-white">
                   <table className="w-full text-left border-collapse">
                     <thead>
@@ -1519,55 +1911,106 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                           );
                         })
                       ) : (
-                        (receipt?.services || []).map((item, index) => (
-                          <tr 
-                            key={item?.id || index} 
-                            onClick={() => handleOpenQuickEditService(index)}
-                            className="hover:bg-indigo-50/40 transition cursor-pointer group"
-                            title="Tocar este servicio para cambiar su ID de proveedor y actualizar la factura"
-                          >
-                            <td className="py-3 px-3 sm:py-3.5 sm:px-4">
-                              <div className="font-semibold text-gray-900 flex items-center justify-between">
-                                <span>
-                                  {item?.socialNetworkName && item.socialNetworkName.toLowerCase() !== (item?.serviceName || '').toLowerCase()
-                                    ? `${item.socialNetworkName} - ${item.serviceName}`
-                                    : (item?.serviceName || item?.socialNetworkName || 'Servicio')}
-                                </span>
-                                <span className="opacity-0 group-hover:opacity-100 text-[10px] font-bold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-md transition border border-indigo-200">
-                                  ✏️ Tocar para cambiar ID
-                                </span>
-                              </div>
-                              <div className="mt-1 flex flex-wrap items-center gap-1.5">
-                                <span className={`inline-flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded-md border font-medium transition ${
-                                  getItemOrderIds(item).length > 0
-                                    ? "bg-slate-50 text-slate-700 border-slate-200 group-hover:bg-indigo-50 group-hover:border-indigo-300 group-hover:text-indigo-800"
-                                    : "bg-amber-50 text-amber-800 border-amber-200"
-                                }`}>
-                                  <Hash className="w-3 h-3 text-indigo-500" />
-                                  <span>
-                                    {getItemOrderIds(item).length > 0
-                                      ? `${getOrderIdTypeLabel(getItemOrderIdDisplay(item), item?.socialNetworkId === "custom")}: ${getItemOrderIdDisplay(item)}`
-                                      : "Sin ID de proveedor"}
+                        (receipt?.services || []).map((item, index) => {
+                          const isResent = getIsItemResent(item, receipt);
+                          const resentServices = (receipt?.services || []).filter((s) => getIsItemResent(s, receipt));
+                          const hasResentServices = resentServices.length > 0;
+                          const orderIdsStr = getItemOrderIdDisplay(item);
+
+                          return (
+                            <tr 
+                              key={item?.id || index} 
+                              onClick={() => handleOpenQuickEditService(index)}
+                              className={`hover:bg-indigo-50/40 transition cursor-pointer group ${
+                                isResent ? "bg-amber-50/50 border-l-4 border-l-amber-500" : ""
+                              }`}
+                              title="Tocar este servicio para cambiar su ID de proveedor y actualizar la factura"
+                            >
+                              <td className="py-3 px-3 sm:py-3.5 sm:px-4">
+                                <div className="font-semibold text-gray-900 flex items-center justify-between">
+                                  <span className="flex items-center gap-2 flex-wrap">
+                                    <span>
+                                      {item?.socialNetworkName && item.socialNetworkName.toLowerCase() !== (item?.serviceName || '').toLowerCase()
+                                        ? `${item.socialNetworkName} - ${item.serviceName}`
+                                        : (item?.serviceName || item?.socialNetworkName || 'Servicio')}
+                                    </span>
+                                    {isResent ? (
+                                      <span className="inline-flex items-center gap-1 text-[10px] font-extrabold text-amber-900 bg-amber-100 border border-amber-300 px-2 py-0.5 rounded-md">
+                                        🔄 REENVIADO / REPOSICIÓN
+                                      </span>
+                                    ) : hasResentServices ? (
+                                      <span className="inline-flex items-center text-[9.5px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded-md">
+                                        Orden original
+                                      </span>
+                                    ) : null}
                                   </span>
-                                  <span className="text-[10px] text-indigo-600 underline ml-1 font-sans font-bold">
-                                    (cambiar)
+                                  <span className="opacity-0 group-hover:opacity-100 text-[10px] font-bold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-md transition border border-indigo-200">
+                                    ✏️ Tocar para cambiar ID
                                   </span>
-                                </span>
-                                {getNormalizedStatus(receipt.status) === "cancelado" && (
-                                  <span className="inline-flex items-center gap-0.5 text-[10px] font-bold text-rose-700 bg-rose-50 border border-rose-200 px-1.5 py-0.5 rounded-md">
-                                    🔴 Cancelado - Reenviar
+                                </div>
+                                <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                                  <span className={`inline-flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded-md border font-medium transition ${
+                                    isResent
+                                      ? "bg-amber-100/70 text-amber-900 border-amber-300"
+                                      : getItemOrderIds(item).length > 0
+                                      ? "bg-slate-50 text-slate-700 border-slate-200 group-hover:bg-indigo-50 group-hover:border-indigo-300 group-hover:text-indigo-800"
+                                      : "bg-amber-50 text-amber-800 border-amber-200"
+                                  }`}>
+                                    <Hash className="w-3 h-3 text-indigo-500" />
+                                    <span>
+                                      {isResent ? `Nuevo ID: ${item.orderId || orderIdsStr}` : (
+                                        getItemOrderIds(item).length > 0
+                                          ? `${getOrderIdTypeLabel(orderIdsStr, item?.socialNetworkId === "custom")}: ${orderIdsStr}`
+                                          : "Sin ID de proveedor"
+                                      )}
+                                    </span>
+                                    {isResent && item.previousOrderId && (
+                                      <span className="text-[10px] text-gray-500 font-sans ml-1">
+                                        (anterior: #{item.previousOrderId})
+                                      </span>
+                                    )}
+                                    <span className="text-[10px] text-indigo-600 underline ml-1 font-sans font-bold">
+                                      (cambiar)
+                                    </span>
                                   </span>
-                                )}
-                              </div>
-                            </td>
-                            <td className="py-3 px-2 sm:py-3.5 sm:px-4 text-center font-mono text-gray-600">
-                              {Number(item?.quantity || 0).toLocaleString()}
-                            </td>
-                            <td className="py-3 px-3 sm:py-3.5 sm:px-4 text-right font-mono font-medium text-gray-900">
-                              {formatCOP(item?.chargedPrice)}
-                            </td>
-                          </tr>
-                        ))
+
+                                  {getItemOrderIds(item).length > 0 && (
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        handleSyncOrders(getItemOrderIds(item), item?.serviceName || item?.socialNetworkName);
+                                      }}
+                                      className="inline-flex items-center gap-1 text-[10px] font-bold text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 px-1.5 py-0.5 rounded-md transition shadow-2xs cursor-pointer active:scale-95"
+                                      title="Consultar estado de esta orden en el proveedor vía API"
+                                    >
+                                      <RefreshCw className="w-2.5 h-2.5 text-blue-600" />
+                                      <span>Sincronizar API</span>
+                                    </button>
+                                  )}
+
+                                  {isResent && item.resendNote && (
+                                    <span className="text-[10.5px] text-amber-800 italic">
+                                      📌 {item.resendNote}
+                                    </span>
+                                  )}
+
+                                  {getNormalizedStatus(receipt.status) === "cancelado" && (
+                                    <span className="inline-flex items-center gap-0.5 text-[10px] font-bold text-rose-700 bg-rose-50 border border-rose-200 px-1.5 py-0.5 rounded-md">
+                                      🔴 Cancelado - Reenviar
+                                    </span>
+                                  )}
+                                </div>
+                              </td>
+                              <td className="py-3 px-2 sm:py-3.5 sm:px-4 text-center font-mono text-gray-600">
+                                {Number(item?.quantity || 0).toLocaleString()}
+                              </td>
+                              <td className="py-3 px-3 sm:py-3.5 sm:px-4 text-right font-mono font-medium text-gray-900">
+                                {formatCOP(item?.chargedPrice)}
+                              </td>
+                            </tr>
+                          );
+                        })
                       )}
                     </tbody>
                   </table>
@@ -1716,6 +2159,27 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                         {getWarrantyInfo()}
                       </div>
                     </div>
+                    {/* Simplified Live Tracking QR for Customer (No text link, clean QR only) */}
+                    <div className="p-3 bg-gradient-to-r from-indigo-50/60 to-slate-50/60 rounded-xl border border-indigo-100/80 flex items-center justify-between gap-3 text-left">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-1.5 text-xs font-bold text-indigo-900">
+                          <QrCode className="w-4 h-4 text-indigo-600 shrink-0" />
+                          <span>Rastreo en Vivo</span>
+                        </div>
+                        <p className="text-[11px] text-gray-500 mt-1 leading-snug">
+                          Escanea este código QR con tu celular para consultar el estado y avance de tu pedido en tiempo real.
+                        </p>
+                      </div>
+                      <div className="shrink-0 bg-white p-1.5 rounded-xl border border-indigo-200/80 shadow-2xs flex flex-col items-center">
+                        <img
+                          src={`https://api.qrserver.com/v1/create-qr-code/?size=140x140&margin=2&data=${encodeURIComponent(getCustomerTrackingUrl(receipt.id, businessConfig?.customTrackingUrl))}`}
+                          alt="QR Rastreo en Vivo"
+                          className="w-16 h-16 sm:w-18 sm:h-18 rounded-lg"
+                          crossOrigin="anonymous"
+                        />
+                        <span className="text-[8.5px] font-bold text-indigo-600 uppercase tracking-wider mt-1">Escanear</span>
+                      </div>
+                    </div>
 
                     <div className="flex items-center justify-between text-[11px] text-gray-400 border-t border-gray-100 pt-4">
                       <div className="flex items-center gap-1">
@@ -1740,6 +2204,218 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
             </div>
           </div>
         </motion.div>
+
+        {/* Modal: Sincronización en Vivo con Proveedor vía API */}
+        {showSyncModal && (
+          <div 
+            className="fixed inset-0 bg-black/60 backdrop-blur-xs z-70 flex items-center justify-center p-3 sm:p-4 animate-fade-in cursor-pointer"
+            onClick={() => {
+              if (!isSyncingProvider && !isApplyingSync) setShowSyncModal(false);
+            }}
+          >
+            <div 
+              className="bg-white rounded-2xl shadow-2xl border border-gray-200 max-w-lg w-full p-5 sm:p-6 space-y-4 relative max-h-[90vh] overflow-y-auto cursor-default"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* Header */}
+              <div className="flex items-start justify-between pb-3 border-b border-gray-100">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-9 h-9 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center font-bold text-base shadow-2xs">
+                    📡
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-gray-900">
+                      Sincronización con Proveedor (API)
+                    </h3>
+                    <p className="text-[11px] text-gray-500">
+                      {syncTargetServiceName
+                        ? `Servicio: ${syncTargetServiceName}`
+                        : `Comprobante #${receipt.consecutive || ''}`}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  disabled={isSyncingProvider || isApplyingSync}
+                  onClick={() => setShowSyncModal(false)}
+                  className="text-gray-400 hover:text-gray-600 p-1.5 rounded-lg hover:bg-gray-100 transition cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Success Message Banner */}
+              {syncSuccessMsg && (
+                <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs font-bold text-emerald-800 flex items-center gap-2 animate-fade-in">
+                  <Check className="w-4 h-4 text-emerald-600 shrink-0" />
+                  <span>{syncSuccessMsg}</span>
+                </div>
+              )}
+
+              {/* Loading State */}
+              {isSyncingProvider && (
+                <div className="py-8 text-center space-y-3">
+                  <RefreshCw className="w-8 h-8 text-blue-600 animate-spin mx-auto" />
+                  <div className="text-sm font-bold text-gray-800">
+                    Consultando API del Proveedor en tiempo real...
+                  </div>
+                  <p className="text-xs text-gray-500">
+                    Verificando el estado de la orden, conteo de inicio y progreso.
+                  </p>
+                </div>
+              )}
+
+              {/* Error State */}
+              {!isSyncingProvider && syncError && (
+                <div className="p-4 bg-rose-50 border border-rose-200 rounded-xl space-y-2 text-xs">
+                  <div className="flex items-center gap-2 font-bold text-rose-800">
+                    <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                    <span>Error al consultar la API del proveedor</span>
+                  </div>
+                  <p className="text-rose-700 leading-relaxed">{syncError}</p>
+                  <div className="pt-2 border-t border-rose-200/60 text-[11px] text-rose-600">
+                    💡 Asegúrate de definir <strong>PROVIDER_API_URL</strong> y <strong>PROVIDER_API_KEY</strong> en tu archivo <code>.env</code>. También puedes consultar la pestaña "Sincronización API Proveedor" en Ajustes.
+                  </div>
+                </div>
+              )}
+
+              {/* Results State */}
+              {!isSyncingProvider && !syncError && syncResults.length > 0 && (
+                <div className="space-y-3">
+                  {syncIsSimulated && (
+                    <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-xl text-[11px] text-amber-900 flex items-start gap-2">
+                      <span className="text-sm leading-none mt-0.5">ℹ️</span>
+                      <div>
+                        <strong>Modo demostración activo:</strong> Configura <code>PROVIDER_API_URL</code> y <code>PROVIDER_API_KEY</code> en tu <code>.env</code> para conectar con la API real de tu proveedor.
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="space-y-2">
+                    <label className="text-[11px] font-bold text-gray-500 uppercase tracking-wider block">
+                      Órdenes Consultadas en el Proveedor ({syncResults.length})
+                    </label>
+
+                    {syncResults.map((res) => {
+                      const isCompleted = res.mappedStatus === "completado";
+                      const isCanceled = res.mappedStatus === "cancelado";
+
+                      return (
+                        <div 
+                          key={res.orderId}
+                          className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs space-y-2"
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="font-mono font-bold text-slate-800 text-sm flex items-center gap-1.5">
+                              <Hash className="w-3.5 h-3.5 text-blue-500" />
+                              <span>Orden #{res.orderId}</span>
+                            </span>
+                            <span className={`px-2 py-0.5 rounded-md font-bold text-[11px] border ${
+                              isCompleted
+                                ? "bg-emerald-100 text-emerald-800 border-emerald-300"
+                                : isCanceled
+                                ? "bg-rose-100 text-rose-800 border-rose-300"
+                                : "bg-amber-100 text-amber-800 border-amber-300"
+                            }`}>
+                              {res.rawStatus}
+                            </span>
+                          </div>
+
+                          {res.error ? (
+                            <p className="text-rose-600 text-[11px] font-medium">{res.error}</p>
+                          ) : (
+                            <div className="grid grid-cols-3 gap-2 pt-1 border-t border-slate-200/70 text-[11px]">
+                              <div>
+                                <span className="text-slate-400 block text-[9px] uppercase font-bold">Inicio</span>
+                                <span className="font-mono font-semibold text-slate-700">
+                                  {res.startCount !== null ? Number(res.startCount).toLocaleString() : "-"}
+                                </span>
+                              </div>
+                              <div>
+                                <span className="text-slate-400 block text-[9px] uppercase font-bold">Restante</span>
+                                <span className="font-mono font-semibold text-slate-700">
+                                  {res.remains !== null ? Number(res.remains).toLocaleString() : "0"}
+                                </span>
+                              </div>
+                              <div>
+                                <span className="text-slate-400 block text-[9px] uppercase font-bold">Cobro</span>
+                                <span className="font-mono font-semibold text-slate-700">
+                                  {res.charge ? `$${res.charge} ${res.currency || 'USD'}` : "-"}
+                                </span>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Actions to apply status to receipt */}
+                  <div className="pt-2 border-t border-gray-100 space-y-2">
+                    <label className="text-[11px] font-bold text-gray-700 block">
+                      ¿Deseas actualizar el estado de este comprobante con el proveedor?
+                    </label>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {syncResults.some(r => r.mappedStatus === "completado") && (
+                        <button
+                          type="button"
+                          disabled={isApplyingSync}
+                          onClick={() => handleApplySyncToReceipt("completado")}
+                          className="py-2.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 shadow-sm cursor-pointer disabled:opacity-50"
+                        >
+                          <Check className="w-3.5 h-3.5" />
+                          <span>Marcar como "Completado"</span>
+                        </button>
+                      )}
+
+                      {syncResults.some(r => r.mappedStatus === "cancelado") && (
+                        <button
+                          type="button"
+                          disabled={isApplyingSync}
+                          onClick={() => handleApplySyncToReceipt("cancelado")}
+                          className="py-2.5 px-3 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 shadow-sm cursor-pointer disabled:opacity-50"
+                        >
+                          <span>🔴 Marcar como "Cancelado"</span>
+                        </button>
+                      )}
+
+                      <button
+                        type="button"
+                        disabled={isApplyingSync}
+                        onClick={() => handleApplySyncToReceipt("en_proceso")}
+                        className="py-2.5 px-3 bg-amber-500 hover:bg-amber-600 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 shadow-sm cursor-pointer disabled:opacity-50"
+                      >
+                        <span>⏳ Marcar como "En proceso"</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => handleSyncOrders(syncResults.map(r => r.orderId), syncTargetServiceName || undefined)}
+                        disabled={isSyncingProvider || isApplyingSync}
+                        className="py-2.5 px-3 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                        <span>Volver a Consultar</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Close Button */}
+              <div className="pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowSyncModal(false)}
+                  className="w-full py-2.5 px-3 border border-gray-200 rounded-xl text-xs font-bold text-gray-600 hover:bg-gray-50 transition cursor-pointer"
+                >
+                  Cerrar
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Modal Rápido: Tocar Servicio para Cambiar ID y Reenviar Factura */}
         {quickEditServiceIndex !== null && receipt?.services?.[quickEditServiceIndex] && (
@@ -1838,6 +2514,41 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                     <span>✅ Completado</span>
                   </button>
                 </div>
+              </div>
+
+              {/* Aclaratoria de reenvío en la factura */}
+              <div className="bg-amber-50/80 border border-amber-200 rounded-xl p-3 space-y-2">
+                <label className="flex items-start gap-2.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={quickIsResent}
+                    onChange={(e) => setQuickIsResent(e.target.checked)}
+                    className="mt-0.5 rounded text-amber-600 focus:ring-amber-500 w-4 h-4 cursor-pointer"
+                  />
+                  <div>
+                    <div className="text-xs font-bold text-amber-950">
+                      Aclarar en la factura que este servicio fue reenviado
+                    </div>
+                    <div className="text-[10px] text-amber-800 leading-snug">
+                      Muestra la etiqueta de reenvío en este servicio y aclara que los demás servicios de la factura conservan su orden original.
+                    </div>
+                  </div>
+                </label>
+
+                {quickIsResent && (
+                  <div className="pt-2 border-t border-amber-200/70">
+                    <label className="block text-[10px] font-bold text-amber-900 uppercase mb-1">
+                      Nota o motivo visible en el comprobante:
+                    </label>
+                    <input
+                      type="text"
+                      value={quickResendNote}
+                      onChange={(e) => setQuickResendNote(e.target.value)}
+                      placeholder="Ej: Reposición por cancelación de proveedor"
+                      className="w-full px-2.5 py-1.5 bg-white border border-amber-300 rounded-lg text-xs text-gray-800 placeholder-gray-400 focus:outline-hidden focus:ring-1 focus:ring-amber-500"
+                    />
+                  </div>
+                )}
               </div>
 
               {/* Acciones */}

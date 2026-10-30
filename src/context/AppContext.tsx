@@ -36,9 +36,11 @@ import {
   getItemOrderIds,
   getClientCode,
   getClientTagForSpending,
-  ReopenWarrantyParams
+  ReopenWarrantyParams,
+  ProviderOrderSyncResult
 } from "../types";
 import { DEFAULT_BUSINESS_CONFIG, DEFAULT_SOCIAL_NETWORKS, DEFAULT_SERVICES, DEFAULT_COMBOS } from "../defaultData";
+import { syncOrderWithProvider } from "../services/providerApi";
 
 interface AppContextType {
   user: User | null;
@@ -98,6 +100,8 @@ interface AppContextType {
   deleteReceipt: (id: string) => Promise<void>;
   updateReceipt: (id: string, updatedData: Partial<Receipt>) => Promise<void>;
   markAllInProcessAsCompleted: () => Promise<{ updatedCount: number }>;
+  syncReceiptWithProvider: (receiptId: string) => Promise<{ updated: boolean; oldStatus?: string; newStatus?: string; rawStatus?: string; message?: string }>;
+  syncAllInProcessOrdersWithProvider: () => Promise<{ checkedCount: number; updatedCount: number; details: string[] }>;
   updateClientTag: (clientId: string, tag: string) => Promise<void>;
   updateClient: (clientId: string, updates: Partial<Client>) => Promise<void>;
   reassignClientCode: (clientId: string, customCode?: string) => Promise<string>;
@@ -311,13 +315,34 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             quantities:
               found.quantities && found.quantities.length > 0 ? found.quantities : def.quantities
           };
-        });
+        }).filter((s) => s.id !== "ig-optimizacion" && s.id !== "ig-publicidad");
 
         const customServices = srvsFromDb.filter((s) => {
           if (DEFAULT_SERVICES.some((def) => def.id === s.id)) return false;
+          if (s.id === "ig-optimizacion" || s.id === "ig-publicidad") return false;
           const sName = (s.name || "").toLowerCase();
           const sId = (s.id || "").toLowerCase();
           if (sName.includes("alerta") || sId.includes("alrt")) return false;
+
+          // Instagram catalog strictly only allows Seguidores, Likes, Vistas, Comentarios
+          if (s.socialNetworkId === "instagram") {
+            if (
+              sName.includes("optimiz") ||
+              sName.includes("publicidad") ||
+              sName.includes("tarjeta") ||
+              sName.includes("diseño") ||
+              sName.includes("personaliz") ||
+              sName.includes("web")
+            ) {
+              return false;
+            }
+            const isSeg = sName.includes("seguidor") || sId.includes("follower");
+            const isLik = sName.includes("like") || sName.includes("me gusta");
+            const isVis = sName.includes("vista") || sName.includes("view") || sName.includes("reproducci");
+            const isCom = sName.includes("comentario") || sId.includes("comment");
+            if (!isSeg && !isLik && !isVis && !isCom) return false;
+          }
+
           return true;
         });
 
@@ -1598,6 +1623,190 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return { updatedCount: count };
   };
 
+  /**
+   * Syncs a single receipt with MazSocialMarket API by querying its order IDs.
+   * If provider status differs from current status, automatically updates receipt in Firestore.
+   */
+  const syncReceiptWithProvider = async (
+    receiptId: string
+  ): Promise<{ updated: boolean; oldStatus?: string; newStatus?: string; rawStatus?: string; message?: string }> => {
+    const targetReceipt = receipts.find((r) => r.id === receiptId);
+    if (!targetReceipt) {
+      return { updated: false, message: "Comprobante no encontrado." };
+    }
+
+    const numericIds = (targetReceipt.services || [])
+      .flatMap((s) => getItemOrderIds(s))
+      .filter((id) => /^\d{3,}$/.test(id.trim()));
+
+    if (numericIds.length === 0) {
+      return { updated: false, message: "Sin IDs numéricos del proveedor registrados." };
+    }
+
+    try {
+      const res = await syncOrderWithProvider(numericIds);
+      if (!res.success || !res.results || res.results.length === 0) {
+        return { updated: false, message: res.error || "No se pudo consultar el proveedor." };
+      }
+
+      const foundItems = res.results.filter((r) => r.found);
+      if (foundItems.length === 0) {
+        return { updated: false, message: "Ningún ID coincide aún con el proveedor." };
+      }
+
+      const allCompleted = foundItems.every((r) => r.mappedStatus === "completado");
+      const anyCanceled = foundItems.some((r) => r.mappedStatus === "cancelado");
+      const anyInProcess = foundItems.some((r) => r.mappedStatus === "en_proceso");
+
+      let determinedStatus: "completado" | "en_proceso" | "cancelado" = "en_proceso";
+      if (allCompleted) determinedStatus = "completado";
+      else if (anyCanceled && !anyInProcess) determinedStatus = "cancelado";
+      else determinedStatus = "en_proceso";
+
+      const oldStatus = getNormalizedStatus(targetReceipt.status);
+      const rawStatusSummary = foundItems.map((f) => `#${f.orderId}: ${f.rawStatus}`).join(", ");
+
+      if (determinedStatus !== oldStatus) {
+        const nowFormatted = new Date().toLocaleString("es-CO", { dateStyle: "short", timeStyle: "short" });
+        const noteEntry = `[${nowFormatted}] 🔄 Sincronizado automáticamente con MazSocialMarket: ${rawStatusSummary}. Estado actualizado de "${oldStatus}" a "${determinedStatus}".`;
+        const updatedNotes = targetReceipt.internalNotes ? `${targetReceipt.internalNotes}\n${noteEntry}` : noteEntry;
+
+        await updateReceipt(targetReceipt.id, {
+          status: determinedStatus,
+          internalNotes: updatedNotes,
+        });
+
+        return {
+          updated: true,
+          oldStatus,
+          newStatus: determinedStatus,
+          rawStatus: rawStatusSummary,
+          message: `Estado actualizado a "${determinedStatus}" (${rawStatusSummary}).`
+        };
+      }
+
+      return {
+        updated: false,
+        oldStatus,
+        newStatus: determinedStatus,
+        rawStatus: rawStatusSummary,
+        message: `Comprobante verificado con MazSocialMarket (${rawStatusSummary}).`
+      };
+    } catch (err: any) {
+      return { updated: false, message: err.message || "Error al conectar con MazSocialMarket." };
+    }
+  };
+
+  /**
+   * Syncs all receipts that have numeric provider IDs with MazSocialMarket API in batch.
+   * If any order status on provider differs from the app status (e.g. was marked completed but provider says In progress),
+   * updates receipt in Firestore to match the provider reality.
+   */
+  const syncAllInProcessOrdersWithProvider = async (): Promise<{
+    checkedCount: number;
+    updatedCount: number;
+    details: string[];
+  }> => {
+    // Select ALL receipts having numeric provider IDs, regardless of current status
+    const targetReceipts = receipts.filter((r) => {
+      const ids = (r.services || [])
+        .flatMap((s) => getItemOrderIds(s))
+        .filter((id) => /^\d{3,}$/.test(id.trim()));
+      return ids.length > 0;
+    });
+
+    if (targetReceipts.length === 0) {
+      return {
+        checkedCount: 0,
+        updatedCount: 0,
+        details: ["No se encontraron comprobantes con IDs numéricos de MazSocialMarket registrados. (Los IDs de prueba como PED-... no existen en el proveedor)."]
+      };
+    }
+
+    const allOrderIds: string[] = [];
+    const receiptToIds = new Map<string, string[]>();
+
+    for (const r of targetReceipts) {
+      const ids = (r.services || [])
+        .flatMap((s) => getItemOrderIds(s))
+        .filter((id) => /^\d{3,}$/.test(id.trim()));
+
+      if (ids.length > 0) {
+        receiptToIds.set(r.id, ids);
+        ids.forEach((id) => {
+          if (!allOrderIds.includes(id)) {
+            allOrderIds.push(id);
+          }
+        });
+      }
+    }
+
+    if (allOrderIds.length === 0) {
+      return { checkedCount: 0, updatedCount: 0, details: ["No hay IDs numéricos válidos para consultar."] };
+    }
+
+    try {
+      // Chunk IDs into groups of 50 to respect SMM API URL constraints
+      const chunkSize = 50;
+      const resultMap = new Map<string, ProviderOrderSyncResult>();
+
+      for (let i = 0; i < allOrderIds.length; i += chunkSize) {
+        const chunk = allOrderIds.slice(i, i + chunkSize);
+        const res = await syncOrderWithProvider(chunk);
+        if (res.success && res.results) {
+          res.results.forEach((item) => resultMap.set(item.orderId, item));
+        }
+      }
+
+      let updatedCount = 0;
+      const details: string[] = [];
+
+      for (const r of targetReceipts) {
+        const ids = receiptToIds.get(r.id) || [];
+        if (ids.length === 0) continue;
+
+        const orderResults = ids.map((id) => resultMap.get(id)).filter(Boolean) as ProviderOrderSyncResult[];
+        const foundResults = orderResults.filter((item) => item.found);
+
+        if (foundResults.length > 0) {
+          const allCompleted = foundResults.every((item) => item.mappedStatus === "completado");
+          const anyCanceled = foundResults.some((item) => item.mappedStatus === "cancelado");
+          const anyInProcess = foundResults.some((item) => item.mappedStatus === "en_proceso");
+
+          let finalStatus: "completado" | "en_proceso" | "cancelado" = "en_proceso";
+          if (allCompleted) finalStatus = "completado";
+          else if (anyCanceled && !anyInProcess) finalStatus = "cancelado";
+          else finalStatus = "en_proceso";
+
+          const currentNormalized = getNormalizedStatus(r.status);
+          if (finalStatus !== currentNormalized) {
+            const nowFormatted = new Date().toLocaleString("es-CO", { dateStyle: "short", timeStyle: "short" });
+            const summary = foundResults.map((f) => `#${f.orderId} (${f.rawStatus})`).join(", ");
+            const noteEntry = `[${nowFormatted}] 🔄 Sincronizado automáticamente con MazSocialMarket: ${summary}. Estado actualizado de "${currentNormalized}" a "${finalStatus}".`;
+            const updatedNotes = r.internalNotes ? `${r.internalNotes}\n${noteEntry}` : noteEntry;
+
+            await updateReceipt(r.id, {
+              status: finalStatus,
+              internalNotes: updatedNotes,
+            });
+
+            updatedCount++;
+            details.push(`Comprobante #${r.consecutive || r.id} (${r.clientName}): ${summary} -> Cambiado de "${currentNormalized}" a "${finalStatus}"`);
+          }
+        }
+      }
+
+      return {
+        checkedCount: allOrderIds.length,
+        updatedCount,
+        details
+      };
+    } catch (err: any) {
+      console.error("Error al sincronizar historial con proveedor:", err);
+      throw err;
+    }
+  };
+
   const restoreDefaults = async () => {
     // Re-initialize default social networks
     const socialQuery = await getDocs(collection(db, "social_networks"));
@@ -1926,6 +2135,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         deleteReceipt,
         updateReceipt,
         markAllInProcessAsCompleted,
+        syncReceiptWithProvider,
+        syncAllInProcessOrdersWithProvider,
         updateClientTag,
         updateClient,
         reassignClientCode,

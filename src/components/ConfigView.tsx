@@ -33,7 +33,9 @@ import {
   CreditCard,
   Smartphone,
   Globe,
-  PackageOpen
+  PackageOpen,
+  Radio,
+  Hash
 } from "lucide-react";
 import {
   BusinessConfig,
@@ -42,8 +44,11 @@ import {
   ServiceCombo,
   ServiceComboItem,
   getServiceBaseCosts,
-  calculateServicePrices
+  calculateServicePrices,
+  ProviderApiConfig,
+  ProviderOrderSyncResult
 } from "../types";
+import { fetchProviderConfig, fetchProviderBalance, syncOrderWithProvider, fetchInstagramProfile } from "../services/providerApi";
 import { motion, AnimatePresence } from "motion/react";
 
 export const ConfigView: React.FC = () => {
@@ -70,13 +75,52 @@ export const ConfigView: React.FC = () => {
   const formatCOP = (val: number) => "$" + Math.round(val).toLocaleString("es-CO");
 
   // Tab systems or section selectors
-  const [activeTab, setActiveTab] = useState<"general" | "services" | "combos">("general");
+  const [activeTab, setActiveTab] = useState<"general" | "services" | "combos" | "provider_api">("general");
+
+  // Provider API Tab States
+  const [providerConfig, setProviderConfig] = useState<ProviderApiConfig | null>(null);
+  const [isLoadingConfig, setIsLoadingConfig] = useState(false);
+  const [providerBalance, setProviderBalance] = useState<{ balance?: string | number; currency?: string } | null>(null);
+  const [isLoadingBalance, setIsLoadingBalance] = useState(false);
+  const [balanceError, setBalanceError] = useState<string | null>(null);
+  const [testOrderId, setTestOrderId] = useState("");
+  const [isTestingOrder, setIsTestingOrder] = useState(false);
+  const [testOrderResults, setTestOrderResults] = useState<ProviderOrderSyncResult[]>([]);
+  const [testOrderError, setTestOrderError] = useState<string | null>(null);
+  const [testSimulated, setTestSimulated] = useState(false);
+
+  // Instagram Live Testing State (Option A)
+  const [igTestUser, setIgTestUser] = useState("");
+  const [isTestingIg, setIsTestingIg] = useState(false);
+  const [igTestResult, setIgTestResult] = useState<any>(null);
+  const [igTestError, setIgTestError] = useState<string | null>(null);
+
+  const handleTestInstagramProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!igTestUser.trim()) return;
+    setIsTestingIg(true);
+    setIgTestError(null);
+    setIgTestResult(null);
+    try {
+      const res = await fetchInstagramProfile(igTestUser);
+      if (res.success && res.profile) {
+        setIgTestResult(res.profile);
+      } else {
+        setIgTestError(res.error || "No se pudo consultar el conteo en vivo de este usuario.");
+      }
+    } catch (err: any) {
+      setIgTestError(err.message || "Error al conectar con el servidor.");
+    } finally {
+      setIsTestingIg(false);
+    }
+  };
 
   // General Settings state
   const [bName, setBName] = useState(businessConfig.businessName);
   const [bLogoUrl, setBLogoUrl] = useState(businessConfig.logoUrl);
   const [bWhatsapp, setBWhatsapp] = useState(businessConfig.whatsapp);
   const [bWarranty, setBWarranty] = useState(businessConfig.warrantyDays.toString());
+  const [bCustomTrackingUrl, setBCustomTrackingUrl] = useState(businessConfig.customTrackingUrl || "");
 
   // Message states
   const [generalSuccess, setGeneralSuccess] = useState(false);
@@ -130,8 +174,36 @@ export const ConfigView: React.FC = () => {
 
   // Filtered services for the currently selected social network
   const currentServices = useMemo(() => {
-    return services.filter((s) => s.socialNetworkId === selectedSocialId);
-  }, [services, selectedSocialId]);
+    const rawServices = services.filter((s) => s.socialNetworkId === selectedSocialId);
+    const isInstagram = selectedSocialId === "instagram" || socialNetworks.find((n) => n.id === selectedSocialId)?.name.toLowerCase().includes("instagram");
+    if (!isInstagram) return rawServices;
+
+    return rawServices.filter((s) => {
+      const name = (s.name || "").toLowerCase().trim();
+      const id = (s.id || "").toLowerCase();
+      if (
+        name.includes("optimiz") ||
+        name.includes("publicidad") ||
+        name.includes("personaliz") ||
+        name.includes("diseño") ||
+        name.includes("tarjeta") ||
+        name.includes("web")
+      ) {
+        return false;
+      }
+      return (
+        name.includes("seguidor") ||
+        id.includes("follower") ||
+        name.includes("like") ||
+        name.includes("me gusta") ||
+        name.includes("vista") ||
+        name.includes("view") ||
+        name.includes("reproducci") ||
+        name.includes("comentario") ||
+        id.includes("comment")
+      );
+    });
+  }, [services, selectedSocialId, socialNetworks]);
 
   // Ensure selectedSocialId defaults to first available social network
   useEffect(() => {
@@ -208,7 +280,8 @@ export const ConfigView: React.FC = () => {
         businessName: bName.trim(),
         logoUrl: bLogoUrl.trim(),
         whatsapp: bWhatsapp.trim(),
-        warrantyDays: wDays
+        warrantyDays: wDays,
+        customTrackingUrl: bCustomTrackingUrl.trim() || undefined
       });
       setGeneralSuccess(true);
       setTimeout(() => setGeneralSuccess(false), 3000);
@@ -454,6 +527,54 @@ export const ConfigView: React.FC = () => {
     }
   };
 
+  useEffect(() => {
+    if (activeTab === "provider_api") {
+      setIsLoadingConfig(true);
+      fetchProviderConfig().then((cfg) => {
+        setProviderConfig(cfg);
+        setIsLoadingConfig(false);
+      });
+    }
+  }, [activeTab]);
+
+  const handleCheckBalance = async () => {
+    setIsLoadingBalance(true);
+    setBalanceError(null);
+    try {
+      const res = await fetchProviderBalance();
+      if (res.success) {
+        setProviderBalance({ balance: res.balance, currency: res.currency });
+      } else {
+        setBalanceError(res.error || "No se pudo consultar el saldo.");
+      }
+    } catch (err: any) {
+      setBalanceError(err.message || "Error al conectar con la API.");
+    } finally {
+      setIsLoadingBalance(false);
+    }
+  };
+
+  const handleTestOrderSync = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!testOrderId.trim()) return;
+    setIsTestingOrder(true);
+    setTestOrderError(null);
+    setTestOrderResults([]);
+    try {
+      const res = await syncOrderWithProvider(testOrderId.trim(), true);
+      if (res.success) {
+        setTestOrderResults(res.results || []);
+        setTestSimulated(Boolean(res.simulated));
+      } else {
+        setTestOrderError(res.error || "No se pudo consultar la orden.");
+      }
+    } catch (err: any) {
+      setTestOrderError(err.message || "Error al consultar la orden.");
+    } finally {
+      setIsTestingOrder(false);
+    }
+  };
+
   return (
     <div className={`space-y-6 max-w-7xl mx-auto px-4 sm:px-6 py-2 transition-colors duration-200 ${isDarkMode ? "text-slate-100" : "text-gray-900"}`}>
       <div>
@@ -508,6 +629,19 @@ export const ConfigView: React.FC = () => {
         >
           <PackageOpen className="w-3.5 h-3.5" />
           <span>Combos y Paquetes</span>
+        </button>
+        <button
+          onClick={() => setActiveTab("provider_api")}
+          className={`pb-3 border-b-2 px-1 transition cursor-pointer flex items-center gap-1.5 ${
+            activeTab === "provider_api"
+              ? "border-indigo-500 text-indigo-400 font-bold"
+              : isDarkMode
+              ? "border-transparent text-slate-400 hover:text-slate-200"
+              : "border-transparent text-gray-400 hover:text-gray-600"
+          }`}
+        >
+          <RefreshCw className="w-3.5 h-3.5" />
+          <span>Sincronización API Proveedor</span>
         </button>
       </div>
 
@@ -608,6 +742,26 @@ export const ConfigView: React.FC = () => {
                   </div>
                   <p className={`text-[10px] mt-1 ${isDarkMode ? "text-slate-400" : "text-gray-400"}`}>
                     Este número se convertirá automáticamente en la garantía sugerida del comprobante.
+                  </p>
+                </div>
+
+                <div>
+                  <label className={`block text-[11px] font-semibold uppercase ${isDarkMode ? "text-slate-300" : "text-gray-600"}`}>
+                    Dominio / URL Pública de Rastreo para Clientes (Opcional)
+                  </label>
+                  <input
+                    type="url"
+                    value={bCustomTrackingUrl}
+                    onChange={(e) => setBCustomTrackingUrl(e.target.value)}
+                    placeholder="Dejar vacío para usar automáticamente el dominio público de producción"
+                    className={`mt-1 block w-full px-3.5 py-2 border rounded-lg text-sm transition focus:outline-hidden focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 ${
+                      isDarkMode
+                        ? "bg-slate-800 border-slate-700 text-white placeholder-slate-500"
+                        : "bg-white border-gray-200 text-gray-900"
+                    }`}
+                  />
+                  <p className={`text-[10px] mt-1 ${isDarkMode ? "text-slate-400" : "text-gray-400"}`}>
+                    Por defecto, el código QR y el link generado en la factura apuntan a la URL pública final sin marcos ni acceso a Google Studio. Si compras un dominio propio o quieres forzar una URL fija, colócala aquí.
                   </p>
                 </div>
 
@@ -1866,6 +2020,321 @@ export const ConfigView: React.FC = () => {
                 </div>
               )}
             </AnimatePresence>
+          </div>
+        )}
+
+        {/* Tab 4: Provider API Integration */}
+        {activeTab === "provider_api" && (
+          <div className="lg:col-span-12 space-y-6">
+            {/* Header info */}
+            <div className={`p-5 rounded-2xl border transition ${
+              isDarkMode ? "bg-slate-900/90 border-slate-800" : "bg-white border-gray-200"
+            }`}>
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div className="space-y-1">
+                  <h3 className={`text-base font-bold flex items-center gap-2 ${
+                    isDarkMode ? "text-white" : "text-gray-900"
+                  }`}>
+                    <RefreshCw className="w-5 h-5 text-indigo-500" />
+                    <span>Integración API de Proveedor (SMM Panel v2)</span>
+                  </h3>
+                  <p className={`text-xs ${isDarkMode ? "text-slate-400" : "text-gray-500"}`}>
+                    Sincronización en tiempo real del estado de pedidos (Completado, En proceso, Cancelado) directamente con tu proveedor mayorista.
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold border ${
+                    providerConfig?.configured
+                      ? isDarkMode ? "bg-emerald-950 text-emerald-300 border-emerald-800" : "bg-emerald-50 text-emerald-700 border-emerald-200"
+                      : isDarkMode ? "bg-amber-950 text-amber-300 border-amber-800" : "bg-amber-50 text-amber-800 border-amber-200"
+                  }`}>
+                    <span className={`w-2 h-2 rounded-full ${providerConfig?.configured ? "bg-emerald-500 animate-pulse" : "bg-amber-500"}`}></span>
+                    <span>{providerConfig?.configured ? "API Conectada" : "Sin Configurar en .env"}</span>
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              {/* Card 1: Estado y Conexión */}
+              <div className={`p-6 rounded-2xl border space-y-5 transition ${
+                isDarkMode ? "bg-slate-900/90 border-slate-800" : "bg-white border-gray-200"
+              }`}>
+                <h4 className={`text-xs font-bold uppercase tracking-wider flex items-center gap-2 border-b pb-3 ${
+                  isDarkMode ? "text-slate-400 border-slate-800" : "text-gray-400 border-gray-100"
+                }`}>
+                  <Settings className="w-4 h-4 text-indigo-500" />
+                  <span>Estado de la Conexión</span>
+                </h4>
+
+                <div className="space-y-3 text-xs">
+                  <div>
+                    <label className={`block font-semibold mb-1 ${isDarkMode ? "text-slate-400" : "text-gray-500"}`}>
+                      URL de la API del Proveedor:
+                    </label>
+                    <div className={`p-3 rounded-xl border font-mono text-xs ${
+                      isDarkMode ? "bg-slate-950 border-slate-800 text-slate-300" : "bg-slate-50 border-slate-200 text-slate-800"
+                    }`}>
+                      {providerConfig?.providerUrl || "No configurada (defina PROVIDER_API_URL en .env)"}
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className={`block font-semibold mb-1 ${isDarkMode ? "text-slate-400" : "text-gray-500"}`}>
+                      Clave de API (Protegida en Servidor):
+                    </label>
+                    <div className={`p-3 rounded-xl border font-mono text-xs flex items-center justify-between ${
+                      isDarkMode ? "bg-slate-950 border-slate-800 text-slate-300" : "bg-slate-50 border-slate-200 text-slate-800"
+                    }`}>
+                      <span>{providerConfig?.maskedKey || "No configurada (defina PROVIDER_API_KEY en .env)"}</span>
+                      <span className="text-[10px] text-gray-400 font-sans">Segura en servidor</span>
+                    </div>
+                  </div>
+
+                  {/* Saldo Proveedor */}
+                  <div className={`p-4 rounded-xl border space-y-3 ${
+                    isDarkMode ? "bg-slate-950/60 border-slate-800" : "bg-indigo-50/40 border-indigo-100"
+                  }`}>
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <DollarSign className="w-4 h-4 text-emerald-500" />
+                        <span className="font-bold text-xs">Saldo en Proveedor:</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleCheckBalance}
+                        disabled={isLoadingBalance}
+                        className="text-xs font-bold text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer flex items-center gap-1 disabled:opacity-50"
+                      >
+                        <RefreshCw className={`w-3 h-3 ${isLoadingBalance ? 'animate-spin' : ''}`} />
+                        <span>{isLoadingBalance ? "Consultando..." : "Consultar Saldo"}</span>
+                      </button>
+                    </div>
+
+                    {providerBalance && (
+                      <div className="text-xl font-bold font-mono text-emerald-600 dark:text-emerald-400">
+                        ${providerBalance.balance} {providerBalance.currency || "USD"}
+                      </div>
+                    )}
+
+                    {balanceError && (
+                      <div className="text-xs text-rose-500 font-medium">
+                        ⚠️ {balanceError}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Card 2: Probador de Órdenes en Tiempo Real */}
+              <div className={`p-6 rounded-2xl border space-y-4 transition ${
+                isDarkMode ? "bg-slate-900/90 border-slate-800" : "bg-white border-gray-200"
+              }`}>
+                <h4 className={`text-xs font-bold uppercase tracking-wider flex items-center gap-2 border-b pb-3 ${
+                  isDarkMode ? "text-slate-400 border-slate-800" : "text-gray-400 border-gray-100"
+                }`}>
+                  <Radio className="w-4 h-4 text-blue-500" />
+                  <span>Consultar Estado de una Orden (Test)</span>
+                </h4>
+
+                <form onSubmit={handleTestOrderSync} className="space-y-3">
+                  <div>
+                    <label className={`block text-xs font-semibold mb-1 ${isDarkMode ? "text-slate-300" : "text-gray-700"}`}>
+                      ID de la Orden en el Proveedor:
+                    </label>
+                    <div className="flex gap-2">
+                      <div className="relative flex-1">
+                        <Hash className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                        <input
+                          type="text"
+                          required
+                          value={testOrderId}
+                          onChange={(e) => setTestOrderId(e.target.value)}
+                          placeholder="Ej: 142095 o 142095, 142096"
+                          className={`w-full pl-9 pr-3 py-2 border rounded-xl text-xs font-mono transition ${
+                            isDarkMode ? "bg-slate-950 border-slate-700 text-white" : "bg-white border-gray-300 text-gray-900"
+                          }`}
+                        />
+                      </div>
+                      <button
+                        type="submit"
+                        disabled={isTestingOrder || !testOrderId.trim()}
+                        className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-bold text-xs rounded-xl shadow-xs transition flex items-center gap-1.5 cursor-pointer shrink-0"
+                      >
+                        <RefreshCw className={`w-3.5 h-3.5 ${isTestingOrder ? 'animate-spin' : ''}`} />
+                        <span>{isTestingOrder ? "Consultando..." : "Consultar"}</span>
+                      </button>
+                    </div>
+                  </div>
+                </form>
+
+                {testSimulated && (
+                  <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-xl text-[11px] text-amber-800 flex items-start gap-1.5">
+                    <span>ℹ️</span>
+                    <span>Modo de prueba simulado. Para datos reales de tu panel, añade las credenciales a <code>.env</code>.</span>
+                  </div>
+                )}
+
+                {testOrderError && (
+                  <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-700">
+                    ❌ {testOrderError}
+                  </div>
+                )}
+
+                {testOrderResults.length > 0 && (
+                  <div className="space-y-2 pt-2 border-t border-gray-100 dark:border-slate-800">
+                    <span className="text-[11px] font-bold uppercase text-gray-400 block">
+                      Resultado de la Consulta:
+                    </span>
+                    {testOrderResults.map((item) => (
+                      <div
+                        key={item.orderId}
+                        className={`p-3 rounded-xl border text-xs space-y-1.5 ${
+                          isDarkMode ? "bg-slate-950 border-slate-800" : "bg-slate-50 border-slate-200"
+                        }`}
+                      >
+                        <div className="flex items-center justify-between font-bold">
+                          <span className="font-mono">Orden #{item.orderId}</span>
+                          <span className={`px-2 py-0.5 rounded text-[10px] ${
+                            item.mappedStatus === "completado"
+                              ? "bg-emerald-100 text-emerald-800"
+                              : item.mappedStatus === "cancelado"
+                              ? "bg-rose-100 text-rose-800"
+                              : "bg-amber-100 text-amber-800"
+                          }`}>
+                            {item.rawStatus} ({item.mappedStatus})
+                          </span>
+                        </div>
+                        {item.error ? (
+                          <div className="text-rose-500 text-[11px]">{item.error}</div>
+                        ) : (
+                          <div className="grid grid-cols-3 gap-2 text-[10px] text-gray-500 font-mono pt-1 border-t border-slate-200/50">
+                            <div>Inicio: <strong>{item.startCount ?? "-"}</strong></div>
+                            <div>Restante: <strong>{item.remains ?? "0"}</strong></div>
+                            <div>Cobro: <strong>{item.charge ? `$${item.charge} ${item.currency || 'USD'}` : "-"}</strong></div>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Card 3: Verificación de Perfiles de Instagram en Vivo (Opción A) */}
+            <div className={`p-6 rounded-2xl border space-y-4 transition ${
+              isDarkMode ? "bg-slate-900/90 border-slate-800" : "bg-white border-gray-200"
+            }`}>
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b pb-3">
+                <h4 className="text-xs font-bold uppercase tracking-wider flex items-center gap-2 text-pink-500">
+                  <Instagram className="w-4 h-4" />
+                  <span>Verificación en Vivo de Instagram (Opción A)</span>
+                </h4>
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-300">
+                  ⚡ Conteo 100% Exacto
+                </span>
+              </div>
+
+              <p className={`text-xs ${isDarkMode ? "text-slate-300" : "text-gray-600"}`}>
+                Permite al sistema consultar directamente el perfil de Instagram del cliente en tiempo real para contar cuántos seguidores tiene en este instante. Si el proveedor tarda en actualizar sus estadísticas, ImpulsaNet mostrará los seguidores reales que ya están llegando a la cuenta.
+              </p>
+
+              <form onSubmit={handleTestInstagramProfile} className="space-y-3">
+                <div>
+                  <label className={`block text-xs font-semibold mb-1 ${isDarkMode ? "text-slate-300" : "text-gray-700"}`}>
+                    Probar consulta con cualquier usuario o enlace:
+                  </label>
+                  <div className="flex gap-2">
+                    <div className="relative flex-1">
+                      <Instagram className="w-4 h-4 text-pink-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                      <input
+                        type="text"
+                        required
+                        value={igTestUser}
+                        onChange={(e) => setIgTestUser(e.target.value)}
+                        placeholder="Ej. @cristiano o instagram.com/cristiano"
+                        className={`w-full pl-9 pr-3 py-2 border rounded-xl text-xs font-mono transition ${
+                          isDarkMode ? "bg-slate-950 border-slate-700 text-white" : "bg-white border-gray-300 text-gray-900"
+                        }`}
+                      />
+                    </div>
+                    <button
+                      type="submit"
+                      disabled={isTestingIg || !igTestUser.trim()}
+                      className="px-4 py-2 bg-gradient-to-r from-pink-500 to-purple-600 hover:from-pink-600 hover:to-purple-700 disabled:opacity-50 text-white font-bold text-xs rounded-xl shadow-xs transition flex items-center gap-1.5 cursor-pointer shrink-0"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${isTestingIg ? 'animate-spin' : ''}`} />
+                      <span>{isTestingIg ? "Consultando..." : "Consultar en Vivo"}</span>
+                    </button>
+                  </div>
+                </div>
+              </form>
+
+              {igTestError && (
+                <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-700">
+                  ❌ {igTestError}
+                </div>
+              )}
+
+              {igTestResult && (
+                <div className={`p-4 rounded-xl border text-xs space-y-2 ${
+                  isDarkMode ? "bg-slate-950 border-slate-800" : "bg-purple-50/50 border-purple-200"
+                }`}>
+                  <div className="flex items-center justify-between font-bold">
+                    <span className="font-mono text-purple-700 dark:text-purple-400">@{igTestResult.username}</span>
+                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-bold">
+                      {igTestResult.source === 'cache' ? 'Desde Memoria' : igTestResult.source === 'rapidapi' ? 'Vía RapidAPI' : 'En vivo'}
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-2 text-center pt-2 border-t border-purple-200/40">
+                    <div className="bg-white/80 dark:bg-slate-900 p-2 rounded-lg">
+                      <div className="text-[10px] text-gray-400 uppercase font-semibold">Seguidores</div>
+                      <div className="text-sm font-black font-mono text-purple-700 dark:text-purple-300">
+                        {igTestResult.followersCount?.toLocaleString('es-ES') ?? '—'}
+                      </div>
+                    </div>
+                    <div className="bg-white/80 dark:bg-slate-900 p-2 rounded-lg">
+                      <div className="text-[10px] text-gray-400 uppercase font-semibold">Siguiendo</div>
+                      <div className="text-sm font-black font-mono text-gray-800 dark:text-gray-200">
+                        {igTestResult.followingCount?.toLocaleString('es-ES') ?? '—'}
+                      </div>
+                    </div>
+                    <div className="bg-white/80 dark:bg-slate-900 p-2 rounded-lg">
+                      <div className="text-[10px] text-gray-400 uppercase font-semibold">Publicaciones</div>
+                      <div className="text-sm font-black font-mono text-gray-800 dark:text-gray-200">
+                        {igTestResult.mediaCount?.toLocaleString('es-ES') ?? '—'}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Guía de Configuración SMM Panel v2 */}
+            <div className={`p-6 rounded-2xl border space-y-3 transition ${
+              isDarkMode ? "bg-slate-900/90 border-slate-800" : "bg-white border-gray-200"
+            }`}>
+              <h4 className="text-xs font-bold uppercase tracking-wider text-indigo-500">
+                Guía Rápida de Configuración (Estándar SMM Panel API v2)
+              </h4>
+              <p className={`text-xs leading-relaxed ${isDarkMode ? "text-slate-300" : "text-gray-600"}`}>
+                ImpulsaNet soporta de forma nativa la especificación de API estándar utilizada por prácticamente todos los proveedores mayoristas de redes sociales (JustAnotherPanel, SMMKings, Peakerr, Secsers, BulkFollowers, etc.).
+              </p>
+              <div className={`p-4 rounded-xl border font-mono text-xs space-y-1.5 ${
+                isDarkMode ? "bg-slate-950 border-slate-800 text-emerald-400" : "bg-slate-900 border-slate-800 text-emerald-300"
+              }`}>
+                <div className="text-gray-400 font-sans text-[11px]"># Añade esto a tu archivo .env:</div>
+                <div>PROVIDER_API_URL="https://tu-proveedor.com/api/v2"</div>
+                <div>PROVIDER_API_KEY="tu_clave_api_secreta"</div>
+              </div>
+              <ul className={`text-xs space-y-1 list-disc list-inside ${isDarkMode ? "text-slate-400" : "text-gray-500"}`}>
+                <li><strong>Completado:</strong> Los pedidos marcados como <code>Completed</code> se sincronizan y actualizan la factura a "Completado".</li>
+                <li><strong>Cancelado / Reembolsado:</strong> Los pedidos marcados como <code>Canceled</code> se detectan para reordenar con un nuevo proveedor o abrir garantía.</li>
+                <li><strong>En proceso / Pendiente:</strong> Las órdenes en <code>In progress</code>, <code>Pending</code> o <code>Processing</code> actualizan el conteo inicial y los restantes en tiempo real.</li>
+              </ul>
+            </div>
           </div>
         )}
       </div>

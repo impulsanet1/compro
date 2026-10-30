@@ -8,9 +8,12 @@ export interface BusinessConfig {
   logoUrl: string;
   whatsapp: string;
   warrantyDays: number;
+  customTrackingUrl?: string;
   facebookSeeded?: boolean;
   costsUpdated2026?: boolean;
   costsUpdatedFinal2026?: boolean;
+  enableLiveInstagramTracking?: boolean;
+  rapidApiKey?: string;
 }
 
 export interface TrmState {
@@ -83,6 +86,13 @@ export interface ReceiptItem {
   orderIds?: string[]; // IDs multiples del pedido para soportar 2 o mas IDs
   serviceCode?: string; // Optional code for service classification (e.g. TDIG)
   customCategory?: string; // Optional category (e.g. Tarjeta Digital, Redes)
+  isResent?: boolean; // Indica si este servicio específico fue reenviado
+  previousOrderId?: string; // ID previo del proveedor antes de reenviar
+  resendDate?: string; // Fecha en la que se reenvió
+  resendNote?: string; // Aclaratoria o motivo visible de reenvío
+  targetAccount?: string; // Cuenta de Instagram o URL del cliente (ej. @tienda o https://instagram.com/tienda)
+  startCount?: number | null; // Conteo inicial verificado al momento del pedido
+  currentCount?: number | null; // Conteo más reciente verificado en vivo
 }
 
 export interface Receipt {
@@ -104,6 +114,9 @@ export interface Receipt {
   thankYouMessage: string;
   status?: "en_proceso" | "completado" | "garantia_en_proceso" | "cancelado" | "pendiente" | "finalizado" | "garantia_solicitada" | "garantia_finalizada";
   internalNotes?: string;
+  targetAccount?: string; // Cuenta o enlace principal del cliente para seguimiento
+  initialFollowers?: number | null; // Conteo de seguidores inicial del cliente
+  currentFollowers?: number | null; // Conteo actual detectado en vivo
 }
 
 export interface Client {
@@ -1055,4 +1068,69 @@ export function getOrderIdTypeLabel(code: string = "", isCustomItem?: boolean): 
   }
   return "ID Pedido";
 }
+
+export interface ProviderOrderSyncResult {
+  orderId: string;
+  found: boolean;
+  rawStatus: string; // e.g. "Completed", "In progress", "Canceled", "Partial"
+  mappedStatus: "en_proceso" | "completado" | "cancelado";
+  startCount?: string | number | null;
+  remains?: string | number | null;
+  charge?: string | null;
+  currency?: string | null;
+  error?: string;
+}
+
+export interface ProviderApiConfig {
+  configured: boolean;
+  providerUrl: string | null;
+  providerType: string;
+  maskedKey: string | null;
+  message?: string;
+}
+
+export interface InstagramProfileData {
+  username: string;
+  followersCount: number | null;
+  followingCount?: number | null;
+  mediaCount?: number | null;
+  fullName?: string | null;
+  biography?: string | null;
+  profilePicUrl?: string | null;
+  isPrivate?: boolean;
+  verified?: boolean;
+  source: 'rapidapi' | 'direct_web' | 'cache' | 'simulated' | 'not_found';
+  error?: string;
+  updatedAt?: string;
+}
+
+/**
+ * Cleanly extracts an Instagram username from an input string (@handle, URL, or plain name).
+ */
+export function extractInstagramUsername(input?: string | null): string | null {
+  if (!input) return null;
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+
+  // Match @username
+  if (trimmed.startsWith('@')) {
+    const clean = trimmed.slice(1).split(/[/?#\s]/)[0];
+    return clean || null;
+  }
+
+  // Match URL: instagram.com/username
+  const urlMatch = trimmed.match(/(?:https?:\/\/)?(?:www\.)?instagram\.com\/([a-zA-Z0-9._]+)/i);
+  if (urlMatch && urlMatch[1] && !['p', 'reel', 'stories', 'explore', 'direct'].includes(urlMatch[1])) {
+    return urlMatch[1];
+  }
+
+  // If plain username without spaces or special characters
+  if (/^[a-zA-Z0-9._]{2,30}$/.test(trimmed)) {
+    return trimmed;
+  }
+
+  return null;
+}
+
+
 

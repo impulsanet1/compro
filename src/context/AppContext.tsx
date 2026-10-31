@@ -855,26 +855,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Auth Operations
   const login = async (email: string, password: string) => {
-    try {
-      await signInWithEmailAndPassword(auth, email, password);
-    } catch (error: any) {
-      // If it's a first time launch, let's automatically check if there are no registered users in authentication,
-      // and if the credentials are the default ones, create the account. This is a robust fallback for sandboxed runtimes.
-      if (
-        (email === "admin@impulsanet.com" && password === "impulsa2026") ||
-        (email === "sergioruizv04@gmail.com" && password === "sergio11")
-      ) {
-        const { createUserWithEmailAndPassword } = await import("firebase/auth");
-        try {
-          await createUserWithEmailAndPassword(auth, email, password);
-          return;
-        } catch (createErr) {
-          // If creation fails (e.g. user already exists but password was changed), throw original error
-          throw error;
-        }
-      }
-      throw error;
+    const cleanEmail = (email || "").toLowerCase().trim();
+    if (cleanEmail !== AUTHORIZED_ADMIN_EMAIL.toLowerCase()) {
+      throw new Error(`Acceso denegado: solo el correo ${AUTHORIZED_ADMIN_EMAIL} está autorizado.`);
     }
+    await signInWithEmailAndPassword(auth, cleanEmail, password);
   };
 
   const loginWithGoogle = async () => {

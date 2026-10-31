@@ -6,7 +6,7 @@
 import React, { useState, useEffect } from "react";
 import { doc, getDoc } from "firebase/firestore";
 import { db } from "../firebase";
-import { Receipt, ReceiptItem, getItemOrderIds } from "../types";
+import { Receipt, ReceiptItem, getItemOrderIds, formatProviderStatus } from "../types";
 import {
   CheckCircle2,
   Clock,
@@ -20,6 +20,7 @@ import {
   MessageCircle,
   Search,
   Instagram,
+  Youtube,
   ExternalLink,
   Zap
 } from "lucide-react";
@@ -48,6 +49,117 @@ interface ItemTrackingMetrics {
     source: string;
     error?: string;
   } | null;
+}
+
+type SupportedNetwork = "instagram" | "facebook" | "tiktok" | "youtube" | "generic";
+
+function detectItemNetwork(
+  item: ReceiptItem,
+  receiptAccount?: string
+): SupportedNetwork {
+  const snId = (item.socialNetworkId || "").toLowerCase();
+  const snName = (item.socialNetworkName || "").toLowerCase();
+  const srvName = (item.serviceName || "").toLowerCase();
+  const target = (item.targetAccount || receiptAccount || "").toLowerCase();
+
+  // 1. Facebook checks
+  if (
+    target.includes("facebook.com") ||
+    target.includes("fb.com") ||
+    target.includes("fb.watch") ||
+    snId.includes("facebook") ||
+    snName.includes("facebook") ||
+    srvName.includes("facebook")
+  ) {
+    return "facebook";
+  }
+
+  // 2. TikTok checks
+  if (
+    target.includes("tiktok.com") ||
+    snId.includes("tiktok") ||
+    snName.includes("tiktok") ||
+    srvName.includes("tiktok")
+  ) {
+    return "tiktok";
+  }
+
+  // 3. YouTube checks
+  if (
+    target.includes("youtube.com") ||
+    target.includes("youtu.be") ||
+    snId.includes("youtube") ||
+    snName.includes("youtube") ||
+    srvName.includes("youtube")
+  ) {
+    return "youtube";
+  }
+
+  // 4. Instagram checks
+  if (
+    target.includes("instagram.com") ||
+    snId.includes("instagram") ||
+    snName.includes("instagram") ||
+    srvName.includes("instagram") ||
+    srvName.includes("insta")
+  ) {
+    return "instagram";
+  }
+
+  if (snId === "instagram") return "instagram";
+  if (snId === "facebook") return "facebook";
+  if (snId === "tiktok") return "tiktok";
+  if (snId === "youtube") return "youtube";
+
+  return "generic";
+}
+
+function resolveItemUrl(
+  network: SupportedNetwork,
+  targetAccount?: string
+): string | null {
+  if (!targetAccount) return null;
+  const trimmed = targetAccount.trim();
+  if (!trimmed) return null;
+
+  // Direct valid URLs (do not modify if already a valid URL)
+  if (/^https?:\/\//i.test(trimmed)) {
+    return trimmed;
+  }
+  if (/^www\./i.test(trimmed)) {
+    return `https://${trimmed}`;
+  }
+
+  const clean = trimmed.replace(/^@+/, "").split(/[/?#\s]/)[0];
+  if (!clean) return null;
+
+  switch (network) {
+    case "facebook":
+      return `https://facebook.com/${clean}`;
+    case "tiktok":
+      return `https://tiktok.com/@${clean}`;
+    case "instagram":
+      return `https://instagram.com/${clean}`;
+    case "youtube":
+      return `https://youtube.com/@${clean}`;
+    default:
+      return null;
+  }
+}
+
+function formatAccountDisplay(targetAccount?: string): string {
+  if (!targetAccount) return "";
+  const trimmed = targetAccount.trim();
+  if (/^https?:\/\//i.test(trimmed)) {
+    try {
+      const u = new URL(trimmed);
+      const cleanPath = u.pathname.length > 22 ? u.pathname.slice(0, 22) + "..." : u.pathname;
+      return `${u.hostname}${cleanPath}`;
+    } catch {
+      return trimmed.length > 30 ? trimmed.slice(0, 30) + "..." : trimmed;
+    }
+  }
+  return trimmed.startsWith("@") ? trimmed : `@${trimmed}`;
 }
 
 export const PublicTrackingView: React.FC<PublicTrackingViewProps> = ({
@@ -137,6 +249,9 @@ export const PublicTrackingView: React.FC<PublicTrackingViewProps> = ({
           items: services.map(item => ({
             orderId: item.orderId?.trim(),
             quantity: item.quantity,
+            socialNetworkId: item.socialNetworkId,
+            socialNetworkName: item.socialNetworkName,
+            serviceName: item.serviceName,
             targetAccount: item.targetAccount || receiptData.targetAccount,
             startCount: item.startCount,
             description: `${item.socialNetworkName || ''} - ${item.serviceName || ''}`
@@ -212,7 +327,7 @@ export const PublicTrackingView: React.FC<PublicTrackingViewProps> = ({
     return (
       <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-blue-50 text-blue-800 border border-blue-300">
         <Clock className="w-4 h-4 text-blue-600 animate-spin" />
-        En Proceso de Entrega
+        En Curso
       </span>
     );
   };
@@ -386,7 +501,7 @@ export const PublicTrackingView: React.FC<PublicTrackingViewProps> = ({
                             </span>
                           ) : (
                             <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold bg-blue-50 text-blue-800 border border-blue-300">
-                              🔵 En proceso
+                              🔵 {metrics?.status ? formatProviderStatus(metrics.status) : (metrics?.rawStatus ? formatProviderStatus(metrics.rawStatus) : "En curso")}
                             </span>
                           )}
                         </div>
@@ -440,7 +555,9 @@ export const PublicTrackingView: React.FC<PublicTrackingViewProps> = ({
                             Conteo Inicial:
                           </span>
                           <span className="font-mono font-black text-sm text-gray-800 mt-0.5 block">
-                            {metrics?.startCount !== null && metrics?.startCount !== undefined
+                            {item.startCount !== null && item.startCount !== undefined
+                              ? Number(item.startCount).toLocaleString("es-ES")
+                              : metrics?.startCount !== null && metrics?.startCount !== undefined
                               ? Number(metrics.startCount).toLocaleString("es-ES")
                               : "—"}
                           </span>
@@ -487,52 +604,119 @@ export const PublicTrackingView: React.FC<PublicTrackingViewProps> = ({
                         </div>
                       </div>
 
-                      {/* Live Instagram Profile Verification Badge & Action (Option A) */}
+                      {/* Live Network Verification & Conteo en Vivo Card (Adapts to Facebook, TikTok, Instagram, YouTube, etc.) */}
                       {(() => {
-                        const targetUser = metrics?.liveInstagram?.username || item.targetAccount || receipt.targetAccount;
-                        const cleanUser = targetUser ? targetUser.replace(/^@/, '').trim() : null;
-                        const hasLiveIg = Boolean(metrics?.liveInstagram?.verified && metrics.liveInstagram.currentFollowers !== null);
+                        const network = detectItemNetwork(item, receipt.targetAccount);
+                        const rawTarget = item.targetAccount || receipt.targetAccount;
+                        const targetUrl = resolveItemUrl(network, rawTarget);
+                        const displayTarget = formatAccountDisplay(rawTarget);
+                        const hasLiveIg = Boolean(network === "instagram" && metrics?.liveInstagram?.verified && metrics.liveInstagram.currentFollowers !== null);
 
-                        if (!cleanUser && !hasLiveIg) return null;
+                        if (!rawTarget && !metrics?.startCount && itemStatus !== "en_proceso") {
+                          return null;
+                        }
+
+                        // Network-specific configuration
+                        let config = {
+                          title: "Conteo y Monitoreo en Vivo",
+                          platformName: item.socialNetworkName || "Red Social",
+                          badgeBg: "bg-indigo-600 text-white",
+                          cardBg: "bg-gradient-to-r from-slate-50 via-indigo-50/40 to-slate-50 border-indigo-200/70",
+                          btnClass: "text-indigo-700 bg-white hover:bg-indigo-50 border-indigo-200",
+                          btnText: "Ver Enlace",
+                          icon: <Zap className="w-4 h-4" />
+                        };
+
+                        if (network === "facebook") {
+                          config = {
+                            title: "Conteo y Monitoreo de Facebook",
+                            platformName: "Facebook",
+                            badgeBg: "bg-blue-600 text-white",
+                            cardBg: "bg-gradient-to-r from-blue-50/90 via-sky-50/50 to-indigo-50/40 border-blue-200/90",
+                            btnClass: "text-blue-700 bg-white hover:bg-blue-50 border-blue-200",
+                            btnText: "Ver en Facebook",
+                            icon: (
+                              <svg className="w-4 h-4 fill-current" viewBox="0 0 24 24">
+                                <path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/>
+                              </svg>
+                            )
+                          };
+                        } else if (network === "tiktok") {
+                          config = {
+                            title: "Conteo y Monitoreo de TikTok",
+                            platformName: "TikTok",
+                            badgeBg: "bg-slate-900 text-white",
+                            cardBg: "bg-gradient-to-r from-slate-100 via-zinc-50 to-cyan-50/40 border-slate-300/80",
+                            btnClass: "text-slate-900 bg-white hover:bg-slate-100 border-slate-300",
+                            btnText: "Ver en TikTok",
+                            icon: (
+                              <svg className="w-4 h-4 fill-current" viewBox="0 0 24 24">
+                                <path d="M12.525.02c1.31-.02 2.61-.01 3.91-.02.08 1.53.63 3.09 1.75 4.17 1.12 1.11 2.7 1.62 4.24 1.79v4.03c-1.44-.05-2.89-.35-4.2-.97-.57-.26-1.1-.59-1.62-1.01-.01 2.92.01 5.84-.02 8.75-.08 1.4-.54 2.79-1.35 3.94-1.31 1.92-3.58 3.17-5.91 3.21-1.43.08-2.86-.31-4.08-1.03-2.02-1.19-3.44-3.37-3.65-5.71-.02-.5-.03-1-.01-1.49.18-1.9 1.12-3.72 2.58-4.96 1.66-1.44 3.98-2.13 6.15-1.72.02 1.48-.04 2.96-.04 4.44-.99-.32-2.15-.23-3.02.37-.63.41-1.11 1.04-1.36 1.75-.21.51-.24 1.07-.14 1.61.24 1.64 1.82 3.02 3.5 2.87 1.12-.01 2.19-.66 2.77-1.61.19-.33.4-.67.41-1.06.1-1.79.06-3.57.07-5.36.01-4.03-.01-8.05.02-12.07z"/>
+                              </svg>
+                            )
+                          };
+                        } else if (network === "instagram") {
+                          config = {
+                            title: "Conteo en Vivo de Instagram",
+                            platformName: "Instagram",
+                            badgeBg: "bg-gradient-to-tr from-amber-500 via-rose-500 to-purple-600 text-white",
+                            cardBg: "bg-gradient-to-r from-purple-50 via-pink-50/60 to-indigo-50 border-purple-200/80",
+                            btnClass: "text-purple-700 bg-white hover:bg-purple-100/80 border-purple-200",
+                            btnText: "Ver en Instagram",
+                            icon: <Instagram className="w-4 h-4" />
+                          };
+                        } else if (network === "youtube") {
+                          config = {
+                            title: "Conteo y Monitoreo de YouTube",
+                            platformName: "YouTube",
+                            badgeBg: "bg-red-600 text-white",
+                            cardBg: "bg-gradient-to-r from-red-50 via-rose-50/50 to-amber-50/40 border-red-200/80",
+                            btnClass: "text-red-700 bg-white hover:bg-red-50 border-red-200",
+                            btnText: "Ver en YouTube",
+                            icon: <Youtube className="w-4 h-4" />
+                          };
+                        }
 
                         return (
-                          <div className="mt-4 p-3.5 rounded-xl bg-gradient-to-r from-purple-50 via-pink-50/60 to-indigo-50 border border-purple-200/80 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-2xs">
+                          <div className={`mt-4 p-3.5 rounded-xl border flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-2xs ${config.cardBg}`}>
                             <div className="flex items-center gap-2.5 min-w-0">
-                              <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-amber-500 via-rose-500 to-purple-600 flex items-center justify-center text-white shrink-0 shadow-xs">
-                                <Instagram className="w-4 h-4" />
+                              <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 shadow-xs ${config.badgeBg}`}>
+                                {config.icon}
                               </div>
                               <div className="min-w-0">
                                 <div className="text-xs font-bold text-gray-900 flex items-center gap-1.5 flex-wrap">
-                                  <span>Conteo en Vivo de Instagram</span>
-                                  {hasLiveIg && (
-                                    <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-300">
-                                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
-                                      Sincronizado
-                                    </span>
-                                  )}
+                                  <span>{config.title}</span>
+                                  <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-300">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                                    {hasLiveIg ? "Sincronizado en Vivo" : "Monitoreo Activo"}
+                                  </span>
                                 </div>
                                 <div className="text-[11px] text-gray-600 truncate">
                                   {hasLiveIg ? (
                                     <span>
-                                      Perfil <strong className="text-purple-800">@{cleanUser}</strong>: <strong className="font-mono text-purple-900 font-bold">{metrics?.liveInstagram?.currentFollowers?.toLocaleString('es-ES')}</strong> seguidores detectados en vivo.
+                                      Perfil <strong className="text-purple-800">{displayTarget}</strong>: <strong className="font-mono text-purple-900 font-bold">{metrics?.liveInstagram?.currentFollowers?.toLocaleString('es-ES')}</strong> seguidores detectados en vivo.
+                                    </span>
+                                  ) : rawTarget ? (
+                                    <span>
+                                      Destino: <strong className="text-gray-900 font-medium">{displayTarget}</strong> ({config.platformName})
                                     </span>
                                   ) : (
                                     <span>
-                                      Verificando perfil <strong className="text-purple-800">@{cleanUser}</strong> directamente en Instagram.
+                                      Monitoreo de entrega en tiempo real para {config.platformName}.
                                     </span>
                                   )}
                                 </div>
                               </div>
                             </div>
 
-                            {cleanUser && (
+                            {targetUrl && (
                               <a
-                                href={`https://instagram.com/${cleanUser}`}
+                                href={targetUrl}
                                 target="_blank"
                                 rel="noopener noreferrer"
-                                className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold text-purple-700 bg-white hover:bg-purple-100/80 border border-purple-200 transition shadow-2xs active:scale-95 cursor-pointer shrink-0"
+                                className={`w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition shadow-2xs active:scale-95 cursor-pointer shrink-0 ${config.btnClass}`}
                               >
-                                <span>Ver en Instagram</span>
+                                <span>{config.btnText}</span>
                                 <ExternalLink className="w-3.5 h-3.5" />
                               </a>
                             )}

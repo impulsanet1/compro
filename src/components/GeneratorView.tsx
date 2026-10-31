@@ -53,7 +53,8 @@ import {
   getPhoneDigits,
   isTarjetaDigitalService,
   extractInstagramUsername,
-  InstagramProfileData
+  InstagramProfileData,
+  formatProviderStatus
 } from "../types";
 import { motion } from "motion/react";
 import { safeCopyToClipboard } from "../utils";
@@ -1351,7 +1352,7 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
                       : "bg-white border-gray-200 text-gray-800 focus:border-indigo-500"
                   }`}
                 >
-                  <option value="en_proceso">🔵 En proceso</option>
+                  <option value="en_proceso">🔵 En curso</option>
                   <option value="completado">✅ Completado</option>
                   <option value="garantia_en_proceso">🟡 Garantía en proceso</option>
                   <option value="cancelado">🔴 Cancelado</option>
@@ -2302,10 +2303,10 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
                           : "ℹ️"}
                       </span>
                       <span className="truncate">
-                        <strong>MazSocialMarket:</strong> {providerOrderFeedback.rawStatus}
+                        <strong>MazSocialMarket:</strong> {formatProviderStatus(providerOrderFeedback.rawStatus)}
                         {providerOrderFeedback.found && (
                           <span className="ml-1 opacity-90 font-semibold">
-                            (Estado fijado a {providerOrderFeedback.mappedStatus === "completado" ? "Completado" : providerOrderFeedback.mappedStatus === "cancelado" ? "Cancelado" : "En proceso"})
+                            (Estado fijado a {providerOrderFeedback.mappedStatus === "completado" ? "Completado" : providerOrderFeedback.mappedStatus === "cancelado" ? "Cancelado" : "En curso"})
                           </span>
                         )}
                       </span>

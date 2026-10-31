@@ -1298,7 +1298,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onViewChange, onSe
           <div className="space-y-2 text-xs">
             <div className="flex justify-between items-center py-1 border-b border-slate-800/50">
               <span className={`flex items-center gap-1.5 ${isDarkMode ? "text-slate-300" : "text-gray-700"}`}>
-                <span>🟢</span> En Proceso
+                <span>🔵</span> En Curso
               </span>
               <span className="font-mono font-bold">{periodStats.periodEnProceso}</span>
             </div>

@@ -154,11 +154,42 @@ export function getClientCode(client: Partial<Client>, fallbackIndex: number = 0
 export function getNormalizedStatus(status?: string): "en_proceso" | "completado" | "garantia_en_proceso" | "cancelado" {
   if (!status) return "en_proceso";
   const s = status.trim().toLowerCase();
-  if (s === "en_proceso" || s === "pendiente") return "en_proceso";
+  if (s === "en_proceso" || s === "en curso" || s === "in progress" || s === "processing" || s === "pendiente") return "en_proceso";
   if (s === "completado" || s === "finalizado" || s === "garantia_finalizada") return "completado";
   if (s === "garantia_en_proceso" || s === "garantia_solicitada") return "garantia_en_proceso";
   if (s === "cancelado") return "cancelado";
   return "en_proceso"; // default fallback
+}
+
+export function formatProviderStatus(rawStatus?: string): string {
+  if (!rawStatus) return "En curso";
+  const s = rawStatus.toLowerCase().trim();
+  if (
+    s === "in progress" ||
+    s === "in_progress" ||
+    s === "inprogress" ||
+    s === "en proceso" ||
+    s === "en curso" ||
+    s === "en_proceso"
+  ) {
+    return "En curso";
+  }
+  if (s === "processing" || s === "procesando") {
+    return "Procesando";
+  }
+  if (s === "pending" || s === "pendiente") {
+    return "Pendiente";
+  }
+  if (s.includes("complet") || s === "completed" || s === "completado") {
+    return "Completado";
+  }
+  if (s === "partial" || s === "parcial") {
+    return "Parcial";
+  }
+  if (s.includes("cancel") || s === "canceled" || s === "cancelled" || s === "cancelado") {
+    return "Cancelado";
+  }
+  return rawStatus.charAt(0).toUpperCase() + rawStatus.slice(1);
 }
 
 /**

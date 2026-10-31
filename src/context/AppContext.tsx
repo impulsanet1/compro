@@ -113,6 +113,8 @@ interface AppContextType {
   restoreDefaults: () => Promise<void>;
 }
 
+export const AUTHORIZED_ADMIN_EMAIL = "estebanruiz.12vrgassergio@gmail.com";
+
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
 function cleanForFirestore<T>(data: T): T {
@@ -227,9 +229,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     fetchTRM();
   }, []);
 
-  // 1. Listen to Auth State
+  // 1. Listen to Auth State with strict single-admin authorization
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+      if (currentUser) {
+        const userEmail = (currentUser.email || "").toLowerCase().trim();
+        if (userEmail !== AUTHORIZED_ADMIN_EMAIL.toLowerCase()) {
+          console.warn("Unauthorized Google account attempted access:", currentUser.email);
+          await signOut(auth);
+          setUser(null);
+          setLoadingAuth(false);
+          return;
+        }
+      }
       setUser(currentUser);
       setLoadingAuth(false);
     });
@@ -867,7 +879,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const loginWithGoogle = async () => {
     const provider = new GoogleAuthProvider();
-    await signInWithPopup(auth, provider);
+    provider.setCustomParameters({ prompt: "select_account" });
+    const result = await signInWithPopup(auth, provider);
+    const userEmail = (result.user.email || "").toLowerCase().trim();
+    if (userEmail !== AUTHORIZED_ADMIN_EMAIL.toLowerCase()) {
+      await signOut(auth);
+      setUser(null);
+      throw new Error(
+        `Acceso no autorizado: la cuenta ${result.user.email} no tiene permisos de administrador. Solo tiene acceso ${AUTHORIZED_ADMIN_EMAIL}.`
+      );
+    }
+    setUser(result.user);
   };
 
   const logout = async () => {

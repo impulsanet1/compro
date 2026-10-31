@@ -5,7 +5,7 @@
 
 import React, { useRef, useState, useEffect, useMemo } from "react";
 import { X, ShieldCheck, Edit3, Save, Trash2, ShieldAlert, Calendar, ChevronDown, ChevronUp, MessageSquare, Send, PhoneCall, ExternalLink, Bell, Plus, DollarSign, Layers, Check, RotateCcw, AlertCircle, Clock, Sparkles, ArrowRight, Hash, RefreshCw, Radio, QrCode, Instagram } from "lucide-react";
-import { Receipt, ReceiptItem, getNormalizedStatus, getItemOrderIds, getItemOrderIdDisplay, getOrderIdTypeLabel, isCustomServiceCode, resolveReceiptWarranty, ProviderOrderSyncResult } from "../types";
+import { Receipt, ReceiptItem, getNormalizedStatus, getItemOrderIds, getItemOrderIdDisplay, getOrderIdTypeLabel, isCustomServiceCode, resolveReceiptWarranty, ProviderOrderSyncResult, formatProviderStatus } from "../types";
 import { motion, AnimatePresence } from "motion/react";
 import { useApp } from "../context/AppContext";
 import { syncOrderWithProvider } from "../services/providerApi";
@@ -1653,7 +1653,7 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                       onChange={(e) => setEditedStatus(e.target.value as any)}
                       className="mt-1 block w-full px-3.5 py-1.5 border border-gray-200 rounded-lg text-sm bg-white focus:outline-hidden focus:ring-2 focus:ring-indigo-500/10 focus:border-indigo-500 transition font-semibold text-gray-900 cursor-pointer"
                     >
-                      <option value="en_proceso">🔵 En proceso</option>
+                      <option value="en_proceso">🔵 En curso</option>
                       <option value="completado">✅ Completado</option>
                       <option value="garantia_en_proceso">🟡 Garantía en proceso</option>
                       <option value="cancelado">🔴 Cancelado</option>
@@ -1739,7 +1739,7 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                           </span>
                         ) : (
                           <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold bg-blue-50 text-blue-800 border border-blue-300">
-                            🔵 En proceso
+                            🔵 {autoSyncStatus?.rawStatus ? formatProviderStatus(autoSyncStatus.rawStatus) : "En curso"}
                           </span>
                         )}
                       </div>
@@ -1747,7 +1747,7 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                       {autoSyncStatus && !autoSyncStatus.loading && autoSyncStatus.rawStatus && (
                         <div className="text-[10px] text-slate-600 bg-white/90 border border-slate-200/80 rounded px-2 py-0.5 flex items-center gap-1 font-mono">
                           <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0"></span>
-                          <span className="truncate">Proveedor: <strong>{autoSyncStatus.rawStatus}</strong></span>
+                          <span className="truncate">Proveedor: <strong>{formatProviderStatus(autoSyncStatus.rawStatus)}</strong></span>
                           {autoSyncStatus.updated && (
                             <span className="text-[9px] font-sans font-bold text-emerald-700 bg-emerald-50 px-1 rounded ml-auto">
                               ¡Actualizado!

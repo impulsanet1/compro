@@ -44,6 +44,37 @@ function mapSmmStatusToAppStatus(rawStatus?: string): 'en_proceso' | 'completado
   return 'en_proceso';
 }
 
+function formatProviderStatusLabel(rawStatus?: string): string {
+  if (!rawStatus) return 'En curso';
+  const s = rawStatus.toLowerCase().trim();
+  if (
+    s === 'in progress' ||
+    s === 'in_progress' ||
+    s === 'inprogress' ||
+    s === 'en proceso' ||
+    s === 'en curso' ||
+    s === 'en_proceso'
+  ) {
+    return 'En curso';
+  }
+  if (s === 'processing' || s === 'procesando') {
+    return 'Procesando';
+  }
+  if (s === 'pending' || s === 'pendiente') {
+    return 'Pendiente';
+  }
+  if (s.includes('complet') || s === 'completed' || s === 'completado') {
+    return 'Completado';
+  }
+  if (s === 'partial' || s === 'parcial') {
+    return 'Parcial';
+  }
+  if (s.includes('cancel') || s === 'canceled' || s === 'cancelled' || s === 'cancelado') {
+    return 'Cancelado';
+  }
+  return rawStatus.charAt(0).toUpperCase() + rawStatus.slice(1);
+}
+
 interface InstagramProfileCacheItem {
   data: {
     username: string;
@@ -480,7 +511,65 @@ async function startServer() {
     }
   });
 
-  // 5. Safe Customer Tracking Endpoint (Public, with live Instagram verification)
+  function isItemForInstagram(item: any): boolean {
+    if (!item) return false;
+    const snId = String(item.socialNetworkId || '').toLowerCase();
+    const snName = String(item.socialNetworkName || '').toLowerCase();
+    const srvName = String(item.serviceName || '').toLowerCase();
+    const desc = String(item.description || '').toLowerCase();
+    const target = String(item.targetAccount || '').toLowerCase();
+
+    // Check for explicit non-Instagram platforms first
+    if (
+      target.includes('facebook.com') ||
+      target.includes('fb.com') ||
+      target.includes('fb.watch') ||
+      snId.includes('facebook') ||
+      snName.includes('facebook') ||
+      srvName.includes('facebook') ||
+      desc.includes('facebook')
+    ) {
+      return false;
+    }
+    if (
+      target.includes('tiktok.com') ||
+      snId.includes('tiktok') ||
+      snName.includes('tiktok') ||
+      srvName.includes('tiktok') ||
+      desc.includes('tiktok')
+    ) {
+      return false;
+    }
+    if (
+      target.includes('youtube.com') ||
+      target.includes('youtu.be') ||
+      snId.includes('youtube') ||
+      snName.includes('youtube') ||
+      srvName.includes('youtube') ||
+      desc.includes('youtube')
+    ) {
+      return false;
+    }
+
+    // Check for Instagram indicators
+    if (
+      target.includes('instagram.com') ||
+      snId.includes('instagram') ||
+      snName.includes('instagram') ||
+      srvName.includes('instagram') ||
+      desc.includes('instagram') ||
+      desc.includes('insta')
+    ) {
+      return true;
+    }
+
+    // If no explicit network is indicated and target is an instagram URL
+    if (target.includes('instagram.com')) return true;
+
+    return false;
+  }
+
+  // 5. Safe Customer Tracking Endpoint (Public, with live network verification)
   app.post('/api/tracking/customer-status', async (req: Request, res: Response) => {
     try {
       const { orderIds, items, receiptTargetAccount, rapidApiKey } = req.body;
@@ -496,10 +585,10 @@ async function startServer() {
         });
       }
 
-      // Check if there is an Instagram target account to check live
+      // Check if there is an Instagram target account to check live ONLY for Instagram items
       let igProfilePromise: Promise<any> | null = null;
-      const sampleItem = Array.isArray(items) ? items.find(i => i.targetAccount) : null;
-      const targetIg = sampleItem?.targetAccount || receiptTargetAccount;
+      const igItem = Array.isArray(items) ? items.find(i => isItemForInstagram(i) && i.targetAccount) : null;
+      const targetIg = igItem?.targetAccount || (items?.length === 1 && isItemForInstagram(items[0]) ? receiptTargetAccount : null);
       if (targetIg && typeof targetIg === 'string') {
         const u = extractInstagramUsername(targetIg);
         if (u) {
@@ -518,10 +607,12 @@ async function startServer() {
         const mockTracking = targetIds.map(id => {
           const itemInfo = Array.isArray(items) ? items.find(i => String(i.orderId) === String(id)) : null;
           const qty = itemInfo?.quantity ? Number(itemInfo.quantity) : 1000;
+          const isIg = isItemForInstagram(itemInfo);
+
           return {
             orderId: id,
             found: true,
-            status: 'En proceso',
+            status: 'En curso',
             rawStatus: 'In progress',
             mappedStatus: 'en_proceso' as const,
             startCount: itemInfo?.startCount ?? 1200,
@@ -529,7 +620,7 @@ async function startServer() {
             progressPercent: 85,
             delivered: Math.round(qty * 0.85),
             estimatedDelivery: 'Aprox. 1 a 4 horas',
-            liveInstagram: liveIgResult?.followersCount !== null && liveIgResult?.followersCount !== undefined ? {
+            liveInstagram: isIg && liveIgResult?.followersCount !== null && liveIgResult?.followersCount !== undefined ? {
               username: liveIgResult.username,
               currentFollowers: liveIgResult.followersCount,
               verified: true,
@@ -599,9 +690,10 @@ async function startServer() {
           }
         }
 
-        // --- OPTION A: Live Instagram Profile Verification & Reconciliation ---
+        // Live Instagram Profile Verification & Reconciliation (STRICTLY for Instagram items)
         let igDetails = null;
-        if (liveIgResult && liveIgResult.followersCount !== null && liveIgResult.followersCount !== undefined) {
+        const isIg = isItemForInstagram(itemInfo);
+        if (isIg && liveIgResult && liveIgResult.followersCount !== null && liveIgResult.followersCount !== undefined) {
           const currentIg = Number(liveIgResult.followersCount);
           const initialFollowers = start ?? (currentIg > qty ? currentIg - Math.round(qty * 0.2) : currentIg);
           const deliveredFromIg = Math.max(0, currentIg - initialFollowers);
@@ -616,7 +708,7 @@ async function startServer() {
             error: liveIgResult.error
           };
 
-          // If Instagram shows more delivery than the lagging provider (the exact user issue):
+          // If Instagram shows more delivery than the lagging provider:
           if (deliveredFromIg > (delivered ?? 0)) {
             delivered = Math.min(qty, deliveredFromIg);
             remains = Math.max(0, qty - delivered);
@@ -643,7 +735,7 @@ async function startServer() {
         trackingList.push({
           orderId: id,
           found: !data?.error,
-          status: mapped === 'completado' ? 'Completado' : mapped === 'cancelado' ? 'Cancelado' : 'En proceso',
+          status: mapped === 'completado' ? 'Completado' : mapped === 'cancelado' ? 'Cancelado' : formatProviderStatusLabel(raw),
           rawStatus: raw,
           mappedStatus: mapped,
           startCount: start,
@@ -691,9 +783,10 @@ async function startServer() {
             }
           }
 
-          // --- OPTION A: Live Instagram Profile Verification & Reconciliation ---
+          // Live Instagram Profile Verification & Reconciliation (STRICTLY for Instagram items)
           let igDetails = null;
-          if (liveIgResult && liveIgResult.followersCount !== null && liveIgResult.followersCount !== undefined) {
+          const isIg = isItemForInstagram(itemInfo);
+          if (isIg && liveIgResult && liveIgResult.followersCount !== null && liveIgResult.followersCount !== undefined) {
             const currentIg = Number(liveIgResult.followersCount);
             const initialFollowers = start ?? (currentIg > qty ? currentIg - Math.round(qty * 0.2) : currentIg);
             const deliveredFromIg = Math.max(0, currentIg - initialFollowers);
@@ -734,7 +827,7 @@ async function startServer() {
           trackingList.push({
             orderId: id,
             found: Boolean(orderInfo && !orderInfo.error),
-            status: mapped === 'completado' ? 'Completado' : mapped === 'cancelado' ? 'Cancelado' : 'En proceso',
+            status: mapped === 'completado' ? 'Completado' : mapped === 'cancelado' ? 'Cancelado' : formatProviderStatusLabel(raw),
             rawStatus: raw,
             mappedStatus: mapped,
             startCount: start,

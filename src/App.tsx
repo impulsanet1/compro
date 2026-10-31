@@ -30,7 +30,8 @@ import {
   Sun,
   Moon,
   Calculator,
-  RefreshCw
+  RefreshCw,
+  LogOut
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
@@ -38,7 +39,7 @@ const Navigation: React.FC<{ activeTab: string; setActiveTab: (tab: string) => v
   activeTab,
   setActiveTab
 }) => {
-  const { supplierWarranties, isDarkMode, toggleDarkMode } = useApp();
+  const { supplierWarranties, isDarkMode, toggleDarkMode, user, logout } = useApp();
   const { isOnline } = useOnlineStatus();
 
   // Count overdue or pending warranties for badge
@@ -110,26 +111,48 @@ const Navigation: React.FC<{ activeTab: string; setActiveTab: (tab: string) => v
             })}
           </nav>
 
-          {/* Controls: Theme Toggle */}
+          {/* Controls: Theme Toggle & Logout */}
           <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
             <button
-                id="btn-global-theme-toggle"
-                type="button"
-                onClick={toggleDarkMode}
-                className={`p-2 rounded-lg text-xs font-bold transition border cursor-pointer touch-manipulation active:scale-90 ${
-                  isDarkMode
-                    ? "bg-slate-800 hover:bg-slate-700 border-slate-700 text-amber-300 shadow-xs"
-                    : "bg-gray-50 hover:bg-gray-100 border-gray-200 text-slate-700 shadow-2xs"
-                }`}
-                title={isDarkMode ? "Cambiar a Modo Día" : "Cambiar a Modo Noche"}
-              >
-                {isDarkMode ? (
-                  <Sun className="w-4 h-4 text-amber-300" />
-                ) : (
-                  <Moon className="w-4 h-4 text-slate-700" />
-                )}
-              </button>
-            </div>
+              id="btn-global-theme-toggle"
+              type="button"
+              onClick={toggleDarkMode}
+              className={`p-2 rounded-lg text-xs font-bold transition border cursor-pointer touch-manipulation active:scale-90 ${
+                isDarkMode
+                  ? "bg-slate-800 hover:bg-slate-700 border-slate-700 text-amber-300 shadow-xs"
+                  : "bg-gray-50 hover:bg-gray-100 border-gray-200 text-slate-700 shadow-2xs"
+              }`}
+              title={isDarkMode ? "Cambiar a Modo Día" : "Cambiar a Modo Noche"}
+            >
+              {isDarkMode ? (
+                <Sun className="w-4 h-4 text-amber-300" />
+              ) : (
+                <Moon className="w-4 h-4 text-slate-700" />
+              )}
+            </button>
+
+            {user && (
+              <div className="flex items-center gap-1 sm:gap-1.5 pl-1 border-l border-gray-200 dark:border-slate-800">
+                <span className="hidden xl:inline text-[11px] font-mono text-gray-500 dark:text-slate-400 max-w-[170px] truncate" title={user.email || ""}>
+                  {user.email}
+                </span>
+                <button
+                  id="btn-global-logout"
+                  type="button"
+                  onClick={logout}
+                  className={`flex items-center gap-1 p-2 sm:px-2.5 sm:py-1.5 rounded-lg text-xs font-bold transition border cursor-pointer touch-manipulation active:scale-95 ${
+                    isDarkMode
+                      ? "bg-slate-800 hover:bg-rose-950/60 hover:text-rose-300 border-slate-700 text-slate-300"
+                      : "bg-gray-50 hover:bg-rose-50 hover:text-rose-700 hover:border-rose-200 border-gray-200 text-gray-600 shadow-2xs"
+                  }`}
+                  title="Cerrar sesión"
+                >
+                  <LogOut className="w-3.5 h-3.5 text-rose-500" />
+                  <span className="hidden md:inline text-[11px]">Salir</span>
+                </button>
+              </div>
+            )}
+          </div>
           </div>
         </div>
       </header>

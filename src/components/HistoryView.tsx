@@ -520,7 +520,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => 
               }`}
             >
               <option value="">Todos los Estados</option>
-              <option value="en_proceso">🔵 En proceso</option>
+              <option value="en_proceso">🔵 En curso</option>
               <option value="completado">✅ Completado</option>
               <option value="garantia_en_proceso">🟡 Garantía en proceso</option>
               <option value="cancelado">🔴 Cancelado</option>
@@ -829,7 +829,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => 
                               }}
                               className={`text-[11px] font-bold rounded-lg border px-2 py-1 focus:outline-hidden cursor-pointer transition ${badgeColor}`}
                             >
-                              <option value="en_proceso" className="bg-white text-gray-900 dark:bg-slate-800 dark:text-white">🔵 En proceso</option>
+                              <option value="en_proceso" className="bg-white text-gray-900 dark:bg-slate-800 dark:text-white">🔵 En curso</option>
                               <option value="completado" className="bg-white text-emerald-700 dark:bg-slate-800 dark:text-emerald-300">✅ Completado</option>
                               <option value="garantia_en_proceso" className="bg-white text-gray-900 dark:bg-slate-800 dark:text-white">🟡 Garantía en proceso</option>
                               <option value="cancelado" className="bg-white text-gray-900 dark:bg-slate-800 dark:text-white">🔴 Cancelado</option>

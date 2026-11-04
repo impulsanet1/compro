@@ -4,6 +4,7 @@ import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
+import fs from 'fs';
 
 dotenv.config();
 
@@ -23,7 +24,7 @@ interface NormalizedOrderResult {
   orderId: string;
   found: boolean;
   rawStatus: string;
-  mappedStatus: 'en_proceso' | 'completado' | 'cancelado';
+  mappedStatus: 'procesando' | 'en_proceso' | 'parcial' | 'completado' | 'cancelado';
   startCount: string | number | null;
   remains: string | number | null;
   charge: string | null;
@@ -31,22 +32,37 @@ interface NormalizedOrderResult {
   error?: string;
 }
 
-function mapSmmStatusToAppStatus(rawStatus?: string): 'en_proceso' | 'completado' | 'cancelado' {
+function mapSmmStatusToAppStatus(rawStatus?: string): 'procesando' | 'en_proceso' | 'parcial' | 'completado' | 'cancelado' {
   if (!rawStatus) return 'en_proceso';
   const s = rawStatus.toLowerCase().trim();
+  if (s === 'partial' || s === 'parcial') {
+    return 'parcial';
+  }
+  if (s === 'processing' || s === 'procesando' || s === 'pending' || s === 'pendiente') {
+    return 'procesando';
+  }
   if (s.includes('complet') || s.includes('finish') || s.includes('done') || s.includes('success')) {
     return 'completado';
   }
   if (s.includes('cancel') || s.includes('refund') || s.includes('fail')) {
     return 'cancelado';
   }
-  // 'Pending', 'In progress', 'Processing', 'Partial', etc.
+  // 'Pending', 'In progress', 'Processing', etc.
   return 'en_proceso';
 }
 
 function formatProviderStatusLabel(rawStatus?: string): string {
   if (!rawStatus) return 'En curso';
   const s = rawStatus.toLowerCase().trim();
+  if (s === 'partial' || s === 'parcial') {
+    return 'Parcial';
+  }
+  if (s === 'processing' || s === 'procesando') {
+    return 'Procesando';
+  }
+  if (s === 'pending' || s === 'pendiente') {
+    return 'Procesando';
+  }
   if (
     s === 'in progress' ||
     s === 'in_progress' ||
@@ -57,17 +73,8 @@ function formatProviderStatusLabel(rawStatus?: string): string {
   ) {
     return 'En curso';
   }
-  if (s === 'processing' || s === 'procesando') {
-    return 'Procesando';
-  }
-  if (s === 'pending' || s === 'pendiente') {
-    return 'Pendiente';
-  }
   if (s.includes('complet') || s === 'completed' || s === 'completado') {
     return 'Completado';
-  }
-  if (s === 'partial' || s === 'parcial') {
-    return 'Parcial';
   }
   if (s.includes('cancel') || s === 'canceled' || s === 'cancelled' || s === 'cancelado') {
     return 'Cancelado';
@@ -244,14 +251,14 @@ async function fetchLiveInstagramProfile(
 async function startServer() {
   const app = express();
   const server = http.createServer(app);
-  const PORT = parseInt(process.env.PORT || '3000', 10);
+  const PORT = 3000;
   const isProd = process.env.NODE_ENV === 'production';
 
   app.use(express.json());
 
   // --- API Routes for SMM Provider Integration ---
 
-  // 1. Check API configuration status (Never expose raw secret key)
+  // 1. Check API configuration status
   app.get('/api/provider/config', (_req: Request, res: Response) => {
     const apiUrl = process.env.PROVIDER_API_URL?.trim() || null;
     const apiKey = process.env.PROVIDER_API_KEY?.trim() || null;
@@ -268,7 +275,156 @@ async function startServer() {
     });
   });
 
-  // 2. Check balance on provider
+  // 2. Test connection with SMM provider (supports custom or configured credentials)
+  app.post('/api/provider/test-connection', async (req: Request, res: Response) => {
+    const targetUrl = req.body?.providerUrl?.trim() || process.env.PROVIDER_API_URL?.trim();
+    const targetKey = req.body?.apiKey?.trim() || process.env.PROVIDER_API_KEY?.trim();
+
+    if (!targetUrl || !targetKey) {
+      return res.status(400).json({
+        success: false,
+        error: 'Debes proporcionar la URL de la API y la Clave API para realizar la prueba.'
+      });
+    }
+
+    try {
+      const params = new URLSearchParams();
+      params.append('key', targetKey);
+      params.append('action', 'balance');
+
+      const response = await fetch(targetUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'User-Agent': 'ImpulsaNet-OrderSync/1.0',
+        },
+        body: params.toString(),
+      });
+
+      const text = await response.text();
+      let data: any = null;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        return res.status(400).json({
+          success: false,
+          error: `El servidor del proveedor respondió (${response.status}) pero no devolvió JSON válido. Respuesta: ${text.slice(0, 150)}`
+        });
+      }
+
+      if (data?.error) {
+        return res.status(400).json({
+          success: false,
+          error: `Error reportado por el proveedor: "${data.error}"`
+        });
+      }
+
+      if (data?.balance !== undefined) {
+        return res.json({
+          success: true,
+          balance: data.balance,
+          currency: data.currency || 'USD',
+          message: `¡Conexión exitosa! Saldo disponible: $${data.balance} ${data.currency || 'USD'}`
+        });
+      }
+
+      return res.status(400).json({
+        success: false,
+        error: `Respuesta inesperada del proveedor: ${text.slice(0, 150)}`
+      });
+    } catch (err: any) {
+      return res.status(500).json({
+        success: false,
+        error: `Fallo de conexión de red: ${err.message || 'No se pudo contactar con el host del proveedor.'}`
+      });
+    }
+  });
+
+  // 3. Save and activate provider API configuration (writes to .env and process.env)
+  app.post('/api/provider/save-config', async (req: Request, res: Response) => {
+    const { providerUrl, apiKey } = req.body;
+
+    if (!providerUrl?.trim() || !apiKey?.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: 'La URL de la API y la Clave de API son requeridas.'
+      });
+    }
+
+    const cleanUrl = providerUrl.trim();
+    const cleanKey = apiKey.trim();
+
+    try {
+      // Test credentials with provider first
+      const params = new URLSearchParams();
+      params.append('key', cleanKey);
+      params.append('action', 'balance');
+
+      const testResp = await fetch(cleanUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'User-Agent': 'ImpulsaNet-OrderSync/1.0',
+        },
+        body: params.toString(),
+      });
+
+      const testText = await testResp.text();
+      let testData: any = null;
+      try {
+        testData = JSON.parse(testText);
+      } catch {
+        return res.status(400).json({
+          success: false,
+          error: `No se pudo verificar la API: El proveedor no devolvió una respuesta JSON válida (${testResp.status}). Revisa la URL.`
+        });
+      }
+
+      if (testData?.error) {
+        return res.status(400).json({
+          success: false,
+          error: `El proveedor rechazó las credenciales: "${testData.error}". Verifica que la clave API sea la correcta.`
+        });
+      }
+
+      // Update runtime env
+      process.env.PROVIDER_API_URL = cleanUrl;
+      process.env.PROVIDER_API_KEY = cleanKey;
+
+      // Persist to .env file if available
+      try {
+        const envPath = path.resolve(__dirname, '.env');
+        let envContent = '';
+        if (fs.existsSync(envPath)) {
+          envContent = fs.readFileSync(envPath, 'utf8');
+        }
+        const lines = envContent
+          .split('\n')
+          .filter((l) => !l.startsWith('PROVIDER_API_URL=') && !l.startsWith('PROVIDER_API_KEY='));
+        lines.push(`PROVIDER_API_URL="${cleanUrl}"`);
+        lines.push(`PROVIDER_API_KEY="${cleanKey}"`);
+        fs.writeFileSync(envPath, lines.filter(Boolean).join('\n') + '\n', 'utf8');
+      } catch (fileErr) {
+        console.warn('Could not write to .env file:', fileErr);
+      }
+
+      return res.json({
+        success: true,
+        providerUrl: cleanUrl,
+        maskedKey: `••••••••${cleanKey.slice(-4)}`,
+        balance: testData.balance ?? null,
+        currency: testData.currency ?? 'USD',
+        message: '¡Credenciales verificadas y guardadas exitosamente!'
+      });
+    } catch (err: any) {
+      return res.status(500).json({
+        success: false,
+        error: `Error al conectar con el proveedor: ${err.message || 'Error de red.'}`
+      });
+    }
+  });
+
+  // 4. Check balance on provider
   app.get('/api/provider/balance', async (_req: Request, res: Response) => {
     const apiUrl = process.env.PROVIDER_API_URL?.trim();
     const apiKey = process.env.PROVIDER_API_KEY?.trim();
@@ -277,7 +433,7 @@ async function startServer() {
       return res.status(400).json({
         success: false,
         configured: false,
-        error: 'PROVIDER_API_URL o PROVIDER_API_KEY no están definidos en el archivo .env'
+        error: 'PROVIDER_API_URL o PROVIDER_API_KEY no están definidos en la configuración.'
       });
     }
 
@@ -295,14 +451,17 @@ async function startServer() {
         body: params.toString(),
       });
 
-      if (!response.ok) {
-        return res.status(response.status).json({
+      const text = await response.text();
+      let data: any = null;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        return res.status(400).json({
           success: false,
-          error: `Error HTTP ${response.status} recibido del proveedor.`
+          error: `Respuesta no válida del proveedor (${response.status}): ${text.slice(0, 150)}`
         });
       }
 
-      const data = await response.json();
       if (data?.error) {
         return res.status(400).json({
           success: false,
@@ -323,7 +482,7 @@ async function startServer() {
     }
   });
 
-  // 3. Sync status for single or multiple Order IDs
+  // 5. Sync status for single or multiple Order IDs
   app.post('/api/provider/order-status', async (req: Request, res: Response) => {
     const { orderId, orderIds, simulateIfUnconfigured } = req.body;
     const apiUrl = process.env.PROVIDER_API_URL?.trim();
@@ -331,13 +490,13 @@ async function startServer() {
 
     const targetIds: string[] = [];
     if (orderId && typeof orderId === 'string') {
-      const split = orderId.split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
+      const split = orderId.split(/[\s,]+/).map(s => s.replace(/^#/, '').trim()).filter(Boolean);
       targetIds.push(...split);
     }
     if (Array.isArray(orderIds)) {
       orderIds.forEach(id => {
         if (typeof id === 'string') {
-          const split = id.split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
+          const split = id.split(/[\s,]+/).map(s => s.replace(/^#/, '').trim()).filter(Boolean);
           targetIds.push(...split);
         }
       });
@@ -369,7 +528,7 @@ async function startServer() {
         success: true,
         simulated: true,
         results: simulatedResults,
-        message: 'Modo de prueba simulado (configura PROVIDER_API_URL y PROVIDER_API_KEY en .env para producción).'
+        message: 'Modo de prueba simulado (configura PROVIDER_API_URL y PROVIDER_API_KEY para producción).'
       });
     }
 
@@ -377,7 +536,7 @@ async function startServer() {
       return res.status(400).json({
         success: false,
         configured: false,
-        error: 'API no configurada. Agrega PROVIDER_API_URL y PROVIDER_API_KEY en las variables de entorno (.env).'
+        error: 'API no configurada. Agrega la URL y Clave API en Configuración > Integración API.'
       });
     }
 
@@ -401,7 +560,16 @@ async function startServer() {
           body: params.toString(),
         });
 
-        const data: SmmStatusResponse = await resp.json();
+        const rawText = await resp.text();
+        let data: any = null;
+        try {
+          data = JSON.parse(rawText);
+        } catch {
+          return res.status(502).json({
+            success: false,
+            error: `El proveedor devolvió una respuesta no válida (${resp.status}): ${rawText.slice(0, 150)}`
+          });
+        }
 
         if (data?.error) {
           results.push({
@@ -443,33 +611,59 @@ async function startServer() {
           body: params.toString(),
         });
 
-        const data: Record<string, SmmStatusResponse> = await resp.json();
+        const rawText = await resp.text();
+        let data: any = null;
+        try {
+          data = JSON.parse(rawText);
+        } catch {
+          return res.status(502).json({
+            success: false,
+            error: `El proveedor devolvió una respuesta no válida (${resp.status}): ${rawText.slice(0, 150)}`
+          });
+        }
 
-        for (const id of uniqueIds) {
-          const item = data?.[id];
-          if (!item || item.error) {
+        // Check if top-level error was returned by provider (e.g. Bad API key)
+        if (data && typeof data === 'object' && data.error && !Array.isArray(data)) {
+          for (const id of uniqueIds) {
             results.push({
               orderId: id,
               found: false,
-              rawStatus: item?.error || 'No encontrado',
+              rawStatus: 'Error',
               mappedStatus: 'en_proceso',
               startCount: null,
               remains: null,
               charge: null,
               currency: null,
-              error: item?.error || 'No se encontró información para esta orden'
+              error: data.error
             });
-          } else {
-            results.push({
-              orderId: id,
-              found: true,
-              rawStatus: item.status || 'Unknown',
-              mappedStatus: mapSmmStatusToAppStatus(item.status),
-              startCount: item.start_count ?? null,
-              remains: item.remains ?? null,
-              charge: item.charge ?? null,
-              currency: item.currency ?? 'USD'
-            });
+          }
+        } else {
+          for (const id of uniqueIds) {
+            const item = data?.[id];
+            if (!item || item.error) {
+              results.push({
+                orderId: id,
+                found: false,
+                rawStatus: item?.error || 'No encontrado',
+                mappedStatus: 'en_proceso',
+                startCount: null,
+                remains: null,
+                charge: null,
+                currency: null,
+                error: item?.error || 'No se encontró información para esta orden'
+              });
+            } else {
+              results.push({
+                orderId: id,
+                found: true,
+                rawStatus: item.status || 'Unknown',
+                mappedStatus: mapSmmStatusToAppStatus(item.status),
+                startCount: item.start_count ?? null,
+                remains: item.remains ?? null,
+                charge: item.charge ?? null,
+                currency: item.currency ?? 'USD'
+              });
+            }
           }
         }
       }
@@ -486,7 +680,7 @@ async function startServer() {
     }
   });
 
-  // 4. Live Instagram Profile Public Lookup Endpoint
+  // 6. Live Instagram Profile Public Lookup Endpoint
   app.get('/api/instagram/profile', async (req: Request, res: Response) => {
     const rawUsername = (req.query.username as string) || '';
     const customKey = (req.query.rapidApiKey as string) || '';
@@ -636,7 +830,7 @@ async function startServer() {
         found: boolean;
         status: string;
         rawStatus: string;
-        mappedStatus: 'en_proceso' | 'completado' | 'cancelado';
+        mappedStatus: 'procesando' | 'en_proceso' | 'parcial' | 'completado' | 'cancelado';
         startCount: number | null;
         remains: number | null;
         delivered: number | null;
@@ -670,7 +864,13 @@ async function startServer() {
           body: params.toString(),
         });
 
-        const data: SmmStatusResponse = await resp.json();
+        const rawText = await resp.text();
+        let data: SmmStatusResponse = {};
+        try {
+          data = JSON.parse(rawText);
+        } catch {
+          data = { error: 'Respuesta no válida del proveedor' };
+        }
         let raw = data?.status || 'Processing';
         let mapped = mapSmmStatusToAppStatus(raw);
         const itemInfo = Array.isArray(items) ? items.find(i => String(i.orderId) === String(id)) : null;
@@ -760,7 +960,13 @@ async function startServer() {
           body: params.toString(),
         });
 
-        const data: Record<string, SmmStatusResponse> = await resp.json();
+        const rawText = await resp.text();
+        let data: Record<string, SmmStatusResponse> = {};
+        try {
+          data = JSON.parse(rawText);
+        } catch {
+          data = {};
+        }
 
         targetIds.forEach(id => {
           const orderInfo = data[id];

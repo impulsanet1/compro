@@ -33,6 +33,7 @@ import {
 import {
   ReceiptItem,
   Receipt,
+  ReceiptStatus,
   Client,
   Service,
   ServiceCombo,
@@ -182,7 +183,7 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
   const [customOrderId, setCustomOrderId] = useState("");
   const [customOrderId2, setCustomOrderId2] = useState("");
   const [idCountType, setIdCountType] = useState<"uno" | "dos">("uno");
-  const [status, setStatus] = useState<"en_proceso" | "completado" | "garantia_en_proceso" | "cancelado">("completado");
+  const [status, setStatus] = useState<ReceiptStatus>("completado");
   const [internalNotes, setInternalNotes] = useState("");
 
   // Live Instagram Verification & Start Count State (Option A)
@@ -240,7 +241,7 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
     orderId: string;
     found: boolean;
     rawStatus: string;
-    mappedStatus: "en_proceso" | "completado" | "cancelado";
+    mappedStatus: ReceiptStatus;
     error?: string;
   } | null>(null);
 

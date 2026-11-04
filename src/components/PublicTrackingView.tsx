@@ -324,6 +324,22 @@ export const PublicTrackingView: React.FC<PublicTrackingViewProps> = ({
         </span>
       );
     }
+    if (s === "parcial") {
+      return (
+        <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-orange-50 text-orange-800 border border-orange-300">
+          <Clock className="w-4 h-4 text-orange-600" />
+          Parcial
+        </span>
+      );
+    }
+    if (s === "procesando") {
+      return (
+        <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-sky-50 text-sky-800 border border-sky-300">
+          <Clock className="w-4 h-4 text-sky-600 animate-spin" />
+          Procesando
+        </span>
+      );
+    }
     return (
       <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-blue-50 text-blue-800 border border-blue-300">
         <Clock className="w-4 h-4 text-blue-600 animate-spin" />

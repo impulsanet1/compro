@@ -1618,7 +1618,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       snap.forEach((docSnap) => {
         const data = docSnap.data() as Receipt;
         const norm = getNormalizedStatus(data.status);
-        if (norm === "en_proceso") {
+        if (norm === "en_proceso" || norm === "procesando" || norm === "parcial") {
           count++;
           updates.push(setDoc(doc(db, "receipts", docSnap.id), { status: "completado" }, { merge: true }));
         }
@@ -1644,7 +1644,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const numericIds = (targetReceipt.services || [])
       .flatMap((s) => getItemOrderIds(s))
-      .filter((id) => /^\d{3,}$/.test(id.trim()));
+      .map((id) => id.replace(/^#/, "").trim())
+      .filter((id) => /^\d{3,}$/.test(id));
 
     if (numericIds.length === 0) {
       return { updated: false, message: "Sin IDs numéricos del proveedor registrados." };
@@ -1662,12 +1663,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
 
       const allCompleted = foundItems.every((r) => r.mappedStatus === "completado");
-      const anyCanceled = foundItems.some((r) => r.mappedStatus === "cancelado");
+      const anyPartial = foundItems.some((r) => r.mappedStatus === "parcial");
       const anyInProcess = foundItems.some((r) => r.mappedStatus === "en_proceso");
+      const anyProcessing = foundItems.some((r) => r.mappedStatus === "procesando");
+      const anyCanceled = foundItems.some((r) => r.mappedStatus === "cancelado");
 
-      let determinedStatus: "completado" | "en_proceso" | "cancelado" = "en_proceso";
+      let determinedStatus: "completado" | "en_proceso" | "parcial" | "procesando" | "cancelado" = "en_proceso";
       if (allCompleted) determinedStatus = "completado";
-      else if (anyCanceled && !anyInProcess) determinedStatus = "cancelado";
+      else if (anyPartial) determinedStatus = "parcial";
+      else if (anyInProcess) determinedStatus = "en_proceso";
+      else if (anyProcessing) determinedStatus = "procesando";
+      else if (anyCanceled) determinedStatus = "cancelado";
       else determinedStatus = "en_proceso";
 
       const oldStatus = getNormalizedStatus(targetReceipt.status);
@@ -1718,7 +1724,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const targetReceipts = receipts.filter((r) => {
       const ids = (r.services || [])
         .flatMap((s) => getItemOrderIds(s))
-        .filter((id) => /^\d{3,}$/.test(id.trim()));
+        .map((id) => id.replace(/^#/, "").trim())
+        .filter((id) => /^\d{3,}$/.test(id));
       return ids.length > 0;
     });
 
@@ -1736,7 +1743,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     for (const r of targetReceipts) {
       const ids = (r.services || [])
         .flatMap((s) => getItemOrderIds(s))
-        .filter((id) => /^\d{3,}$/.test(id.trim()));
+        .map((id) => id.replace(/^#/, "").trim())
+        .filter((id) => /^\d{3,}$/.test(id));
 
       if (ids.length > 0) {
         receiptToIds.set(r.id, ids);
@@ -1777,12 +1785,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
         if (foundResults.length > 0) {
           const allCompleted = foundResults.every((item) => item.mappedStatus === "completado");
-          const anyCanceled = foundResults.some((item) => item.mappedStatus === "cancelado");
+          const anyPartial = foundResults.some((item) => item.mappedStatus === "parcial");
           const anyInProcess = foundResults.some((item) => item.mappedStatus === "en_proceso");
+          const anyProcessing = foundResults.some((item) => item.mappedStatus === "procesando");
+          const anyCanceled = foundResults.some((item) => item.mappedStatus === "cancelado");
 
-          let finalStatus: "completado" | "en_proceso" | "cancelado" = "en_proceso";
+          let finalStatus: "completado" | "en_proceso" | "parcial" | "procesando" | "cancelado" = "en_proceso";
           if (allCompleted) finalStatus = "completado";
-          else if (anyCanceled && !anyInProcess) finalStatus = "cancelado";
+          else if (anyPartial) finalStatus = "parcial";
+          else if (anyInProcess) finalStatus = "en_proceso";
+          else if (anyProcessing) finalStatus = "procesando";
+          else if (anyCanceled) finalStatus = "cancelado";
           else finalStatus = "en_proceso";
 
           const currentNormalized = getNormalizedStatus(r.status);

@@ -14,6 +14,8 @@ export interface BusinessConfig {
   costsUpdatedFinal2026?: boolean;
   enableLiveInstagramTracking?: boolean;
   rapidApiKey?: string;
+  providerApiUrl?: string;
+  providerApiKey?: string;
 }
 
 export interface TrmState {
@@ -112,7 +114,7 @@ export interface Receipt {
   totalProviderCostUSD?: number | null;
   warranty: string; // e.g., "30 días"
   thankYouMessage: string;
-  status?: "en_proceso" | "completado" | "garantia_en_proceso" | "cancelado" | "pendiente" | "finalizado" | "garantia_solicitada" | "garantia_finalizada";
+  status?: ReceiptStatus | "en_curso" | "pendiente" | "finalizado" | "garantia_solicitada" | "garantia_finalizada";
   internalNotes?: string;
   targetAccount?: string; // Cuenta o enlace principal del cliente para seguimiento
   initialFollowers?: number | null; // Conteo de seguidores inicial del cliente
@@ -151,19 +153,38 @@ export function getClientCode(client: Partial<Client>, fallbackIndex: number = 0
   return String(fallbackIndex + 1).padStart(4, "0");
 }
 
-export function getNormalizedStatus(status?: string): "en_proceso" | "completado" | "garantia_en_proceso" | "cancelado" {
+export type ReceiptStatus =
+  | "procesando"
+  | "en_proceso"
+  | "parcial"
+  | "garantia_en_proceso"
+  | "completado"
+  | "cancelado";
+
+export function getNormalizedStatus(status?: string): ReceiptStatus {
   if (!status) return "en_proceso";
   const s = status.trim().toLowerCase();
-  if (s === "en_proceso" || s === "en curso" || s === "in progress" || s === "processing" || s === "pendiente") return "en_proceso";
-  if (s === "completado" || s === "finalizado" || s === "garantia_finalizada") return "completado";
-  if (s === "garantia_en_proceso" || s === "garantia_solicitada") return "garantia_en_proceso";
-  if (s === "cancelado") return "cancelado";
-  return "en_proceso"; // default fallback
+  if (s === "parcial" || s === "partial") return "parcial";
+  if (s === "procesando" || s === "processing" || s === "pendiente" || s === "pending") return "procesando";
+  if (s === "completado" || s === "completed" || s === "finalizado" || s === "garantia_finalizada") return "completado";
+  if (s === "garantia_en_proceso" || s === "garantia" || s === "garantia_solicitada") return "garantia_en_proceso";
+  if (s === "cancelado" || s === "canceled" || s === "cancelled") return "cancelado";
+  if (s === "en_proceso" || s === "en curso" || s === "en_curso" || s === "in progress" || s === "in_progress" || s === "inprogress") return "en_proceso";
+  return "en_proceso";
 }
 
 export function formatProviderStatus(rawStatus?: string): string {
   if (!rawStatus) return "En curso";
   const s = rawStatus.toLowerCase().trim();
+  if (s === "partial" || s === "parcial") {
+    return "Parcial";
+  }
+  if (s === "processing" || s === "procesando") {
+    return "Procesando";
+  }
+  if (s === "pending" || s === "pendiente") {
+    return "Procesando";
+  }
   if (
     s === "in progress" ||
     s === "in_progress" ||
@@ -174,17 +195,8 @@ export function formatProviderStatus(rawStatus?: string): string {
   ) {
     return "En curso";
   }
-  if (s === "processing" || s === "procesando") {
-    return "Procesando";
-  }
-  if (s === "pending" || s === "pendiente") {
-    return "Pendiente";
-  }
   if (s.includes("complet") || s === "completed" || s === "completado") {
     return "Completado";
-  }
-  if (s === "partial" || s === "parcial") {
-    return "Parcial";
   }
   if (s.includes("cancel") || s === "canceled" || s === "cancelled" || s === "cancelado") {
     return "Cancelado";
@@ -1104,7 +1116,7 @@ export interface ProviderOrderSyncResult {
   orderId: string;
   found: boolean;
   rawStatus: string; // e.g. "Completed", "In progress", "Canceled", "Partial"
-  mappedStatus: "en_proceso" | "completado" | "cancelado";
+  mappedStatus: "procesando" | "en_proceso" | "parcial" | "completado" | "cancelado";
   startCount?: string | number | null;
   remains?: string | number | null;
   charge?: string | null;

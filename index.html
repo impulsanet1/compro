@@ -16,6 +16,21 @@
     <meta name="description" content="Sistema interno de administración de ventas, control financiero y generación de comprobantes para ImpulsaNet." />
     <meta property="og:title" content="ImpulsaNet" />
     <meta property="og:description" content="Sistema interno de administración de ventas, control financiero y generación de comprobantes para ImpulsaNet." />
+    <script>
+      // Gracefully ignore WebSocket / HMR closure events in AI Studio iframe environment
+      window.addEventListener('unhandledrejection', function(e) {
+        if (e.reason && (e.reason.message?.includes('WebSocket') || String(e.reason).includes('WebSocket'))) {
+          e.stopImmediatePropagation?.();
+          e.preventDefault?.();
+        }
+      });
+      window.addEventListener('error', function(e) {
+        if (e.message && e.message.includes('WebSocket')) {
+          e.stopImmediatePropagation?.();
+          e.preventDefault?.();
+        }
+      });
+    </script>
   </head>
   <body class="notranslate" translate="no">
     <div id="root" class="notranslate" translate="no"></div>

@@ -41,6 +41,56 @@ export async function fetchProviderConfig(): Promise<ProviderApiConfig> {
   }
 }
 
+export interface TestProviderResponse {
+  success: boolean;
+  balance?: string | number;
+  currency?: string;
+  message?: string;
+  error?: string;
+}
+
+export interface SaveProviderResponse {
+  success: boolean;
+  providerUrl?: string;
+  maskedKey?: string;
+  balance?: string | number;
+  currency?: string;
+  message?: string;
+  error?: string;
+}
+
+export async function testProviderConnection(providerUrl?: string, apiKey?: string): Promise<TestProviderResponse> {
+  try {
+    const res = await fetch("/api/provider/test-connection", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ providerUrl, apiKey })
+    });
+    return await res.json();
+  } catch (err: any) {
+    return {
+      success: false,
+      error: err.message || "Error de red al probar conexión con el proveedor."
+    };
+  }
+}
+
+export async function saveProviderConfig(providerUrl: string, apiKey: string): Promise<SaveProviderResponse> {
+  try {
+    const res = await fetch("/api/provider/save-config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ providerUrl, apiKey })
+    });
+    return await res.json();
+  } catch (err: any) {
+    return {
+      success: false,
+      error: err.message || "Error de red al guardar la configuración."
+    };
+  }
+}
+
 export async function fetchProviderBalance(): Promise<ProviderBalanceResponse> {
   try {
     const res = await fetch("/api/provider/balance");

@@ -5,7 +5,7 @@
 
 import React, { useRef, useState, useEffect, useMemo } from "react";
 import { X, ShieldCheck, Edit3, Save, Trash2, ShieldAlert, Calendar, ChevronDown, ChevronUp, MessageSquare, Send, PhoneCall, ExternalLink, Bell, Plus, DollarSign, Layers, Check, RotateCcw, AlertCircle, Clock, Sparkles, ArrowRight, Hash, RefreshCw, Radio, QrCode, Instagram } from "lucide-react";
-import { Receipt, ReceiptItem, getNormalizedStatus, getItemOrderIds, getItemOrderIdDisplay, getOrderIdTypeLabel, isCustomServiceCode, resolveReceiptWarranty, ProviderOrderSyncResult, formatProviderStatus } from "../types";
+import { Receipt, ReceiptItem, ReceiptStatus, getNormalizedStatus, getItemOrderIds, getItemOrderIdDisplay, getOrderIdTypeLabel, isCustomServiceCode, resolveReceiptWarranty, ProviderOrderSyncResult, formatProviderStatus } from "../types";
 import { motion, AnimatePresence } from "motion/react";
 import { useApp } from "../context/AppContext";
 import { syncOrderWithProvider } from "../services/providerApi";
@@ -160,7 +160,7 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
   // Quick Touch-to-Edit Service ID States
   const [quickEditServiceIndex, setQuickEditServiceIndex] = useState<number | null>(null);
   const [quickNewOrderId, setQuickNewOrderId] = useState<string>("");
-  const [quickReactivateStatus, setQuickReactivateStatus] = useState<"en_proceso" | "completado" | "garantia_en_proceso" | "cancelado">("en_proceso");
+  const [quickReactivateStatus, setQuickReactivateStatus] = useState<ReceiptStatus>("en_proceso");
   const [quickIsResent, setQuickIsResent] = useState<boolean>(true);
   const [quickResendNote, setQuickResendNote] = useState<string>("Servicio reenviado con nuevo ID del servidor para asegurar la entrega completa.");
   const [isSavingQuickId, setIsSavingQuickId] = useState(false);
@@ -1124,7 +1124,7 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                   <select
                     value={editedStatus}
                     onChange={async (e) => {
-                      const newStatus = e.target.value as "en_proceso" | "completado" | "garantia_en_proceso" | "cancelado";
+                      const newStatus = e.target.value as any;
                       setEditedStatus(newStatus);
                       try {
                         await updateReceipt(receipt.id, { status: newStatus });
@@ -1134,9 +1134,11 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                     }}
                     className="px-2 py-0.5 text-xs font-semibold rounded-md bg-white border border-gray-200 text-gray-800 focus:outline-hidden focus:ring-1 focus:ring-indigo-500 cursor-pointer"
                   >
-                    <option value="en_proceso">🔵 En proceso</option>
-                    <option value="completado">✅ Completado</option>
+                    <option value="procesando">⚙️ Procesando</option>
+                    <option value="en_proceso">🔵 En curso</option>
+                    <option value="parcial">🟠 Parcial</option>
                     <option value="garantia_en_proceso">🟡 Garantía en proceso</option>
+                    <option value="completado">✅ Completado</option>
                     <option value="cancelado">🔴 Cancelado</option>
                   </select>
                 </div>
@@ -1653,9 +1655,11 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                       onChange={(e) => setEditedStatus(e.target.value as any)}
                       className="mt-1 block w-full px-3.5 py-1.5 border border-gray-200 rounded-lg text-sm bg-white focus:outline-hidden focus:ring-2 focus:ring-indigo-500/10 focus:border-indigo-500 transition font-semibold text-gray-900 cursor-pointer"
                     >
+                      <option value="procesando">⚙️ Procesando</option>
                       <option value="en_proceso">🔵 En curso</option>
-                      <option value="completado">✅ Completado</option>
+                      <option value="parcial">🟠 Parcial</option>
                       <option value="garantia_en_proceso">🟡 Garantía en proceso</option>
+                      <option value="completado">✅ Completado</option>
                       <option value="cancelado">🔴 Cancelado</option>
                     </select>
                   </div>
@@ -1725,23 +1729,49 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                     </div>
                     <div className="mt-0.5 flex flex-col gap-1">
                       <div>
-                        {getNormalizedStatus(receipt.status) === "cancelado" ? (
-                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold bg-rose-50 text-rose-700 border border-rose-300">
-                            🔴 Cancelado
-                          </span>
-                        ) : getNormalizedStatus(receipt.status) === "garantia_en_proceso" ? (
-                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold bg-amber-50 text-amber-700 border border-amber-300">
-                            🟡 Garantía en proceso
-                          </span>
-                        ) : getNormalizedStatus(receipt.status) === "completado" ? (
-                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold bg-emerald-50 text-emerald-800 border border-emerald-300">
-                            ✅ Completado
-                          </span>
-                        ) : (
-                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold bg-blue-50 text-blue-800 border border-blue-300">
-                            🔵 {autoSyncStatus?.rawStatus ? formatProviderStatus(autoSyncStatus.rawStatus) : "En curso"}
-                          </span>
-                        )}
+                        {(() => {
+                          const norm = getNormalizedStatus(receipt.status);
+                          if (norm === "cancelado") {
+                            return (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold bg-rose-50 text-rose-700 border border-rose-300">
+                                🔴 Cancelado
+                              </span>
+                            );
+                          }
+                          if (norm === "garantia_en_proceso") {
+                            return (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold bg-amber-50 text-amber-700 border border-amber-300">
+                                🟡 Garantía en proceso
+                              </span>
+                            );
+                          }
+                          if (norm === "completado") {
+                            return (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold bg-emerald-50 text-emerald-800 border border-emerald-300">
+                                ✅ Completado
+                              </span>
+                            );
+                          }
+                          if (norm === "parcial") {
+                            return (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold bg-orange-50 text-orange-800 border border-orange-300">
+                                🟠 Parcial
+                              </span>
+                            );
+                          }
+                          if (norm === "procesando") {
+                            return (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold bg-sky-50 text-sky-800 border border-sky-300">
+                                ⚙️ Procesando
+                              </span>
+                            );
+                          }
+                          return (
+                            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold bg-blue-50 text-blue-800 border border-blue-300">
+                              🔵 {autoSyncStatus?.rawStatus ? formatProviderStatus(autoSyncStatus.rawStatus) : "En curso"}
+                            </span>
+                          );
+                        })()}
                       </div>
 
                       {autoSyncStatus && !autoSyncStatus.loading && autoSyncStatus.rawStatus && (

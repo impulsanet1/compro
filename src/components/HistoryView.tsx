@@ -57,16 +57,20 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => 
   const statusCounts = useMemo(() => {
     let cancelados = 0;
     let garantias = 0;
-    let enProceso = 0;
+    let procesando = 0;
+    let enCurso = 0;
+    let parcial = 0;
     let completados = 0;
     receipts.forEach((r) => {
       const st = getNormalizedStatus(r.status);
       if (st === "cancelado") cancelados++;
       else if (st === "garantia_en_proceso") garantias++;
-      else if (st === "en_proceso") enProceso++;
+      else if (st === "procesando") procesando++;
+      else if (st === "en_proceso") enCurso++;
+      else if (st === "parcial") parcial++;
       else if (st === "completado") completados++;
     });
-    return { cancelados, garantias, enProceso, completados };
+    return { cancelados, garantias, procesando, enCurso, parcial, completados };
   }, [receipts]);
 
   // Fast O(N + M) index mapping receipts to clients
@@ -520,9 +524,11 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => 
               }`}
             >
               <option value="">Todos los Estados</option>
+              <option value="procesando">⚙️ Procesando</option>
               <option value="en_proceso">🔵 En curso</option>
-              <option value="completado">✅ Completado</option>
+              <option value="parcial">🟠 Parcial</option>
               <option value="garantia_en_proceso">🟡 Garantía en proceso</option>
+              <option value="completado">✅ Completado</option>
               <option value="cancelado">🔴 Cancelado</option>
             </select>
           </div>
@@ -602,25 +608,14 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => 
           </button>
           <button
             type="button"
-            onClick={() => setSelectedStatus("cancelado")}
+            onClick={() => setSelectedStatus("procesando")}
             className={`px-2.5 py-1 rounded-lg text-xs font-bold transition cursor-pointer border flex items-center gap-1 ${
-              selectedStatus === "cancelado"
-                ? "bg-rose-600 text-white border-rose-700 shadow-2xs"
-                : isDarkMode ? "bg-slate-800 text-rose-400 border-rose-900/60 hover:bg-rose-950/40" : "bg-rose-50 text-rose-700 border-rose-200 hover:bg-rose-100"
+              selectedStatus === "procesando"
+                ? "bg-sky-600 text-white border-sky-700 shadow-2xs"
+                : isDarkMode ? "bg-slate-800 text-sky-400 border-sky-900/60 hover:bg-sky-950/40" : "bg-sky-50 text-sky-700 border-sky-200 hover:bg-sky-100"
             }`}
           >
-            <span>🔴 Cancelados ({statusCounts.cancelados})</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => setSelectedStatus("garantia_en_proceso")}
-            className={`px-2.5 py-1 rounded-lg text-xs font-bold transition cursor-pointer border flex items-center gap-1 ${
-              selectedStatus === "garantia_en_proceso"
-                ? "bg-amber-600 text-white border-amber-700 shadow-2xs"
-                : isDarkMode ? "bg-slate-800 text-amber-400 border-amber-900/60 hover:bg-amber-950/40" : "bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100"
-            }`}
-          >
-            <span>🟡 Garantía en proceso ({statusCounts.garantias})</span>
+            <span>⚙️ Procesando ({statusCounts.procesando})</span>
           </button>
           <button
             type="button"
@@ -631,7 +626,29 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => 
                 : isDarkMode ? "bg-slate-800 text-blue-400 border-blue-900/60 hover:bg-blue-950/40" : "bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100"
             }`}
           >
-            <span>🔵 En proceso ({statusCounts.enProceso})</span>
+            <span>🔵 En curso ({statusCounts.enCurso})</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setSelectedStatus("parcial")}
+            className={`px-2.5 py-1 rounded-lg text-xs font-bold transition cursor-pointer border flex items-center gap-1 ${
+              selectedStatus === "parcial"
+                ? "bg-orange-600 text-white border-orange-700 shadow-2xs"
+                : isDarkMode ? "bg-slate-800 text-orange-400 border-orange-900/60 hover:bg-orange-950/40" : "bg-orange-50 text-orange-700 border-orange-200 hover:bg-orange-100"
+            }`}
+          >
+            <span>🟠 Parcial ({statusCounts.parcial})</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setSelectedStatus("garantia_en_proceso")}
+            className={`px-2.5 py-1 rounded-lg text-xs font-bold transition cursor-pointer border flex items-center gap-1 ${
+              selectedStatus === "garantia_en_proceso"
+                ? "bg-amber-600 text-white border-amber-700 shadow-2xs"
+                : isDarkMode ? "bg-slate-800 text-amber-400 border-amber-900/60 hover:bg-amber-950/40" : "bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100"
+            }`}
+          >
+            <span>🟡 Garantía ({statusCounts.garantias})</span>
           </button>
           <button
             type="button"
@@ -643,6 +660,17 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => 
             }`}
           >
             <span>✅ Completados ({statusCounts.completados})</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setSelectedStatus("cancelado")}
+            className={`px-2.5 py-1 rounded-lg text-xs font-bold transition cursor-pointer border flex items-center gap-1 ${
+              selectedStatus === "cancelado"
+                ? "bg-rose-600 text-white border-rose-700 shadow-2xs"
+                : isDarkMode ? "bg-slate-800 text-rose-400 border-rose-900/60 hover:bg-rose-950/40" : "bg-rose-50 text-rose-700 border-rose-200 hover:bg-rose-100"
+            }`}
+          >
+            <span>🔴 Cancelados ({statusCounts.cancelados})</span>
           </button>
         </div>
 
@@ -799,22 +827,30 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => 
                       <td className="py-3 px-4">
                         {(() => {
                           const norm = getNormalizedStatus(r.status);
-                          const badgeColor =
-                            norm === "completado"
-                              ? isDarkMode
-                                ? "bg-emerald-950/80 border-emerald-700 text-emerald-300"
-                                : "bg-emerald-50 border-emerald-300 text-emerald-800"
-                              : norm === "cancelado"
-                              ? isDarkMode
-                                ? "bg-rose-950/80 border-rose-800 text-rose-300"
-                                : "bg-rose-50 border-rose-300 text-rose-800"
-                              : norm === "garantia_en_proceso"
-                              ? isDarkMode
-                                ? "bg-amber-950/80 border-amber-800 text-amber-300"
-                                : "bg-amber-50 border-amber-300 text-amber-800"
-                              : isDarkMode
-                              ? "bg-blue-950/80 border-blue-800 text-blue-300"
-                              : "bg-blue-50 border-blue-300 text-blue-800";
+                          let badgeColor = isDarkMode
+                            ? "bg-blue-950/80 border-blue-800 text-blue-300"
+                            : "bg-blue-50 border-blue-300 text-blue-800";
+                          if (norm === "procesando") {
+                            badgeColor = isDarkMode
+                              ? "bg-sky-950/80 border-sky-700 text-sky-300"
+                              : "bg-sky-50 border-sky-300 text-sky-800";
+                          } else if (norm === "parcial") {
+                            badgeColor = isDarkMode
+                              ? "bg-orange-950/80 border-orange-700 text-orange-300"
+                              : "bg-orange-50 border-orange-300 text-orange-800";
+                          } else if (norm === "completado") {
+                            badgeColor = isDarkMode
+                              ? "bg-emerald-950/80 border-emerald-700 text-emerald-300"
+                              : "bg-emerald-50 border-emerald-300 text-emerald-800";
+                          } else if (norm === "cancelado") {
+                            badgeColor = isDarkMode
+                              ? "bg-rose-950/80 border-rose-800 text-rose-300"
+                              : "bg-rose-50 border-rose-300 text-rose-800";
+                          } else if (norm === "garantia_en_proceso") {
+                            badgeColor = isDarkMode
+                              ? "bg-amber-950/80 border-amber-800 text-amber-300"
+                              : "bg-amber-50 border-amber-300 text-amber-800";
+                          }
 
                           return (
                             <select
@@ -829,9 +865,11 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => 
                               }}
                               className={`text-[11px] font-bold rounded-lg border px-2 py-1 focus:outline-hidden cursor-pointer transition ${badgeColor}`}
                             >
+                              <option value="procesando" className="bg-white text-sky-800 dark:bg-slate-800 dark:text-sky-300">⚙️ Procesando</option>
                               <option value="en_proceso" className="bg-white text-gray-900 dark:bg-slate-800 dark:text-white">🔵 En curso</option>
-                              <option value="completado" className="bg-white text-emerald-700 dark:bg-slate-800 dark:text-emerald-300">✅ Completado</option>
+                              <option value="parcial" className="bg-white text-orange-800 dark:bg-slate-800 dark:text-orange-300">🟠 Parcial</option>
                               <option value="garantia_en_proceso" className="bg-white text-gray-900 dark:bg-slate-800 dark:text-white">🟡 Garantía en proceso</option>
+                              <option value="completado" className="bg-white text-emerald-700 dark:bg-slate-800 dark:text-emerald-300">✅ Completado</option>
                               <option value="cancelado" className="bg-white text-gray-900 dark:bg-slate-800 dark:text-white">🔴 Cancelado</option>
                             </select>
                           );

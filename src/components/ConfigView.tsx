@@ -35,7 +35,11 @@ import {
   Globe,
   PackageOpen,
   Radio,
-  Hash
+  Hash,
+  Eye,
+  EyeOff,
+  Key,
+  CheckCircle2
 } from "lucide-react";
 import {
   BusinessConfig,
@@ -48,7 +52,14 @@ import {
   ProviderApiConfig,
   ProviderOrderSyncResult
 } from "../types";
-import { fetchProviderConfig, fetchProviderBalance, syncOrderWithProvider, fetchInstagramProfile } from "../services/providerApi";
+import {
+  fetchProviderConfig,
+  fetchProviderBalance,
+  syncOrderWithProvider,
+  fetchInstagramProfile,
+  testProviderConnection,
+  saveProviderConfig
+} from "../services/providerApi";
 import { motion, AnimatePresence } from "motion/react";
 
 export const ConfigView: React.FC = () => {
@@ -88,6 +99,20 @@ export const ConfigView: React.FC = () => {
   const [testOrderResults, setTestOrderResults] = useState<ProviderOrderSyncResult[]>([]);
   const [testOrderError, setTestOrderError] = useState<string | null>(null);
   const [testSimulated, setTestSimulated] = useState(false);
+
+  // Editable Provider API States
+  const [providerUrlInput, setProviderUrlInput] = useState(
+    businessConfig.providerApiUrl || "https://mazsocialmarket.com/api/v2"
+  );
+  const [providerKeyInput, setProviderKeyInput] = useState(businessConfig.providerApiKey || "");
+  const [showApiKey, setShowApiKey] = useState(false);
+  const [isSavingApiConfig, setIsSavingApiConfig] = useState(false);
+  const [saveApiSuccessMsg, setSaveApiSuccessMsg] = useState<string | null>(null);
+  const [saveApiErrorMsg, setSaveApiErrorMsg] = useState<string | null>(null);
+  const [isTestingApiConnection, setIsTestingApiConnection] = useState(false);
+  const [testApiSuccessMsg, setTestApiSuccessMsg] = useState<string | null>(null);
+  const [testApiErrorMsg, setTestApiErrorMsg] = useState<string | null>(null);
+  const [showEditApiForm, setShowEditApiForm] = useState(false);
 
   // Instagram Live Testing State (Option A)
   const [igTestUser, setIgTestUser] = useState("");
@@ -532,10 +557,87 @@ export const ConfigView: React.FC = () => {
       setIsLoadingConfig(true);
       fetchProviderConfig().then((cfg) => {
         setProviderConfig(cfg);
+        if (cfg.providerUrl && !businessConfig.providerApiUrl) {
+          setProviderUrlInput(cfg.providerUrl);
+        }
         setIsLoadingConfig(false);
       });
     }
   }, [activeTab]);
+
+  useEffect(() => {
+    if (businessConfig.providerApiUrl) {
+      setProviderUrlInput(businessConfig.providerApiUrl);
+    }
+    if (businessConfig.providerApiKey) {
+      setProviderKeyInput(businessConfig.providerApiKey);
+    }
+  }, [businessConfig.providerApiUrl, businessConfig.providerApiKey]);
+
+  const handleTestApiConnection = async () => {
+    setIsTestingApiConnection(true);
+    setTestApiSuccessMsg(null);
+    setTestApiErrorMsg(null);
+    try {
+      const res = await testProviderConnection(providerUrlInput, providerKeyInput);
+      if (res.success) {
+        setTestApiSuccessMsg(res.message || `¡Conexión exitosa! Saldo disponible: $${res.balance} ${res.currency || 'USD'}`);
+        if (res.balance !== undefined) {
+          setProviderBalance({ balance: res.balance, currency: res.currency });
+        }
+      } else {
+        setTestApiErrorMsg(res.error || "No se pudo conectar con la API del proveedor.");
+      }
+    } catch (err: any) {
+      setTestApiErrorMsg(err.message || "Error al probar conexión con el proveedor.");
+    } finally {
+      setIsTestingApiConnection(false);
+    }
+  };
+
+  const handleSaveApiConfig = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!providerUrlInput.trim()) {
+      setSaveApiErrorMsg("Por favor ingresa la URL de la API del proveedor.");
+      return;
+    }
+    if (!providerKeyInput.trim()) {
+      setSaveApiErrorMsg("Por favor ingresa la clave API del proveedor.");
+      return;
+    }
+    setIsSavingApiConfig(true);
+    setSaveApiSuccessMsg(null);
+    setSaveApiErrorMsg(null);
+    try {
+      // 1. Save on server (.env and runtime memory)
+      const res = await saveProviderConfig(providerUrlInput.trim(), providerKeyInput.trim());
+      if (!res.success) {
+        setSaveApiErrorMsg(res.error || "No se pudo guardar la configuración en el servidor.");
+        return;
+      }
+
+      // 2. Persist in Firestore config so it survives redeployments
+      await updateBusinessConfig({
+        providerApiUrl: providerUrlInput.trim(),
+        providerApiKey: providerKeyInput.trim()
+      });
+
+      // 3. Refresh config status and balance
+      const updatedConfig = await fetchProviderConfig();
+      setProviderConfig(updatedConfig);
+      if (res.balance !== undefined) {
+        setProviderBalance({ balance: res.balance, currency: res.currency });
+      }
+
+      setSaveApiSuccessMsg("¡Credenciales de la API verificadas y guardadas exitosamente!");
+      setShowEditApiForm(false);
+      setTimeout(() => setSaveApiSuccessMsg(null), 6000);
+    } catch (err: any) {
+      setSaveApiErrorMsg(err.message || "Error al guardar la configuración.");
+    } finally {
+      setIsSavingApiConfig(false);
+    }
+  };
 
   const handleCheckBalance = async () => {
     setIsLoadingBalance(true);
@@ -561,7 +663,8 @@ export const ConfigView: React.FC = () => {
     setTestOrderError(null);
     setTestOrderResults([]);
     try {
-      const res = await syncOrderWithProvider(testOrderId.trim(), true);
+      const cleanInput = testOrderId.trim().replace(/#/g, "");
+      const res = await syncOrderWithProvider(cleanInput, true);
       if (res.success) {
         setTestOrderResults(res.results || []);
         setTestSimulated(Boolean(res.simulated));
@@ -2057,17 +2160,28 @@ export const ConfigView: React.FC = () => {
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-              {/* Card 1: Estado y Conexión */}
+              {/* Card 1: Estado, Configuración y Saldo */}
               <div className={`p-6 rounded-2xl border space-y-5 transition ${
                 isDarkMode ? "bg-slate-900/90 border-slate-800" : "bg-white border-gray-200"
               }`}>
-                <h4 className={`text-xs font-bold uppercase tracking-wider flex items-center gap-2 border-b pb-3 ${
-                  isDarkMode ? "text-slate-400 border-slate-800" : "text-gray-400 border-gray-100"
-                }`}>
-                  <Settings className="w-4 h-4 text-indigo-500" />
-                  <span>Estado de la Conexión</span>
-                </h4>
+                <div className="flex items-center justify-between border-b pb-3">
+                  <h4 className={`text-xs font-bold uppercase tracking-wider flex items-center gap-2 ${
+                    isDarkMode ? "text-slate-400 border-slate-800" : "text-gray-400 border-gray-100"
+                  }`}>
+                    <Settings className="w-4 h-4 text-indigo-500" />
+                    <span>Configuración de la API del Proveedor</span>
+                  </h4>
+                  <button
+                    type="button"
+                    onClick={() => setShowEditApiForm(prev => !prev)}
+                    className="text-xs font-bold text-indigo-600 hover:text-indigo-500 dark:text-indigo-400 cursor-pointer flex items-center gap-1"
+                  >
+                    <Edit2 className="w-3.5 h-3.5" />
+                    <span>{showEditApiForm ? "Cerrar Editor" : "Editar Credenciales"}</span>
+                  </button>
+                </div>
 
+                {/* Resumen Actual de Conexión */}
                 <div className="space-y-3 text-xs">
                   <div>
                     <label className={`block font-semibold mb-1 ${isDarkMode ? "text-slate-400" : "text-gray-500"}`}>
@@ -2076,21 +2190,150 @@ export const ConfigView: React.FC = () => {
                     <div className={`p-3 rounded-xl border font-mono text-xs ${
                       isDarkMode ? "bg-slate-950 border-slate-800 text-slate-300" : "bg-slate-50 border-slate-200 text-slate-800"
                     }`}>
-                      {providerConfig?.providerUrl || "No configurada (defina PROVIDER_API_URL en .env)"}
+                      {providerConfig?.providerUrl || providerUrlInput || "https://mazsocialmarket.com/api/v2"}
                     </div>
                   </div>
 
                   <div>
                     <label className={`block font-semibold mb-1 ${isDarkMode ? "text-slate-400" : "text-gray-500"}`}>
-                      Clave de API (Protegida en Servidor):
+                      Clave de API:
                     </label>
                     <div className={`p-3 rounded-xl border font-mono text-xs flex items-center justify-between ${
                       isDarkMode ? "bg-slate-950 border-slate-800 text-slate-300" : "bg-slate-50 border-slate-200 text-slate-800"
                     }`}>
-                      <span>{providerConfig?.maskedKey || "No configurada (defina PROVIDER_API_KEY en .env)"}</span>
-                      <span className="text-[10px] text-gray-400 font-sans">Segura en servidor</span>
+                      <span>
+                        {providerConfig?.maskedKey
+                          ? providerConfig.maskedKey
+                          : providerKeyInput
+                          ? `••••••••${providerKeyInput.slice(-4)}`
+                          : "No configurada aún"}
+                      </span>
+                      <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-sans font-semibold">
+                        {providerConfig?.configured ? "✓ Configurada" : "Sin configurar"}
+                      </span>
                     </div>
                   </div>
+
+                  {/* Formulario Editable (Desplegable) */}
+                  <AnimatePresence>
+                    {showEditApiForm && (
+                      <motion.form
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: "auto" }}
+                        exit={{ opacity: 0, height: 0 }}
+                        onSubmit={handleSaveApiConfig}
+                        className={`p-4 rounded-xl border space-y-3.5 ${
+                          isDarkMode ? "bg-slate-950/80 border-slate-700" : "bg-indigo-50/50 border-indigo-200"
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 font-bold text-xs text-indigo-700 dark:text-indigo-300">
+                          <Key className="w-4 h-4" />
+                          <span>Cambiar o Configurar Credenciales de API</span>
+                        </div>
+
+                        <div>
+                          <div className="flex items-center justify-between mb-1">
+                            <label className="text-[11px] font-bold text-gray-700 dark:text-slate-300">
+                              URL de la API v2:
+                            </label>
+                            <button
+                              type="button"
+                              onClick={() => setProviderUrlInput("https://mazsocialmarket.com/api/v2")}
+                              className="text-[10px] text-indigo-600 hover:underline cursor-pointer"
+                            >
+                              Restablecer a MazSocialMarket
+                            </button>
+                          </div>
+                          <input
+                            type="text"
+                            required
+                            value={providerUrlInput}
+                            onChange={(e) => setProviderUrlInput(e.target.value)}
+                            placeholder="https://mazsocialmarket.com/api/v2"
+                            className={`w-full px-3 py-2 border rounded-xl text-xs font-mono transition ${
+                              isDarkMode ? "bg-slate-900 border-slate-700 text-white" : "bg-white border-gray-300 text-gray-900"
+                            }`}
+                          />
+                        </div>
+
+                        <div>
+                          <label className="block text-[11px] font-bold text-gray-700 dark:text-slate-300 mb-1">
+                            Clave API Secreta (API Key):
+                          </label>
+                          <div className="relative">
+                            <input
+                              type={showApiKey ? "text" : "password"}
+                              required
+                              value={providerKeyInput}
+                              onChange={(e) => setProviderKeyInput(e.target.value)}
+                              placeholder="Pega la clave API de tu panel mayorista"
+                              className={`w-full pl-3 pr-10 py-2 border rounded-xl text-xs font-mono transition ${
+                                isDarkMode ? "bg-slate-900 border-slate-700 text-white" : "bg-white border-gray-300 text-gray-900"
+                              }`}
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setShowApiKey(prev => !prev)}
+                              className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 p-0.5 cursor-pointer"
+                            >
+                              {showApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Success / Error Messages */}
+                        {testApiSuccessMsg && (
+                          <div className="p-2.5 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 text-[11px] flex items-center gap-1.5">
+                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                            <span>{testApiSuccessMsg}</span>
+                          </div>
+                        )}
+                        {testApiErrorMsg && (
+                          <div className="p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 text-[11px] flex items-center gap-1.5">
+                            <AlertCircle className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+                            <span>{testApiErrorMsg}</span>
+                          </div>
+                        )}
+                        {saveApiSuccessMsg && (
+                          <div className="p-2.5 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 text-[11px] flex items-center gap-1.5">
+                            <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                            <span>{saveApiSuccessMsg}</span>
+                          </div>
+                        )}
+                        {saveApiErrorMsg && (
+                          <div className="p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 text-[11px] flex items-center gap-1.5">
+                            <AlertCircle className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+                            <span>{saveApiErrorMsg}</span>
+                          </div>
+                        )}
+
+                        {/* Action Buttons */}
+                        <div className="flex gap-2 pt-1">
+                          <button
+                            type="button"
+                            onClick={handleTestApiConnection}
+                            disabled={isTestingApiConnection || isSavingApiConfig || !providerUrlInput.trim() || !providerKeyInput.trim()}
+                            className="flex-1 py-2 px-3 border border-indigo-200 dark:border-indigo-800 bg-white dark:bg-slate-900 hover:bg-indigo-50 dark:hover:bg-slate-800 text-indigo-700 dark:text-indigo-300 rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+                          >
+                            <RefreshCw className={`w-3.5 h-3.5 ${isTestingApiConnection ? 'animate-spin' : ''}`} />
+                            <span>{isTestingApiConnection ? "Probando..." : "Probar Conexión"}</span>
+                          </button>
+                          <button
+                            type="submit"
+                            disabled={isSavingApiConfig || isTestingApiConnection}
+                            className="flex-1 py-2 px-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 shadow-xs cursor-pointer disabled:opacity-50"
+                          >
+                            {isSavingApiConfig ? (
+                              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <Save className="w-3.5 h-3.5" />
+                            )}
+                            <span>{isSavingApiConfig ? "Guardando..." : "Guardar Credenciales"}</span>
+                          </button>
+                        </div>
+                      </motion.form>
+                    )}
+                  </AnimatePresence>
 
                   {/* Saldo Proveedor */}
                   <div className={`p-4 rounded-xl border space-y-3 ${

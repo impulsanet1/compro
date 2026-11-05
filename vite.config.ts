@@ -7,6 +7,17 @@ import { VitePWA } from 'vite-plugin-pwa';
 export default defineConfig(() => {
   return {
     plugins: [
+      {
+        name: 'disable-vite-hmr-ws',
+        transform(code, id) {
+          if (id.includes('vite/dist/client/client.mjs')) {
+            return code.replace(
+              'const createWebSocketModuleRunnerTransport = (options) => {',
+              'const createWebSocketModuleRunnerTransport = (options) => { return { async connect() {}, async disconnect() {}, send() {} };'
+            );
+          }
+        },
+      },
       react(),
       tailwindcss(),
       VitePWA({

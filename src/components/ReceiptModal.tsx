@@ -8,7 +8,7 @@ import { X, ShieldCheck, Edit3, Save, Trash2, ShieldAlert, Calendar, ChevronDown
 import { Receipt, ReceiptItem, ReceiptStatus, getNormalizedStatus, getItemOrderIds, getItemOrderIdDisplay, getOrderIdTypeLabel, isCustomServiceCode, resolveReceiptWarranty, ProviderOrderSyncResult, formatProviderStatus } from "../types";
 import { motion, AnimatePresence } from "motion/react";
 import { useApp } from "../context/AppContext";
-import { syncOrderWithProvider } from "../services/providerApi";
+import { syncOrderWithProvider, saveProviderConfig } from "../services/providerApi";
 import { getCustomerTrackingUrl } from "../utils/trackingUrl";
 
 interface ReceiptModalProps {
@@ -26,7 +26,7 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
   whatsapp,
   initialIsEditing = false,
 }) => {
-  const { businessConfig, updateReceipt, socialNetworks, services, addSupplierWarranty, reopenOrResendWarrantyForCancelledOrder, syncReceiptWithProvider } = useApp();
+  const { businessConfig, updateBusinessConfig, updateReceipt, socialNetworks, services, addSupplierWarranty, reopenOrResendWarrantyForCancelledOrder, syncReceiptWithProvider } = useApp();
   const receiptRef = useRef<HTMLDivElement>(null);
   
   // Format utility
@@ -171,6 +171,9 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
   const [isSyncingProvider, setIsSyncingProvider] = useState(false);
   const [syncResults, setSyncResults] = useState<ProviderOrderSyncResult[]>([]);
   const [syncError, setSyncError] = useState<string | null>(null);
+  const [syncNeedsApiKey, setSyncNeedsApiKey] = useState(false);
+  const [inlineApiKeyInput, setInlineApiKeyInput] = useState("");
+  const [isSavingInlineKey, setIsSavingInlineKey] = useState(false);
   const [syncIsSimulated, setSyncIsSimulated] = useState(false);
   const [syncSuccessMsg, setSyncSuccessMsg] = useState<string | null>(null);
   const [syncTargetServiceName, setSyncTargetServiceName] = useState<string | null>(null);
@@ -212,7 +215,8 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
     const executeAutoSync = async () => {
       const numericIds = (receipt.services || [])
         .flatMap((s) => getItemOrderIds(s))
-        .filter((id) => /^\d{3,}$/.test(id.trim()));
+        .filter((id) => !/^PED-\d+$/i.test(id.trim()))
+        .flatMap((id) => id.match(/\d{3,}/g) || []);
 
       if (numericIds.length === 0) return;
 
@@ -830,12 +834,20 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
   };
 
   const handleSyncOrders = async (targetOrderIds?: string[], serviceName?: string) => {
-    let idsToSync: string[] = [];
+    let rawIds: string[] = [];
     if (targetOrderIds && targetOrderIds.length > 0) {
-      idsToSync = targetOrderIds;
+      rawIds = targetOrderIds;
     } else {
-      idsToSync = (receipt.services || []).flatMap((s) => getItemOrderIds(s)).filter(Boolean);
+      rawIds = (receipt.services || []).flatMap((s) => getItemOrderIds(s)).filter(Boolean);
     }
+
+    const numericCleaned = rawIds
+      .filter((id) => !/^PED-\d+$/i.test(id.trim()))
+      .flatMap((id) => id.match(/\d{3,}/g) || []);
+
+    const idsToSync = numericCleaned.length > 0
+      ? Array.from(new Set(numericCleaned))
+      : Array.from(new Set(rawIds.map((id) => id.replace(/^#/, "").trim()).filter(Boolean)));
 
     if (idsToSync.length === 0) {
       setError("No hay IDs de orden de proveedor registrados en este comprobante para sincronizar.");
@@ -845,17 +857,63 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
     setShowSyncModal(true);
     setIsSyncingProvider(true);
     setSyncError(null);
+    setSyncNeedsApiKey(false);
     setSyncSuccessMsg(null);
     setSyncTargetServiceName(serviceName || null);
 
     try {
-      const response = await syncOrderWithProvider(idsToSync, true);
-      if (!response.success && response.error) {
-        setSyncError(response.error);
+      const response = await syncOrderWithProvider(idsToSync, false);
+      if (!response.success) {
+        setSyncError(response.error || "No se pudo consultar la API del proveedor.");
+        setSyncNeedsApiKey(response.configured === false);
         setSyncResults([]);
       } else {
-        setSyncResults(response.results || []);
+        const results = response.results || [];
+        setSyncResults(results);
         setSyncIsSimulated(Boolean(response.simulated));
+
+        // Automatically synchronize receipt status if valid provider statuses were returned
+        const foundItems = results.filter((r) => r.found);
+        if (foundItems.length > 0) {
+          const allCompleted = foundItems.every((r) => r.mappedStatus === "completado");
+          const anyPartial = foundItems.some((r) => r.mappedStatus === "parcial");
+          const anyProcessing = foundItems.some((r) => r.mappedStatus === "procesando");
+          const anyInProcess = foundItems.some((r) => r.mappedStatus === "en_proceso");
+          const anyCanceled = foundItems.some((r) => r.mappedStatus === "cancelado");
+
+          let determinedStatus: ReceiptStatus = "en_proceso";
+          if (allCompleted) determinedStatus = "completado";
+          else if (anyPartial) determinedStatus = "parcial";
+          else if (anyProcessing) determinedStatus = "procesando";
+          else if (anyInProcess) determinedStatus = "en_proceso";
+          else if (anyCanceled) determinedStatus = "cancelado";
+
+          const currentNorm = getNormalizedStatus(receipt.status);
+          if (determinedStatus !== currentNorm) {
+            const nowFormatted = new Date().toLocaleString("es-CO", { dateStyle: "short", timeStyle: "short" });
+            const summaryList = foundItems.map((r) => `#${r.orderId}: ${r.rawStatus}`).join(", ");
+            const statusLabel =
+              determinedStatus === "completado"
+                ? "Completado"
+                : determinedStatus === "procesando"
+                ? "Procesando"
+                : determinedStatus === "parcial"
+                ? "Parcial"
+                : determinedStatus === "cancelado"
+                ? "Cancelado"
+                : "En curso";
+            const noteEntry = `[${nowFormatted}] 📡 Sincronización API Proveedor: ${summaryList}. Estado actualizado automáticamente a "${statusLabel}".`;
+            const updatedNotes = editedInternalNotes ? `${editedInternalNotes}\n${noteEntry}` : noteEntry;
+
+            await updateReceipt(receipt.id, {
+              status: determinedStatus,
+              internalNotes: updatedNotes,
+            });
+            setEditedStatus(determinedStatus);
+            setEditedInternalNotes(updatedNotes);
+            setSyncSuccessMsg(`¡Estado actualizado automáticamente a "${statusLabel}" según el proveedor!`);
+          }
+        }
       }
     } catch (err: any) {
       setSyncError(err.message || "Error al sincronizar con el proveedor.");
@@ -865,13 +923,50 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
     }
   };
 
-  const handleApplySyncToReceipt = async (targetStatus: "completado" | "en_proceso" | "cancelado") => {
+  const handleSaveInlineApiKeyAndSync = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!inlineApiKeyInput.trim()) return;
+    setIsSavingInlineKey(true);
+    setSyncError(null);
+    try {
+      const targetUrl = businessConfig.providerApiUrl || "https://mazsocialmarket.com/api/v2";
+      const targetKey = inlineApiKeyInput.trim();
+      const saveRes = await saveProviderConfig(targetUrl, targetKey);
+      if (!saveRes.success) {
+        setSyncError(saveRes.error || "No se pudo verificar la clave API con MazSocialMarket.");
+        setIsSavingInlineKey(false);
+        return;
+      }
+      await updateBusinessConfig({
+        providerApiUrl: targetUrl,
+        providerApiKey: targetKey,
+      });
+      setSyncNeedsApiKey(false);
+      setInlineApiKeyInput("");
+      setIsSavingInlineKey(false);
+      await handleSyncOrders(undefined, syncTargetServiceName || undefined);
+    } catch (err: any) {
+      setSyncError(err.message || "Error al guardar la clave API.");
+      setIsSavingInlineKey(false);
+    }
+  };
+
+  const handleApplySyncToReceipt = async (targetStatus: "procesando" | "en_proceso" | "parcial" | "completado" | "cancelado") => {
     setIsApplyingSync(true);
     try {
       const nowFormatted = new Date().toLocaleString("es-CO", { dateStyle: "short", timeStyle: "short" });
       const summaryList = syncResults.map((r) => `#${r.orderId}: ${r.rawStatus}`).join(", ");
       const simTag = syncIsSimulated ? " [Simulado]" : "";
-      const statusLabel = targetStatus === "completado" ? "Completado" : targetStatus === "cancelado" ? "Cancelado" : "En proceso";
+      const statusLabel =
+        targetStatus === "completado"
+          ? "Completado"
+          : targetStatus === "procesando"
+          ? "Procesando"
+          : targetStatus === "parcial"
+          ? "Parcial"
+          : targetStatus === "cancelado"
+          ? "Cancelado"
+          : "En curso";
       const noteEntry = `[${nowFormatted}] 📡 Sincronización API Proveedor${simTag}: ${summaryList}. Estado actualizado a "${statusLabel}".`;
       const updatedNotes = editedInternalNotes ? `${editedInternalNotes}\n${noteEntry}` : noteEntry;
 
@@ -2297,30 +2392,42 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
 
               {/* Error State */}
               {!isSyncingProvider && syncError && (
-                <div className="p-4 bg-rose-50 border border-rose-200 rounded-xl space-y-2 text-xs">
+                <div className="p-4 bg-rose-50 border border-rose-200 rounded-xl space-y-3 text-xs">
                   <div className="flex items-center gap-2 font-bold text-rose-800">
                     <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
                     <span>Error al consultar la API del proveedor</span>
                   </div>
                   <p className="text-rose-700 leading-relaxed">{syncError}</p>
-                  <div className="pt-2 border-t border-rose-200/60 text-[11px] text-rose-600">
-                    💡 Asegúrate de definir <strong>PROVIDER_API_URL</strong> y <strong>PROVIDER_API_KEY</strong> en tu archivo <code>.env</code>. También puedes consultar la pestaña "Sincronización API Proveedor" en Ajustes.
-                  </div>
+
+                  {syncNeedsApiKey && (
+                    <form onSubmit={handleSaveInlineApiKeyAndSync} className="pt-2 border-t border-rose-200/80 space-y-2">
+                      <label className="block text-[11px] font-bold text-rose-900">
+                        🔑 Pega aquí tu API Key de MazSocialMarket para conectarla permanentemente:
+                      </label>
+                      <div className="flex flex-col sm:flex-row gap-2">
+                        <input
+                          type="password"
+                          value={inlineApiKeyInput}
+                          onChange={(e) => setInlineApiKeyInput(e.target.value)}
+                          placeholder="Tu clave API de MazSocialMarket..."
+                          className="flex-1 px-3 py-2 bg-white border border-rose-300 rounded-lg text-xs text-gray-900 focus:outline-hidden focus:ring-2 focus:ring-blue-500"
+                        />
+                        <button
+                          type="submit"
+                          disabled={isSavingInlineKey || !inlineApiKeyInput.trim()}
+                          className="px-3.5 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white font-bold rounded-lg text-xs transition cursor-pointer shrink-0"
+                        >
+                          {isSavingInlineKey ? "Conectando..." : "Guardar y Sincronizar"}
+                        </button>
+                      </div>
+                    </form>
+                  )}
                 </div>
               )}
 
               {/* Results State */}
               {!isSyncingProvider && !syncError && syncResults.length > 0 && (
                 <div className="space-y-3">
-                  {syncIsSimulated && (
-                    <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-xl text-[11px] text-amber-900 flex items-start gap-2">
-                      <span className="text-sm leading-none mt-0.5">ℹ️</span>
-                      <div>
-                        <strong>Modo demostración activo:</strong> Configura <code>PROVIDER_API_URL</code> y <code>PROVIDER_API_KEY</code> en tu <code>.env</code> para conectar con la API real de tu proveedor.
-                      </div>
-                    </div>
-                  )}
-
                   <div className="space-y-2">
                     <label className="text-[11px] font-bold text-gray-500 uppercase tracking-wider block">
                       Órdenes Consultadas en el Proveedor ({syncResults.length})
@@ -2329,6 +2436,8 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                     {syncResults.map((res) => {
                       const isCompleted = res.mappedStatus === "completado";
                       const isCanceled = res.mappedStatus === "cancelado";
+                      const isPartial = res.mappedStatus === "parcial";
+                      const isProcessing = res.mappedStatus === "procesando";
 
                       return (
                         <div 
@@ -2345,9 +2454,13 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                                 ? "bg-emerald-100 text-emerald-800 border-emerald-300"
                                 : isCanceled
                                 ? "bg-rose-100 text-rose-800 border-rose-300"
-                                : "bg-amber-100 text-amber-800 border-amber-300"
+                                : isPartial
+                                ? "bg-orange-100 text-orange-800 border-orange-300"
+                                : isProcessing
+                                ? "bg-sky-100 text-sky-800 border-sky-300"
+                                : "bg-blue-100 text-blue-800 border-blue-300"
                             }`}>
-                              {res.rawStatus}
+                              {formatProviderStatus(res.rawStatus)} ({res.rawStatus})
                             </span>
                           </div>
 
@@ -2383,28 +2496,53 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                   {/* Actions to apply status to receipt */}
                   <div className="pt-2 border-t border-gray-100 space-y-2">
                     <label className="text-[11px] font-bold text-gray-700 block">
-                      ¿Deseas actualizar el estado de este comprobante con el proveedor?
+                      ¿Deseas cambiar o confirmar manualmente el estado de este comprobante?
                     </label>
 
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                      {syncResults.some(r => r.mappedStatus === "completado") && (
-                        <button
-                          type="button"
-                          disabled={isApplyingSync}
-                          onClick={() => handleApplySyncToReceipt("completado")}
-                          className="py-2.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 shadow-sm cursor-pointer disabled:opacity-50"
-                        >
-                          <Check className="w-3.5 h-3.5" />
-                          <span>Marcar como "Completado"</span>
-                        </button>
-                      )}
+                      <button
+                        type="button"
+                        disabled={isApplyingSync}
+                        onClick={() => handleApplySyncToReceipt("procesando")}
+                        className="py-2 px-3 bg-sky-600 hover:bg-sky-700 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 shadow-sm cursor-pointer disabled:opacity-50"
+                      >
+                        <span>⚙️ Marcar como "Procesando"</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={isApplyingSync}
+                        onClick={() => handleApplySyncToReceipt("en_proceso")}
+                        className="py-2 px-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 shadow-sm cursor-pointer disabled:opacity-50"
+                      >
+                        <span>🔵 Marcar como "En curso"</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={isApplyingSync}
+                        onClick={() => handleApplySyncToReceipt("parcial")}
+                        className="py-2 px-3 bg-orange-500 hover:bg-orange-600 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 shadow-sm cursor-pointer disabled:opacity-50"
+                      >
+                        <span>🟠 Marcar como "Parcial"</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={isApplyingSync}
+                        onClick={() => handleApplySyncToReceipt("completado")}
+                        className="py-2 px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 shadow-sm cursor-pointer disabled:opacity-50"
+                      >
+                        <Check className="w-3.5 h-3.5" />
+                        <span>Marcar como "Completado"</span>
+                      </button>
 
                       {syncResults.some(r => r.mappedStatus === "cancelado") && (
                         <button
                           type="button"
                           disabled={isApplyingSync}
                           onClick={() => handleApplySyncToReceipt("cancelado")}
-                          className="py-2.5 px-3 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 shadow-sm cursor-pointer disabled:opacity-50"
+                          className="py-2 px-3 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 shadow-sm cursor-pointer disabled:opacity-50"
                         >
                           <span>🔴 Marcar como "Cancelado"</span>
                         </button>
@@ -2412,18 +2550,9 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
 
                       <button
                         type="button"
-                        disabled={isApplyingSync}
-                        onClick={() => handleApplySyncToReceipt("en_proceso")}
-                        className="py-2.5 px-3 bg-amber-500 hover:bg-amber-600 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 shadow-sm cursor-pointer disabled:opacity-50"
-                      >
-                        <span>⏳ Marcar como "En proceso"</span>
-                      </button>
-
-                      <button
-                        type="button"
                         onClick={() => handleSyncOrders(syncResults.map(r => r.orderId), syncTargetServiceName || undefined)}
                         disabled={isSyncingProvider || isApplyingSync}
-                        className="py-2.5 px-3 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer"
+                        className="py-2 px-3 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer"
                       >
                         <RefreshCw className="w-3.5 h-3.5" />
                         <span>Volver a Consultar</span>

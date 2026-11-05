@@ -929,6 +929,37 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
         ? undefined
         : (selectedClientObj?.id || detectedClient?.id);
 
+      // Verify provider status for any numeric order IDs before emitting so status matches provider
+      let finalReceiptStatus: ReceiptStatus = status;
+      const numericOrderIds = sanitizedServices
+        .flatMap((s) => s.orderIds || [])
+        .filter((id) => !/^PED-\d+$/i.test(id.trim()))
+        .flatMap((id) => id.match(/\d{3,}/g) || []);
+
+      if (numericOrderIds.length > 0) {
+        try {
+          const syncRes = await syncOrderWithProvider(Array.from(new Set(numericOrderIds)), false);
+          if (syncRes.success && syncRes.results) {
+            const foundItems = syncRes.results.filter((r) => r.found);
+            if (foundItems.length > 0) {
+              const allCompleted = foundItems.every((r) => r.mappedStatus === "completado");
+              const anyPartial = foundItems.some((r) => r.mappedStatus === "parcial");
+              const anyProcessing = foundItems.some((r) => r.mappedStatus === "procesando");
+              const anyInProcess = foundItems.some((r) => r.mappedStatus === "en_proceso");
+              const anyCanceled = foundItems.some((r) => r.mappedStatus === "cancelado");
+
+              if (allCompleted) finalReceiptStatus = "completado";
+              else if (anyPartial) finalReceiptStatus = "parcial";
+              else if (anyProcessing) finalReceiptStatus = "procesando";
+              else if (anyInProcess) finalReceiptStatus = "en_proceso";
+              else if (anyCanceled) finalReceiptStatus = "cancelado";
+            }
+          }
+        } catch {
+          // Keep user-selected status if provider check fails
+        }
+      }
+
       const receiptData = {
         clientId: targetClientId,
         forceNewClient: forceNewClient,
@@ -947,7 +978,7 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
         profit: totals.totalProfit,
         warranty: chosenWarranty,
         thankYouMessage: "¡Gracias por confiar en ImpulsaNet para potenciar sus redes!",
-        status: status,
+        status: finalReceiptStatus,
         internalNotes: internalNotes.trim(),
         targetAccount: (addedItems.find(i => i.targetAccount)?.targetAccount || itemTargetAccount.trim() || undefined),
         initialFollowers: (addedItems.find(i => i.startCount !== undefined)?.startCount || (itemStartCount ? Number(itemStartCount) : undefined)),
@@ -1353,7 +1384,9 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
                       : "bg-white border-gray-200 text-gray-800 focus:border-indigo-500"
                   }`}
                 >
+                  <option value="procesando">⚙️ Procesando</option>
                   <option value="en_proceso">🔵 En curso</option>
+                  <option value="parcial">🟠 Parcial</option>
                   <option value="completado">✅ Completado</option>
                   <option value="garantia_en_proceso">🟡 Garantía en proceso</option>
                   <option value="cancelado">🔴 Cancelado</option>

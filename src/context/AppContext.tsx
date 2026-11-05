@@ -40,7 +40,7 @@ import {
   ProviderOrderSyncResult
 } from "../types";
 import { DEFAULT_BUSINESS_CONFIG, DEFAULT_SOCIAL_NETWORKS, DEFAULT_SERVICES, DEFAULT_COMBOS } from "../defaultData";
-import { syncOrderWithProvider } from "../services/providerApi";
+import { syncOrderWithProvider, setCachedProviderCredentials, getCachedProviderCredentials } from "../services/providerApi";
 
 interface AppContextType {
   user: User | null;
@@ -263,7 +263,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       configRef,
       (docSnap) => {
         if (docSnap.exists()) {
-          setBusinessConfig(docSnap.data() as BusinessConfig);
+          const data = docSnap.data() as BusinessConfig;
+          setBusinessConfig(data);
+          if (data.providerApiUrl || data.providerApiKey) {
+            setCachedProviderCredentials(data.providerApiUrl, data.providerApiKey);
+          } else {
+            const localCreds = getCachedProviderCredentials();
+            if (localCreds.apiKey) {
+              setDoc(
+                configRef,
+                { providerApiUrl: localCreds.providerUrl, providerApiKey: localCreds.apiKey },
+                { merge: true }
+              ).catch(() => {});
+            }
+          }
         } else {
           setBusinessConfig(DEFAULT_BUSINESS_CONFIG);
         }
@@ -616,6 +629,34 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         for (const dep of deprecatedServices) {
           console.log("Auto-repair: Removing deprecated Alertas Digitales service:", dep.id);
           await deleteDoc(doc(db, "services", dep.id));
+        }
+
+        // ---------------------------------------------------------------------
+        // REPAIR 4: Fix Pedido 1184 status from completado to procesando
+        // ---------------------------------------------------------------------
+        const receipts1184 = receipts.filter((r) => {
+          const isConsecutive1184 = String(r.consecutive || "").trim() === "1184";
+          const hasOrderId1184 = (r.services || []).some((s) =>
+            getItemOrderIds(s).some((id) => id.replace(/^#/, "").trim() === "1184")
+          );
+          return (
+            (isConsecutive1184 || hasOrderId1184) &&
+            getNormalizedStatus(r.status) === "completado" &&
+            !(r.internalNotes || "").includes("[Ajuste Proveedor #1184]")
+          );
+        });
+        for (const r1184 of receipts1184) {
+          const note1184 = r1184.internalNotes
+            ? `${r1184.internalNotes}\n[Ajuste Proveedor #1184] Estado actualizado a "procesando" según estado en proveedor.`
+            : `[Ajuste Proveedor #1184] Estado actualizado a "procesando" según estado en proveedor.`;
+          await setDoc(
+            doc(db, "receipts", r1184.id),
+            {
+              status: "procesando",
+              internalNotes: note1184,
+            },
+            { merge: true }
+          );
         }
 
         // Sort clients deterministically: older clients or clients with earlier dates keep their assigned code
@@ -1644,8 +1685,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const numericIds = (targetReceipt.services || [])
       .flatMap((s) => getItemOrderIds(s))
-      .map((id) => id.replace(/^#/, "").trim())
-      .filter((id) => /^\d{3,}$/.test(id));
+      .filter((id) => !/^PED-\d+$/i.test(id.trim()))
+      .flatMap((id) => id.match(/\d{3,}/g) || []);
 
     if (numericIds.length === 0) {
       return { updated: false, message: "Sin IDs numéricos del proveedor registrados." };
@@ -1664,15 +1705,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       const allCompleted = foundItems.every((r) => r.mappedStatus === "completado");
       const anyPartial = foundItems.some((r) => r.mappedStatus === "parcial");
-      const anyInProcess = foundItems.some((r) => r.mappedStatus === "en_proceso");
       const anyProcessing = foundItems.some((r) => r.mappedStatus === "procesando");
+      const anyInProcess = foundItems.some((r) => r.mappedStatus === "en_proceso");
       const anyCanceled = foundItems.some((r) => r.mappedStatus === "cancelado");
 
       let determinedStatus: "completado" | "en_proceso" | "parcial" | "procesando" | "cancelado" = "en_proceso";
       if (allCompleted) determinedStatus = "completado";
       else if (anyPartial) determinedStatus = "parcial";
-      else if (anyInProcess) determinedStatus = "en_proceso";
       else if (anyProcessing) determinedStatus = "procesando";
+      else if (anyInProcess) determinedStatus = "en_proceso";
       else if (anyCanceled) determinedStatus = "cancelado";
       else determinedStatus = "en_proceso";
 
@@ -1786,15 +1827,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (foundResults.length > 0) {
           const allCompleted = foundResults.every((item) => item.mappedStatus === "completado");
           const anyPartial = foundResults.some((item) => item.mappedStatus === "parcial");
-          const anyInProcess = foundResults.some((item) => item.mappedStatus === "en_proceso");
           const anyProcessing = foundResults.some((item) => item.mappedStatus === "procesando");
+          const anyInProcess = foundResults.some((item) => item.mappedStatus === "en_proceso");
           const anyCanceled = foundResults.some((item) => item.mappedStatus === "cancelado");
 
           let finalStatus: "completado" | "en_proceso" | "parcial" | "procesando" | "cancelado" = "en_proceso";
           if (allCompleted) finalStatus = "completado";
           else if (anyPartial) finalStatus = "parcial";
-          else if (anyInProcess) finalStatus = "en_proceso";
           else if (anyProcessing) finalStatus = "procesando";
+          else if (anyInProcess) finalStatus = "en_proceso";
           else if (anyCanceled) finalStatus = "cancelado";
           else finalStatus = "en_proceso";
 

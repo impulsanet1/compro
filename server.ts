@@ -35,10 +35,15 @@ interface NormalizedOrderResult {
 function mapSmmStatusToAppStatus(rawStatus?: string): 'procesando' | 'en_proceso' | 'parcial' | 'completado' | 'cancelado' {
   if (!rawStatus) return 'en_proceso';
   const s = rawStatus.toLowerCase().trim();
-  if (s === 'partial' || s === 'parcial') {
+  if (s.includes('partial') || s.includes('parcial')) {
     return 'parcial';
   }
-  if (s === 'processing' || s === 'procesando' || s === 'pending' || s === 'pendiente') {
+  if (
+    s.includes('processing') ||
+    s.includes('procesan') ||
+    s === 'pending' ||
+    s.includes('pendient')
+  ) {
     return 'procesando';
   }
   if (s.includes('complet') || s.includes('finish') || s.includes('done') || s.includes('success')) {
@@ -47,20 +52,21 @@ function mapSmmStatusToAppStatus(rawStatus?: string): 'procesando' | 'en_proceso
   if (s.includes('cancel') || s.includes('refund') || s.includes('fail')) {
     return 'cancelado';
   }
-  // 'Pending', 'In progress', 'Processing', etc.
   return 'en_proceso';
 }
 
 function formatProviderStatusLabel(rawStatus?: string): string {
   if (!rawStatus) return 'En curso';
   const s = rawStatus.toLowerCase().trim();
-  if (s === 'partial' || s === 'parcial') {
+  if (s.includes('partial') || s.includes('parcial')) {
     return 'Parcial';
   }
-  if (s === 'processing' || s === 'procesando') {
-    return 'Procesando';
-  }
-  if (s === 'pending' || s === 'pendiente') {
+  if (
+    s.includes('processing') ||
+    s.includes('procesan') ||
+    s === 'pending' ||
+    s.includes('pendient')
+  ) {
     return 'Procesando';
   }
   if (
@@ -248,10 +254,84 @@ async function fetchLiveInstagramProfile(
 }
 
 
+async function resolveProviderCredentials(req?: Request): Promise<{ apiUrl: string; apiKey: string | null }> {
+  const DEFAULT_URL = 'https://mazsocialmarket.com/api/v2';
+
+  // 1. Check incoming headers or body from frontend (synced from Firestore businessConfig / localStorage)
+  const headerUrl = typeof req?.headers?.['x-provider-api-url'] === 'string' ? req.headers['x-provider-api-url'].trim() : '';
+  const headerKey = typeof req?.headers?.['x-provider-api-key'] === 'string' ? req.headers['x-provider-api-key'].trim() : '';
+  const bodyUrl = typeof req?.body?.providerUrl === 'string' ? req.body.providerUrl.trim() : '';
+  const bodyKey = typeof req?.body?.apiKey === 'string' ? req.body.apiKey.trim() : '';
+
+  const providedUrl = bodyUrl || headerUrl;
+  const providedKey = bodyKey || headerKey;
+
+  if (providedKey) {
+    process.env.PROVIDER_API_KEY = providedKey;
+    if (providedUrl) {
+      process.env.PROVIDER_API_URL = providedUrl;
+    } else if (!process.env.PROVIDER_API_URL) {
+      process.env.PROVIDER_API_URL = DEFAULT_URL;
+    }
+    try {
+      const envPath = path.resolve(__dirname, '.env');
+      let envContent = '';
+      if (fs.existsSync(envPath)) {
+        envContent = fs.readFileSync(envPath, 'utf8');
+      }
+      const lines = envContent
+        .split('\n')
+        .filter((l) => !l.startsWith('PROVIDER_API_URL=') && !l.startsWith('PROVIDER_API_KEY='));
+      lines.push(`PROVIDER_API_URL="${process.env.PROVIDER_API_URL}"`);
+      lines.push(`PROVIDER_API_KEY="${process.env.PROVIDER_API_KEY}"`);
+      fs.writeFileSync(envPath, lines.filter(Boolean).join('\n') + '\n', 'utf8');
+    } catch {
+      // Ignore write error in read-only environments
+    }
+  }
+
+  let apiUrl = process.env.PROVIDER_API_URL?.trim() || providedUrl || DEFAULT_URL;
+  let apiKey = process.env.PROVIDER_API_KEY?.trim() || providedKey || null;
+
+  // 2. If still not in memory, try reading Firestore config/business via REST API (publicly readable per firestore.rules)
+  if (!apiKey) {
+    try {
+      const cfgPath = path.resolve(__dirname, 'firebase-applet-config.json');
+      if (fs.existsSync(cfgPath)) {
+        const fbCfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+        const projectId = fbCfg.projectId;
+        const dbId = fbCfg.firestoreDatabaseId || '(default)';
+        if (projectId) {
+          const firestoreUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(projectId)}/databases/${encodeURIComponent(dbId)}/documents/config/business`;
+          const fbRes = await fetch(firestoreUrl);
+          if (fbRes.ok) {
+            const fbJson: any = await fbRes.json();
+            const fields = fbJson?.fields || {};
+            const remoteKey = fields?.providerApiKey?.stringValue?.trim();
+            const remoteUrl = fields?.providerApiUrl?.stringValue?.trim();
+            if (remoteKey) {
+              apiKey = remoteKey;
+              process.env.PROVIDER_API_KEY = remoteKey;
+            }
+            if (remoteUrl) {
+              apiUrl = remoteUrl;
+              process.env.PROVIDER_API_URL = remoteUrl;
+            }
+          }
+        }
+      }
+    } catch {
+      // Ignore Firestore lookup warnings
+    }
+  }
+
+  return { apiUrl, apiKey };
+}
+
 async function startServer() {
   const app = express();
   const server = http.createServer(app);
-  const PORT = 3000;
+  const PORT = Number(process.env.DEFAULT_APP_PORT) || Number(process.env.PORT) || 3000;
   const isProd = process.env.NODE_ENV === 'production';
 
   app.use(express.json());
@@ -259,9 +339,8 @@ async function startServer() {
   // --- API Routes for SMM Provider Integration ---
 
   // 1. Check API configuration status
-  app.get('/api/provider/config', (_req: Request, res: Response) => {
-    const apiUrl = process.env.PROVIDER_API_URL?.trim() || null;
-    const apiKey = process.env.PROVIDER_API_KEY?.trim() || null;
+  app.get('/api/provider/config', async (req: Request, res: Response) => {
+    const { apiUrl, apiKey } = await resolveProviderCredentials(req);
     const isConfigured = Boolean(apiUrl && apiKey);
 
     res.json({
@@ -271,17 +350,18 @@ async function startServer() {
       maskedKey: apiKey ? `••••••••${apiKey.slice(-4)}` : null,
       message: isConfigured
         ? 'API de proveedor SMM configurada y lista.'
-        : 'API no configurada en variables de entorno (PROVIDER_API_URL y PROVIDER_API_KEY).'
+        : 'API no configurada. Ingresa tu clave API en Configuración > Integración API.'
     });
   });
 
   // 2. Test connection with SMM provider (supports custom or configured credentials)
   app.post('/api/provider/test-connection', async (req: Request, res: Response) => {
-    const targetUrl = req.body?.providerUrl?.trim() || process.env.PROVIDER_API_URL?.trim();
-    const targetKey = req.body?.apiKey?.trim() || process.env.PROVIDER_API_KEY?.trim();
+    const resolved = await resolveProviderCredentials(req);
+    const targetUrl = req.body?.providerUrl?.trim() || resolved.apiUrl;
+    const targetKey = req.body?.apiKey?.trim() || resolved.apiKey;
 
     if (!targetUrl || !targetKey) {
-      return res.status(400).json({
+      return res.status(200).json({
         success: false,
         error: 'Debes proporcionar la URL de la API y la Clave API para realizar la prueba.'
       });
@@ -306,14 +386,14 @@ async function startServer() {
       try {
         data = JSON.parse(text);
       } catch {
-        return res.status(400).json({
+        return res.status(200).json({
           success: false,
-          error: `El servidor del proveedor respondió (${response.status}) pero no devolvió JSON válido. Respuesta: ${text.slice(0, 150)}`
+          error: `El servidor del proveedor respondió (${response.status}) pero no devolvió JSON válido. Verifica que la URL sea https://mazsocialmarket.com/api/v2`
         });
       }
 
       if (data?.error) {
-        return res.status(400).json({
+        return res.status(200).json({
           success: false,
           error: `Error reportado por el proveedor: "${data.error}"`
         });
@@ -328,12 +408,12 @@ async function startServer() {
         });
       }
 
-      return res.status(400).json({
+      return res.status(200).json({
         success: false,
         error: `Respuesta inesperada del proveedor: ${text.slice(0, 150)}`
       });
     } catch (err: any) {
-      return res.status(500).json({
+      return res.status(200).json({
         success: false,
         error: `Fallo de conexión de red: ${err.message || 'No se pudo contactar con el host del proveedor.'}`
       });
@@ -345,7 +425,7 @@ async function startServer() {
     const { providerUrl, apiKey } = req.body;
 
     if (!providerUrl?.trim() || !apiKey?.trim()) {
-      return res.status(400).json({
+      return res.status(200).json({
         success: false,
         error: 'La URL de la API y la Clave de API son requeridas.'
       });
@@ -374,14 +454,14 @@ async function startServer() {
       try {
         testData = JSON.parse(testText);
       } catch {
-        return res.status(400).json({
+        return res.status(200).json({
           success: false,
           error: `No se pudo verificar la API: El proveedor no devolvió una respuesta JSON válida (${testResp.status}). Revisa la URL.`
         });
       }
 
       if (testData?.error) {
-        return res.status(400).json({
+        return res.status(200).json({
           success: false,
           error: `El proveedor rechazó las credenciales: "${testData.error}". Verifica que la clave API sea la correcta.`
         });
@@ -417,7 +497,7 @@ async function startServer() {
         message: '¡Credenciales verificadas y guardadas exitosamente!'
       });
     } catch (err: any) {
-      return res.status(500).json({
+      return res.status(200).json({
         success: false,
         error: `Error al conectar con el proveedor: ${err.message || 'Error de red.'}`
       });
@@ -425,15 +505,14 @@ async function startServer() {
   });
 
   // 4. Check balance on provider
-  app.get('/api/provider/balance', async (_req: Request, res: Response) => {
-    const apiUrl = process.env.PROVIDER_API_URL?.trim();
-    const apiKey = process.env.PROVIDER_API_KEY?.trim();
+  app.get('/api/provider/balance', async (req: Request, res: Response) => {
+    const { apiUrl, apiKey } = await resolveProviderCredentials(req);
 
     if (!apiUrl || !apiKey) {
-      return res.status(400).json({
+      return res.status(200).json({
         success: false,
         configured: false,
-        error: 'PROVIDER_API_URL o PROVIDER_API_KEY no están definidos en la configuración.'
+        error: 'Clave API de MazSocialMarket no configurada. Agrégala en Configuración > Integración API.'
       });
     }
 
@@ -456,14 +535,14 @@ async function startServer() {
       try {
         data = JSON.parse(text);
       } catch {
-        return res.status(400).json({
+        return res.status(200).json({
           success: false,
           error: `Respuesta no válida del proveedor (${response.status}): ${text.slice(0, 150)}`
         });
       }
 
       if (data?.error) {
-        return res.status(400).json({
+        return res.status(200).json({
           success: false,
           error: data.error
         });
@@ -475,7 +554,7 @@ async function startServer() {
         currency: data.currency ?? 'USD'
       });
     } catch (err: any) {
-      return res.status(500).json({
+      return res.status(200).json({
         success: false,
         error: err.message || 'Error al conectar con la API del proveedor.'
       });
@@ -484,9 +563,8 @@ async function startServer() {
 
   // 5. Sync status for single or multiple Order IDs
   app.post('/api/provider/order-status', async (req: Request, res: Response) => {
-    const { orderId, orderIds, simulateIfUnconfigured } = req.body;
-    const apiUrl = process.env.PROVIDER_API_URL?.trim();
-    const apiKey = process.env.PROVIDER_API_KEY?.trim();
+    const { orderId, orderIds } = req.body;
+    const { apiUrl, apiKey } = await resolveProviderCredentials(req);
 
     const targetIds: string[] = [];
     if (orderId && typeof orderId === 'string') {
@@ -505,38 +583,17 @@ async function startServer() {
     const uniqueIds = Array.from(new Set(targetIds));
 
     if (uniqueIds.length === 0) {
-      return res.status(400).json({
+      return res.status(200).json({
         success: false,
         error: 'Debes proporcionar al menos un ID de orden de proveedor.'
       });
     }
 
-    // If unconfigured but simulation was requested (demo testing)
-    if ((!apiUrl || !apiKey) && simulateIfUnconfigured) {
-      const simulatedResults: NormalizedOrderResult[] = uniqueIds.map(id => ({
-        orderId: id,
-        found: true,
-        rawStatus: 'Completed',
-        mappedStatus: 'completado',
-        startCount: 1540,
-        remains: 0,
-        charge: '0.35',
-        currency: 'USD'
-      }));
-
-      return res.json({
-        success: true,
-        simulated: true,
-        results: simulatedResults,
-        message: 'Modo de prueba simulado (configura PROVIDER_API_URL y PROVIDER_API_KEY para producción).'
-      });
-    }
-
     if (!apiUrl || !apiKey) {
-      return res.status(400).json({
+      return res.status(200).json({
         success: false,
         configured: false,
-        error: 'API no configurada. Agrega la URL y Clave API en Configuración > Integración API.'
+        error: 'La clave API del proveedor (MazSocialMarket) no está configurada. Ingresa tu API Key abajo o en Configuración > Integración API.'
       });
     }
 
@@ -565,7 +622,7 @@ async function startServer() {
         try {
           data = JSON.parse(rawText);
         } catch {
-          return res.status(502).json({
+          return res.status(200).json({
             success: false,
             error: `El proveedor devolvió una respuesta no válida (${resp.status}): ${rawText.slice(0, 150)}`
           });
@@ -616,7 +673,7 @@ async function startServer() {
         try {
           data = JSON.parse(rawText);
         } catch {
-          return res.status(502).json({
+          return res.status(200).json({
             success: false,
             error: `El proveedor devolvió una respuesta no válida (${resp.status}): ${rawText.slice(0, 150)}`
           });
@@ -673,7 +730,7 @@ async function startServer() {
         results
       });
     } catch (err: any) {
-      return res.status(500).json({
+      return res.status(200).json({
         success: false,
         error: err.message || 'Error al comunicarse con la API del proveedor.'
       });
@@ -767,8 +824,7 @@ async function startServer() {
   app.post('/api/tracking/customer-status', async (req: Request, res: Response) => {
     try {
       const { orderIds, items, receiptTargetAccount, rapidApiKey } = req.body;
-      const apiUrl = process.env.PROVIDER_API_URL?.trim();
-      const apiKey = process.env.PROVIDER_API_KEY?.trim();
+      const { apiUrl, apiKey } = await resolveProviderCredentials(req);
 
       const targetIds: string[] = [];
       if (Array.isArray(orderIds)) {

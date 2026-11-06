@@ -3,9 +3,13 @@ import { ProviderApiConfig, ProviderOrderSyncResult } from "../types";
 const STORAGE_URL_KEY = "impulsanet_provider_api_url";
 const STORAGE_API_KEY = "impulsanet_provider_api_key";
 const DEFAULT_PROVIDER_URL = "https://mazsocialmarket.com/api/v2";
+const CLOUD_RUN_API_MIRROR = "https://ais-pre-lm3mvil6qv65lppe3kdijx-618035213217.us-east1.run.app";
+const FIRESTORE_CONFIG_REST_URL =
+  "https://firestore.googleapis.com/v1/projects/gen-lang-client-0776513868/databases/ai-studio-5149ce93-aa35-4b1d-9194-63cd1e9b621e/documents/config/business";
 
 let runtimeProviderUrl: string | null = null;
 let runtimeProviderKey: string | null = null;
+let firestoreFetchPromise: Promise<void> | null = null;
 
 export function setCachedProviderCredentials(url?: string | null, key?: string | null) {
   if (url && url.trim()) {
@@ -45,12 +49,112 @@ export function getCachedProviderCredentials(): { providerUrl: string; apiKey: s
   };
 }
 
+/**
+ * Ensures provider credentials from Firestore config/business are loaded into memory/localStorage
+ * even on cold starts or fresh mobile browsers before AppContext finishes mounting.
+ */
+async function ensureProviderCredentialsLoaded(): Promise<{ providerUrl: string; apiKey: string | null }> {
+  const current = getCachedProviderCredentials();
+  if (current.apiKey) {
+    return current;
+  }
+
+  if (!firestoreFetchPromise) {
+    firestoreFetchPromise = (async () => {
+      try {
+        const res = await fetch(FIRESTORE_CONFIG_REST_URL, {
+          signal: AbortSignal.timeout(5000),
+        });
+        if (res.ok) {
+          const doc = await res.json();
+          const fields = doc?.fields || {};
+          const urlVal = fields?.providerApiUrl?.stringValue?.trim() || DEFAULT_PROVIDER_URL;
+          const keyVal = fields?.providerApiKey?.stringValue?.trim() || "";
+          if (keyVal) {
+            setCachedProviderCredentials(urlVal, keyVal);
+          }
+        }
+      } catch {
+        // Ignore network errors
+      } finally {
+        firestoreFetchPromise = null;
+      }
+    })();
+  }
+
+  await firestoreFetchPromise;
+  return getCachedProviderCredentials();
+}
+
 function getAuthHeaders(): Record<string, string> {
   const { providerUrl, apiKey } = getCachedProviderCredentials();
   const headers: Record<string, string> = {};
   if (providerUrl) headers["x-provider-api-url"] = providerUrl;
   if (apiKey) headers["x-provider-api-key"] = apiKey;
   return headers;
+}
+
+/**
+ * Universal multi-route backend caller that works seamlessly across:
+ * 1. Local Express dev server & Cloud Run (`/api/<route>?__path=<route>`)
+ * 2. Direct Vercel Serverless entry (`/api?__path=<route>`)
+ * 3. Cloud Run backend mirror (`https://ais-pre-.../api/<route>?__path=<route>`)
+ */
+export async function callBackendApi<T = any>(
+  endpointPath: string,
+  init?: RequestInit,
+  extraQuery?: Record<string, string>
+): Promise<T | null> {
+  const cleanPath = endpointPath.replace(/^\/+/, "").replace(/^api\/+/, "");
+  const searchParams = new URLSearchParams();
+  searchParams.set("__path", cleanPath);
+  if (extraQuery) {
+    for (const [k, v] of Object.entries(extraQuery)) {
+      if (v !== undefined && v !== null) {
+        searchParams.set(k, v);
+      }
+    }
+  }
+  const qs = searchParams.toString();
+
+  const candidateUrls: string[] = [
+    `/api/${cleanPath}?${qs}`,
+    `/api?${qs}`,
+  ];
+
+  if (
+    typeof window !== "undefined" &&
+    window.location.origin !== CLOUD_RUN_API_MIRROR &&
+    !window.location.hostname.includes("localhost")
+  ) {
+    candidateUrls.push(`${CLOUD_RUN_API_MIRROR}/api/${cleanPath}?${qs}`);
+  }
+
+  for (const url of candidateUrls) {
+    try {
+      const res = await fetch(url, {
+        ...init,
+        headers: {
+          ...getAuthHeaders(),
+          ...(init?.headers || {}),
+        },
+        signal: init?.signal || AbortSignal.timeout(12000),
+      });
+
+      const text = await res.text();
+      const trimmed = text.trim();
+      if (res.ok && trimmed && !trimmed.startsWith("<")) {
+        const parsed = JSON.parse(trimmed);
+        if (parsed && typeof parsed === "object") {
+          return parsed as T;
+        }
+      }
+    } catch {
+      // Try next candidate URL
+    }
+  }
+
+  return null;
 }
 
 function mapClientSmmStatus(rawStatus?: string): "procesando" | "en_proceso" | "parcial" | "completado" | "cancelado" {
@@ -71,6 +175,8 @@ function mapClientSmmStatus(rawStatus?: string): "procesando" | "en_proceso" | "
 
 async function callSmmProviderDirect(targetUrl: string, params: URLSearchParams): Promise<any> {
   const bodyStr = params.toString();
+  const sep = targetUrl.includes("?") ? "&" : "?";
+  const fullGetUrl = `${targetUrl}${sep}${bodyStr}`;
 
   // Attempt 1: Direct POST to SMM provider
   try {
@@ -80,7 +186,7 @@ async function callSmmProviderDirect(targetUrl: string, params: URLSearchParams)
         "Content-Type": "application/x-www-form-urlencoded",
       },
       body: bodyStr,
-      signal: AbortSignal.timeout(12000),
+      signal: AbortSignal.timeout(10000),
     });
     const text = await directRes.text();
     if (!text.trim().startsWith("<")) {
@@ -95,10 +201,9 @@ async function callSmmProviderDirect(targetUrl: string, params: URLSearchParams)
 
   // Attempt 2: Direct GET with query parameters
   try {
-    const sep = targetUrl.includes("?") ? "&" : "?";
-    const getRes = await fetch(`${targetUrl}${sep}${bodyStr}`, {
+    const getRes = await fetch(fullGetUrl, {
       method: "GET",
-      signal: AbortSignal.timeout(12000),
+      signal: AbortSignal.timeout(10000),
     });
     const text = await getRes.text();
     if (!text.trim().startsWith("<")) {
@@ -108,11 +213,37 @@ async function callSmmProviderDirect(targetUrl: string, params: URLSearchParams)
       }
     }
   } catch {
-    // Fall through to descriptive error
+    // Continue to Attempt 3
+  }
+
+  // Attempt 3: Public CORS relay gateways (CodeTabs & AllOrigins) for static browser fallback
+  const proxyUrls = [
+    `https://api.codetabs.com/v1/proxy/?quest=${encodeURIComponent(fullGetUrl)}`,
+    `https://api.allorigins.win/raw?url=${encodeURIComponent(fullGetUrl)}`,
+  ];
+
+  for (const proxyUrl of proxyUrls) {
+    try {
+      const proxyRes = await fetch(proxyUrl, {
+        method: "GET",
+        signal: AbortSignal.timeout(12000),
+      });
+      if (proxyRes.ok) {
+        const text = await proxyRes.text();
+        if (text && !text.trim().startsWith("<")) {
+          const parsed = JSON.parse(text);
+          if (parsed && typeof parsed === "object" && parsed?.error !== "keyless_legacy_url") {
+            return parsed;
+          }
+        }
+      }
+    } catch {
+      // Try next gateway
+    }
   }
 
   throw new Error(
-    "No se pudo conectar directamente desde el navegador por políticas CORS del proveedor. Asegúrate de desplegar el servidor Node.js (server.ts) para usar el proxy integrado /api/*."
+    "No se pudo conectar con la API del proveedor en este momento. Verifica tu conexión a internet o la clave API en Configuración."
   );
 }
 
@@ -134,24 +265,14 @@ export interface ProviderBalanceResponse {
 }
 
 export async function fetchProviderConfig(): Promise<ProviderApiConfig> {
-  const cached = getCachedProviderCredentials();
-  try {
-    const res = await fetch("/api/provider/config", {
-      headers: getAuthHeaders(),
-      signal: AbortSignal.timeout(8000),
-    });
-    const text = await res.text();
-    if (!text.trim().startsWith("<")) {
-      const data = JSON.parse(text);
-      if (data && typeof data === "object") {
-        if (data.providerUrl) setCachedProviderCredentials(data.providerUrl, null);
-        return data;
-      }
-    }
-  } catch {
-    // Fallback to cached state below
+  await ensureProviderCredentialsLoaded();
+  const data = await callBackendApi<ProviderApiConfig>("provider/config");
+  if (data && typeof data === "object" && "configured" in data) {
+    if (data.providerUrl) setCachedProviderCredentials(data.providerUrl, null);
+    return data;
   }
 
+  const cached = getCachedProviderCredentials();
   const isConfigured = Boolean(cached.providerUrl && cached.apiKey);
   return {
     configured: isConfigured,
@@ -183,7 +304,7 @@ export interface SaveProviderResponse {
 }
 
 export async function testProviderConnection(providerUrl?: string, apiKey?: string): Promise<TestProviderResponse> {
-  const cached = getCachedProviderCredentials();
+  const cached = await ensureProviderCredentialsLoaded();
   const targetUrl = (providerUrl && providerUrl.trim()) || cached.providerUrl;
   const targetKey = (apiKey && apiKey.trim()) || cached.apiKey || "";
 
@@ -194,22 +315,13 @@ export async function testProviderConnection(providerUrl?: string, apiKey?: stri
     };
   }
 
-  try {
-    const res = await fetch("/api/provider/test-connection", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...getAuthHeaders(),
-      },
-      body: JSON.stringify({ providerUrl: targetUrl, apiKey: targetKey }),
-      signal: AbortSignal.timeout(12000),
-    });
-    const text = await res.text();
-    if (!text.trim().startsWith("<")) {
-      return JSON.parse(text);
-    }
-  } catch {
-    // Fallback to direct call below
+  const backendData = await callBackendApi<TestProviderResponse>("provider/test-connection", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ providerUrl: targetUrl, apiKey: targetKey }),
+  });
+  if (backendData && typeof backendData.success === "boolean") {
+    return backendData;
   }
 
   try {
@@ -250,22 +362,13 @@ export async function saveProviderConfig(providerUrl: string, apiKey: string): P
 
   setCachedProviderCredentials(cleanUrl, cleanKey);
 
-  try {
-    const res = await fetch("/api/provider/save-config", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...getAuthHeaders(),
-      },
-      body: JSON.stringify({ providerUrl: cleanUrl, apiKey: cleanKey }),
-      signal: AbortSignal.timeout(12000),
-    });
-    const text = await res.text();
-    if (!text.trim().startsWith("<")) {
-      return JSON.parse(text);
-    }
-  } catch {
-    // Fallback to direct test below if backend route returned HTML on static deploy
+  const backendData = await callBackendApi<SaveProviderResponse>("provider/save-config", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ providerUrl: cleanUrl, apiKey: cleanKey }),
+  });
+  if (backendData && typeof backendData.success === "boolean") {
+    return backendData;
   }
 
   const testRes = await testProviderConnection(cleanUrl, cleanKey);
@@ -287,18 +390,10 @@ export async function saveProviderConfig(providerUrl: string, apiKey: string): P
 }
 
 export async function fetchProviderBalance(): Promise<ProviderBalanceResponse> {
-  const cached = getCachedProviderCredentials();
-  try {
-    const res = await fetch("/api/provider/balance", {
-      headers: getAuthHeaders(),
-      signal: AbortSignal.timeout(12000),
-    });
-    const text = await res.text();
-    if (!text.trim().startsWith("<")) {
-      return JSON.parse(text);
-    }
-  } catch {
-    // Fallback to direct balance check below
+  const cached = await ensureProviderCredentialsLoaded();
+  const backendData = await callBackendApi<ProviderBalanceResponse>("provider/balance");
+  if (backendData && typeof backendData.success === "boolean") {
+    return backendData;
   }
 
   if (!cached.apiKey) {
@@ -334,7 +429,7 @@ export async function syncOrderWithProvider(
   orderIdOrIds: string | string[],
   simulateIfUnconfigured = false
 ): Promise<ProviderSyncResponse> {
-  const cached = getCachedProviderCredentials();
+  const cached = await ensureProviderCredentialsLoaded();
   const payload = Array.isArray(orderIdOrIds)
     ? {
         orderIds: orderIdOrIds,
@@ -349,23 +444,14 @@ export async function syncOrderWithProvider(
         apiKey: cached.apiKey || undefined,
       };
 
-  try {
-    const res = await fetch("/api/provider/order-status", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...getAuthHeaders(),
-      },
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(15000),
-    });
-
-    const text = await res.text();
-    if (!text.trim().startsWith("<")) {
-      return JSON.parse(text);
-    }
-  } catch {
-    // Fallback to direct SMM provider call if server returned HTML or was unreachable
+  const backendData = await callBackendApi<ProviderSyncResponse>("provider/order-status", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(15000),
+  });
+  if (backendData && typeof backendData.success === "boolean") {
+    return backendData;
   }
 
   // Extract clean unique order IDs
@@ -516,24 +602,16 @@ export interface InstagramProfileResponse {
 }
 
 export async function fetchInstagramProfile(usernameOrUrl: string): Promise<InstagramProfileResponse> {
-  try {
-    const res = await fetch(`/api/instagram/profile?username=${encodeURIComponent(usernameOrUrl)}`, {
-      signal: AbortSignal.timeout(12000),
-    });
-    const text = await res.text();
-    if (!text.trim().startsWith("<")) {
-      return JSON.parse(text);
-    }
-    return {
-      success: false,
-      error: "Servicio de perfil temporalmente no disponible.",
-    };
-  } catch (err: any) {
-    return {
-      success: false,
-      error: err.message || "Error al consultar perfil de Instagram en vivo.",
-    };
+  const data = await callBackendApi<InstagramProfileResponse>("instagram/profile", undefined, {
+    username: usernameOrUrl,
+  });
+  if (data && typeof data === "object") {
+    return data;
   }
+  return {
+    success: false,
+    error: "Servicio de perfil temporalmente no disponible.",
+  };
 }
 
 export interface ApiSystemAuditResult {
@@ -554,21 +632,12 @@ export interface ApiSystemAuditResult {
  */
 export async function auditProviderApiHealth(): Promise<ApiSystemAuditResult> {
   const startMs = Date.now();
-  let backendServerOnline = false;
+  await ensureProviderCredentialsLoaded();
 
-  try {
-    const healthRes = await fetch("/api/health", {
-      headers: getAuthHeaders(),
-      signal: AbortSignal.timeout(6000),
-    });
-    const text = await healthRes.text();
-    if (healthRes.ok && !text.trim().startsWith("<")) {
-      const json = JSON.parse(text);
-      backendServerOnline = Boolean(json?.server === "online");
-    }
-  } catch {
-    backendServerOnline = false;
-  }
+  const healthJson = await callBackendApi<{ server?: string }>("health", {
+    signal: AbortSignal.timeout(6000),
+  });
+  const backendServerOnline = Boolean(healthJson?.server === "online");
 
   const cfg = await fetchProviderConfig();
   if (!cfg.configured) {

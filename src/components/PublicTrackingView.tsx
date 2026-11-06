@@ -7,7 +7,7 @@ import React, { useState, useEffect } from "react";
 import { doc, getDoc, collection, query, where, getDocs } from "firebase/firestore";
 import { db } from "../firebase";
 import { Receipt, ReceiptItem, getItemOrderIds, formatProviderStatus } from "../types";
-import { syncOrderWithProvider } from "../services/providerApi";
+import { syncOrderWithProvider, callBackendApi } from "../services/providerApi";
 import {
   CheckCircle2,
   Clock,
@@ -256,40 +256,37 @@ export const PublicTrackingView: React.FC<PublicTrackingViewProps> = ({
     });
 
     try {
-      const res = await fetch("/api/tracking/customer-status", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          orderIds,
-          receiptTargetAccount: receiptData.targetAccount,
-          items: services.map(item => ({
-            orderId: item.orderId?.trim(),
-            orderIds: getItemOrderIds(item),
-            quantity: item.quantity,
-            socialNetworkId: item.socialNetworkId,
-            socialNetworkName: item.socialNetworkName,
-            serviceName: item.serviceName,
-            targetAccount: item.targetAccount || receiptData.targetAccount,
-            startCount: item.startCount,
-            description: `${item.socialNetworkName || ''} - ${item.serviceName || ''}`
-          }))
-        }),
-        signal: AbortSignal.timeout(15000),
-      });
-
-      if (res.ok) {
-        const text = await res.text();
-        if (!text.trim().startsWith("<")) {
-          const data = JSON.parse(text);
-          if (data.success && Array.isArray(data.tracking)) {
-            const metricsMap: Record<string, ItemTrackingMetrics> = {};
-            data.tracking.forEach((t: ItemTrackingMetrics) => {
-              metricsMap[t.orderId] = t;
-            });
-            setLiveMetrics(metricsMap);
-            return;
-          }
+      const data = await callBackendApi<{ success?: boolean; tracking?: ItemTrackingMetrics[] }>(
+        "tracking/customer-status",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            orderIds,
+            receiptTargetAccount: receiptData.targetAccount,
+            items: services.map(item => ({
+              orderId: item.orderId?.trim(),
+              orderIds: getItemOrderIds(item),
+              quantity: item.quantity,
+              socialNetworkId: item.socialNetworkId,
+              socialNetworkName: item.socialNetworkName,
+              serviceName: item.serviceName,
+              targetAccount: item.targetAccount || receiptData.targetAccount,
+              startCount: item.startCount,
+              description: `${item.socialNetworkName || ''} - ${item.serviceName || ''}`
+            }))
+          }),
+          signal: AbortSignal.timeout(15000),
         }
+      );
+
+      if (data?.success && Array.isArray(data.tracking)) {
+        const metricsMap: Record<string, ItemTrackingMetrics> = {};
+        data.tracking.forEach((t: ItemTrackingMetrics) => {
+          metricsMap[t.orderId] = t;
+        });
+        setLiveMetrics(metricsMap);
+        return;
       }
     } catch (err) {
       console.warn("Primary customer tracking endpoint fallback:", err);

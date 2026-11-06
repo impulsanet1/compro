@@ -4,23 +4,32 @@ import http from 'http';
 import crypto from 'crypto';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import dotenv from 'dotenv';
 import fs from 'fs';
-import { createApiMiddleware } from './apiApp.ts';
+import apiHandler from './api/index.js';
+
+dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 async function startServer() {
-  const app = createApiMiddleware();
+  const app = express();
   const server = http.createServer(app);
 
   // In AI Studio (both dev and Cloud Run production), Nginx listens on 8080 and proxies to DEFAULT_APP_PORT (3000).
-  // The Node.js application must always bind to port 3000.
   const PORT = Number(process.env.DEFAULT_APP_PORT) || 3000;
 
   const distPath = path.resolve(__dirname, 'dist');
   const distIndex = path.resolve(distPath, 'index.html');
   const isProd = process.env.NODE_ENV === 'production' || (fs.existsSync(distIndex) && process.env.NODE_ENV !== 'development');
+
+  app.use(express.json());
+
+  // Mount the universal API handler on /api
+  app.use('/api', (req: Request, res: Response) => {
+    return apiHandler(req, res);
+  });
 
   // --- Vite / Static Files Mounting ---
   if (!isProd) {

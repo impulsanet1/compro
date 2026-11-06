@@ -1,30 +1,23 @@
-import express from 'express';
-import type { Request, Response } from 'express';
+import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import dotenv from 'dotenv';
-import fs from 'fs';
-
-dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-interface NormalizedOrderResult {
-  orderId: string;
-  found: boolean;
-  rawStatus: string;
-  mappedStatus: 'procesando' | 'en_proceso' | 'parcial' | 'completado' | 'cancelado';
-  startCount: string | number | null;
-  remains: string | number | null;
-  charge: string | null;
-  currency: string | null;
-  error?: string;
-}
+const DEFAULT_URL = 'https://mazsocialmarket.com/api/v2';
+const FIRESTORE_CONFIG_URL =
+  'https://firestore.googleapis.com/v1/projects/gen-lang-client-0776513868/databases/ai-studio-5149ce93-aa35-4b1d-9194-63cd1e9b621e/documents/config/business';
 
-function mapSmmStatusToAppStatus(rawStatus?: string): 'procesando' | 'en_proceso' | 'parcial' | 'completado' | 'cancelado' {
+let cachedFirestoreCreds = {
+  apiUrl: '',
+  apiKey: '',
+  expiresAt: 0,
+};
+
+function mapSmmStatusToAppStatus(rawStatus) {
   if (!rawStatus) return 'en_proceso';
-  const s = rawStatus.toLowerCase().trim();
+  const s = String(rawStatus).toLowerCase().trim();
   if (s.includes('partial') || s.includes('parcial')) {
     return 'parcial';
   }
@@ -45,18 +38,11 @@ function mapSmmStatusToAppStatus(rawStatus?: string): 'procesando' | 'en_proceso
   return 'en_proceso';
 }
 
-function formatProviderStatusLabel(rawStatus?: string): string {
+function formatProviderStatusLabel(rawStatus) {
   if (!rawStatus) return 'En curso';
-  const s = rawStatus.toLowerCase().trim();
-  if (s.includes('partial') || s.includes('parcial')) {
-    return 'Parcial';
-  }
-  if (
-    s.includes('processing') ||
-    s.includes('procesan') ||
-    s === 'pending' ||
-    s.includes('pendient')
-  ) {
+  const s = String(rawStatus).toLowerCase().trim();
+  if (s.includes('partial') || s.includes('parcial')) return 'Parcial';
+  if (s.includes('processing') || s.includes('procesan') || s === 'pending' || s.includes('pendient')) {
     return 'Procesando';
   }
   if (
@@ -69,38 +55,16 @@ function formatProviderStatusLabel(rawStatus?: string): string {
   ) {
     return 'En curso';
   }
-  if (s.includes('complet') || s === 'completed' || s === 'completado') {
-    return 'Completado';
-  }
-  if (s.includes('cancel') || s === 'canceled' || s === 'cancelled' || s === 'cancelado') {
-    return 'Cancelado';
-  }
-  return rawStatus.charAt(0).toUpperCase() + rawStatus.slice(1);
+  if (s.includes('complet') || s === 'completed' || s === 'completado') return 'Completado';
+  if (s.includes('cancel') || s === 'canceled' || s === 'cancelled' || s === 'cancelado') return 'Cancelado';
+  return String(rawStatus).charAt(0).toUpperCase() + String(rawStatus).slice(1);
 }
 
-interface InstagramProfileCacheItem {
-  data: {
-    username: string;
-    followersCount: number | null;
-    followingCount?: number | null;
-    mediaCount?: number | null;
-    fullName?: string | null;
-    biography?: string | null;
-    profilePicUrl?: string | null;
-    isPrivate?: boolean;
-    verified?: boolean;
-    source: 'rapidapi' | 'direct_web' | 'cache' | 'not_found';
-    error?: string;
-    updatedAt: string;
-  };
-  expiresAt: number;
-}
+const instagramProfileCache = new Map();
 
-const instagramProfileCache = new Map<string, InstagramProfileCacheItem>();
-
-function extractInstagramUsername(input?: string | null): string | null {
+function extractInstagramUsername(input) {
   if (!input) return null;
-  const trimmed = input.trim();
+  const trimmed = String(input).trim();
   if (!trimmed) return null;
 
   if (trimmed.startsWith('@')) {
@@ -120,23 +84,7 @@ function extractInstagramUsername(input?: string | null): string | null {
   return null;
 }
 
-async function fetchLiveInstagramProfile(
-  rawUsername: string,
-  customRapidApiKey?: string
-): Promise<{
-  username: string;
-  followersCount: number | null;
-  followingCount?: number | null;
-  mediaCount?: number | null;
-  fullName?: string | null;
-  biography?: string | null;
-  profilePicUrl?: string | null;
-  isPrivate?: boolean;
-  verified?: boolean;
-  source: 'rapidapi' | 'direct_web' | 'cache' | 'not_found';
-  error?: string;
-  updatedAt: string;
-}> {
+async function fetchLiveInstagramProfile(rawUsername, customRapidApiKey) {
   const username = extractInstagramUsername(rawUsername);
   if (!username) {
     return {
@@ -155,9 +103,8 @@ async function fetchLiveInstagramProfile(
     return { ...cached.data, source: 'cache' };
   }
 
-  const rapidApiKey = customRapidApiKey?.trim() || process.env.RAPIDAPI_KEY?.trim();
+  const rapidApiKey = (customRapidApiKey && String(customRapidApiKey).trim()) || (process.env.RAPIDAPI_KEY && process.env.RAPIDAPI_KEY.trim());
 
-  // Tier 1: RapidAPI if key configured (high reliability with residential proxy)
   if (rapidApiKey) {
     try {
       const rapidUrl = `https://instagram-scraper-api2.p.rapidapi.com/v1/info?username_or_id_or_url=${encodeURIComponent(username)}`;
@@ -171,7 +118,7 @@ async function fetchLiveInstagramProfile(
       });
 
       if (res.ok) {
-        const json: any = await res.json();
+        const json = await res.json();
         const data = json?.data || json;
         const followers = data?.follower_count ?? data?.followers ?? data?.edge_followed_by?.count ?? null;
         if (followers !== null && followers !== undefined && !isNaN(Number(followers))) {
@@ -185,32 +132,31 @@ async function fetchLiveInstagramProfile(
             profilePicUrl: data?.profile_pic_url_hd || data?.profile_pic_url || null,
             isPrivate: Boolean(data?.is_private),
             verified: Boolean(data?.is_verified),
-            source: 'rapidapi' as const,
+            source: 'rapidapi',
             updatedAt: new Date().toISOString(),
           };
           instagramProfileCache.set(cacheKey, { data: result, expiresAt: now + 180000 });
           return result;
         }
       }
-    } catch (rapidErr) {
-      console.warn('RapidAPI profile query warning:', rapidErr);
+    } catch {
+      // Fall through to Tier 2
     }
   }
 
-  // Tier 2: Direct Instagram web profile endpoint
   try {
     const webRes = await fetch(`https://www.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(username)}`, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'x-ig-app-id': '936619743392459',
-        'Accept': '*/*',
+        Accept: '*/*',
         'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
       },
       signal: AbortSignal.timeout(10000),
     });
 
     if (webRes.ok) {
-      const webData: any = await webRes.json();
+      const webData = await webRes.json();
       const user = webData?.data?.user;
       if (user && user.edge_followed_by?.count !== undefined) {
         const result = {
@@ -223,7 +169,7 @@ async function fetchLiveInstagramProfile(
           profilePicUrl: user.profile_pic_url_hd || user.profile_pic_url || null,
           isPrivate: Boolean(user.is_private),
           verified: Boolean(user.is_verified),
-          source: 'direct_web' as const,
+          source: 'direct_web',
           updatedAt: new Date().toISOString(),
         };
         instagramProfileCache.set(cacheKey, { data: result, expiresAt: now + 180000 });
@@ -231,7 +177,7 @@ async function fetchLiveInstagramProfile(
       }
     }
   } catch {
-    // Expected on IP rate limits
+    // Expected on rate limits
   }
 
   return {
@@ -245,11 +191,16 @@ async function fetchLiveInstagramProfile(
   };
 }
 
-function persistProviderCredentialsToEnv(apiUrl: string, apiKey: string) {
+function persistProviderCredentialsToEnv(apiUrl, apiKey) {
   process.env.PROVIDER_API_URL = apiUrl;
   process.env.PROVIDER_API_KEY = apiKey;
+  cachedFirestoreCreds = {
+    apiUrl,
+    apiKey,
+    expiresAt: Date.now() + 600000,
+  };
   try {
-    const envPath = path.resolve(__dirname, '.env');
+    const envPath = path.resolve(__dirname, '..', '.env');
     let envContent = '';
     if (fs.existsSync(envPath)) {
       envContent = fs.readFileSync(envPath, 'utf8');
@@ -261,20 +212,46 @@ function persistProviderCredentialsToEnv(apiUrl: string, apiKey: string) {
     lines.push(`PROVIDER_API_KEY="${apiKey}"`);
     fs.writeFileSync(envPath, lines.filter(Boolean).join('\n') + '\n', 'utf8');
   } catch {
-    // Ignore write error in read-only / serverless environments (Vercel)
+    // Read-only filesystem in Vercel serverless environment
   }
 }
 
-async function resolveProviderCredentials(
-  req?: Request,
-  persistIfProvided = true
-): Promise<{ apiUrl: string; apiKey: string | null }> {
-  const DEFAULT_URL = 'https://mazsocialmarket.com/api/v2';
+async function fetchCredentialsFromFirestore() {
+  const now = Date.now();
+  if (cachedFirestoreCreds.apiKey && cachedFirestoreCreds.expiresAt > now) {
+    return cachedFirestoreCreds;
+  }
+  try {
+    const res = await fetch(FIRESTORE_CONFIG_URL, {
+      signal: AbortSignal.timeout(5000),
+    });
+    if (res.ok) {
+      const doc = await res.json();
+      const fields = doc?.fields || {};
+      const urlVal = fields?.providerApiUrl?.stringValue?.trim() || DEFAULT_URL;
+      const keyVal = fields?.providerApiKey?.stringValue?.trim() || '';
+      if (keyVal) {
+        cachedFirestoreCreds = {
+          apiUrl: urlVal,
+          apiKey: keyVal,
+          expiresAt: now + 300000,
+        };
+        process.env.PROVIDER_API_URL = urlVal;
+        process.env.PROVIDER_API_KEY = keyVal;
+        return cachedFirestoreCreds;
+      }
+    }
+  } catch {
+    // Ignore network error
+  }
+  return { apiUrl: DEFAULT_URL, apiKey: '' };
+}
 
+async function resolveProviderCredentials(req, bodyObj = {}, persistIfProvided = true) {
   const headerUrl = typeof req?.headers?.['x-provider-api-url'] === 'string' ? req.headers['x-provider-api-url'].trim() : '';
   const headerKey = typeof req?.headers?.['x-provider-api-key'] === 'string' ? req.headers['x-provider-api-key'].trim() : '';
-  const bodyUrl = typeof req?.body?.providerUrl === 'string' ? req.body.providerUrl.trim() : '';
-  const bodyKey = typeof req?.body?.apiKey === 'string' ? req.body.apiKey.trim() : '';
+  const bodyUrl = typeof bodyObj?.providerUrl === 'string' ? bodyObj.providerUrl.trim() : '';
+  const bodyKey = typeof bodyObj?.apiKey === 'string' ? bodyObj.apiKey.trim() : '';
 
   const providedUrl = bodyUrl || headerUrl;
   const providedKey = bodyKey || headerKey;
@@ -286,21 +263,26 @@ async function resolveProviderCredentials(
     }
   }
 
-  const apiUrl = providedUrl || process.env.PROVIDER_API_URL?.trim() || DEFAULT_URL;
-  const apiKey = providedKey || process.env.PROVIDER_API_KEY?.trim() || null;
+  let apiUrl = providedUrl || process.env.PROVIDER_API_URL?.trim() || '';
+  let apiKey = providedKey || process.env.PROVIDER_API_KEY?.trim() || '';
 
-  return { apiUrl, apiKey };
+  // Automatic Firestore fallback for stateless serverless instances (Vercel cold starts)
+  if (!apiKey) {
+    const fsCreds = await fetchCredentialsFromFirestore();
+    if (fsCreds.apiKey) {
+      apiKey = fsCreds.apiKey;
+      if (!apiUrl) apiUrl = fsCreds.apiUrl;
+    }
+  }
+
+  return {
+    apiUrl: apiUrl || DEFAULT_URL,
+    apiKey: apiKey || null,
+  };
 }
 
-/**
- * Shared SMM v2 batch status fetcher with automatic 50-ID chunking and request timeouts.
- */
-async function fetchOrdersFromProvider(
-  apiUrl: string,
-  apiKey: string,
-  uniqueIds: string[]
-): Promise<{ success: boolean; results: NormalizedOrderResult[]; error?: string }> {
-  const results: NormalizedOrderResult[] = [];
+async function fetchOrdersFromProvider(apiUrl, apiKey, uniqueIds) {
+  const results = [];
   const CHUNK_SIZE = 50;
 
   for (let i = 0; i < uniqueIds.length; i += CHUNK_SIZE) {
@@ -326,7 +308,7 @@ async function fetchOrdersFromProvider(
     });
 
     const rawText = await resp.text();
-    let data: any = null;
+    let data = null;
     try {
       data = JSON.parse(rawText);
     } catch {
@@ -412,7 +394,7 @@ async function fetchOrdersFromProvider(
   return { success: true, results };
 }
 
-function findMatchingItemForOrderId(items: any[] | undefined, targetId: string): any | null {
+function findMatchingItemForOrderId(items, targetId) {
   if (!Array.isArray(items)) return null;
   const cleanTarget = String(targetId).replace(/^#/, '').trim();
   if (!cleanTarget) return null;
@@ -421,7 +403,7 @@ function findMatchingItemForOrderId(items: any[] | undefined, targetId: string):
     items.find((item) => {
       if (!item) return false;
       if (Array.isArray(item.orderIds)) {
-        if (item.orderIds.some((oid: any) => String(oid).replace(/^#/, '').trim() === cleanTarget)) {
+        if (item.orderIds.some((oid) => String(oid).replace(/^#/, '').trim() === cleanTarget)) {
           return true;
         }
       }
@@ -439,7 +421,7 @@ function findMatchingItemForOrderId(items: any[] | undefined, targetId: string):
   );
 }
 
-function isItemForInstagram(item: any): boolean {
+function isItemForInstagram(item) {
   if (!item) return false;
   const snId = String(item.socialNetworkId || '').toLowerCase();
   const snName = String(item.socialNetworkName || '').toLowerCase();
@@ -492,349 +474,392 @@ function isItemForInstagram(item: any): boolean {
   return false;
 }
 
+async function parseRequestBody(req) {
+  if (req.body !== undefined && req.body !== null) {
+    if (typeof req.body === 'object' && !Buffer.isBuffer(req.body)) {
+      return req.body;
+    }
+    if (typeof req.body === 'string') {
+      try {
+        return JSON.parse(req.body);
+      } catch {
+        return {};
+      }
+    }
+    if (Buffer.isBuffer(req.body)) {
+      try {
+        return JSON.parse(req.body.toString('utf8'));
+      } catch {
+        return {};
+      }
+    }
+  }
+
+  if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') {
+    return {};
+  }
+
+  return new Promise((resolve) => {
+    let raw = '';
+    req.on('data', (chunk) => {
+      raw += chunk;
+    });
+    req.on('end', () => {
+      if (!raw) return resolve({});
+      try {
+        resolve(JSON.parse(raw));
+      } catch {
+        resolve({});
+      }
+    });
+    req.on('error', () => resolve({}));
+  });
+}
+
+function sendJson(res, statusCode, payload) {
+  res.statusCode = statusCode;
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.end(JSON.stringify(payload));
+}
+
+function extractRoutePath(req, urlObj) {
+  const queryPath =
+    (typeof req?.query?.__path === 'string' && req.query.__path) ||
+    urlObj.searchParams.get('__path');
+  if (queryPath) {
+    return '/' + queryPath.replace(/^\/+/, '').replace(/^api\/+/, '');
+  }
+
+  const rawUrl = req.originalUrl || req.url || '/';
+  const pathname = rawUrl.split('?')[0] || '/';
+  const stripped = pathname.replace(/^\/+/, '').replace(/^api\/?/, '');
+  return '/' + stripped;
+}
+
 /**
- * Creates the full Express API application.
- * Compatible with local Node.js server, Docker/Cloud Run, and Vercel Serverless Functions.
+ * Universal Serverless & Node HTTP API Handler (Zero external dependencies)
  */
-export function createApiMiddleware() {
-  const app = express();
+export default async function handler(req, res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-provider-api-url, x-provider-api-key');
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
 
-  // 1. Safe JSON parser that avoids hanging if Vercel already consumed/pre-parsed req.body
-  app.use((req, res, next) => {
-    if (req.body && typeof req.body === 'object') {
-      return next();
-    }
-    express.json()(req, res, next);
-  });
+  if (req.method === 'OPTIONS') {
+    res.statusCode = 204;
+    res.end();
+    return;
+  }
 
-  // 2. Global CORS and caching headers on all API requests
-  app.use((req: Request, res: Response, next) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-provider-api-url, x-provider-api-key');
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
-    if (req.method === 'OPTIONS') {
-      res.status(204).end();
-      return;
-    }
-    next();
-  });
+  const urlObj = new URL(req.originalUrl || req.url || '/', 'http://localhost');
+  const route = extractRoutePath(req, urlObj);
+  const body = await parseRequestBody(req);
 
-  // 3. Dual-prefix router: Works identically whether requested as /api/health or /health (Vercel rewrite)
-  const apiRouter = express.Router();
-
-  // --- API Routes ---
-
-  // 0. System & API Health Check
-  apiRouter.get('/health', async (req: Request, res: Response) => {
-    const { apiUrl, apiKey } = await resolveProviderCredentials(req, true);
-    res.json({
-      success: true,
-      server: 'online',
-      providerConfigured: Boolean(apiUrl && apiKey),
-      providerUrl: apiUrl,
-      rapidApiConfigured: Boolean(process.env.RAPIDAPI_KEY?.trim()),
-      timestamp: new Date().toISOString(),
-    });
-  });
-
-  // 1. Check API configuration status
-  apiRouter.get('/provider/config', async (req: Request, res: Response) => {
-    const { apiUrl, apiKey } = await resolveProviderCredentials(req, true);
-    const isConfigured = Boolean(apiUrl && apiKey);
-
-    res.json({
-      configured: isConfigured,
-      providerUrl: apiUrl,
-      providerType: 'smm_v2',
-      maskedKey: apiKey ? `••••••••${apiKey.slice(-4)}` : null,
-      message: isConfigured
-        ? 'API de proveedor SMM configurada y lista.'
-        : 'API no configurada. Ingresa tu clave API en Configuración > Integración API.'
-    });
-  });
-
-  // 2. Test connection with SMM provider
-  apiRouter.post('/provider/test-connection', async (req: Request, res: Response) => {
-    const resolved = await resolveProviderCredentials(req, false);
-    const targetUrl = req.body?.providerUrl?.trim() || resolved.apiUrl;
-    const targetKey = req.body?.apiKey?.trim() || resolved.apiKey;
-
-    if (!targetUrl || !targetKey) {
-      return res.status(200).json({
-        success: false,
-        error: 'Debes proporcionar la URL de la API y la Clave API para realizar la prueba.'
-      });
-    }
-
-    try {
-      const params = new URLSearchParams();
-      params.append('key', targetKey);
-      params.append('action', 'balance');
-
-      const response = await fetch(targetUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          'User-Agent': 'ImpulsaNet-OrderSync/1.0',
-        },
-        body: params.toString(),
-        signal: AbortSignal.timeout(12000),
-      });
-
-      const text = await response.text();
-      let data: any = null;
-      try {
-        data = JSON.parse(text);
-      } catch {
-        return res.status(200).json({
-          success: false,
-          error: `El servidor del proveedor respondió (${response.status}) pero no devolvió JSON válido. Verifica que la URL sea https://mazsocialmarket.com/api/v2`
-        });
-      }
-
-      if (data?.error) {
-        return res.status(200).json({
-          success: false,
-          error: `Error reportado por el proveedor: "${data.error}"`
-        });
-      }
-
-      if (data?.balance !== undefined) {
-        return res.json({
-          success: true,
-          balance: data.balance,
-          currency: data.currency || 'USD',
-          message: `¡Conexión exitosa! Saldo disponible: $${data.balance} ${data.currency || 'USD'}`
-        });
-      }
-
-      return res.status(200).json({
-        success: false,
-        error: `Respuesta inesperada del proveedor: ${text.slice(0, 150)}`
-      });
-    } catch (err: any) {
-      return res.status(200).json({
-        success: false,
-        error: `Fallo de conexión de red: ${err.message || 'No se pudo contactar con el host del proveedor.'}`
-      });
-    }
-  });
-
-  // 3. Save and activate provider API configuration
-  apiRouter.post('/provider/save-config', async (req: Request, res: Response) => {
-    const { providerUrl, apiKey } = req.body;
-
-    if (!providerUrl?.trim() || !apiKey?.trim()) {
-      return res.status(200).json({
-        success: false,
-        error: 'La URL de la API y la Clave de API son requeridas.'
-      });
-    }
-
-    const cleanUrl = providerUrl.trim();
-    const cleanKey = apiKey.trim();
-
-    try {
-      const params = new URLSearchParams();
-      params.append('key', cleanKey);
-      params.append('action', 'balance');
-
-      const testResp = await fetch(cleanUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          'User-Agent': 'ImpulsaNet-OrderSync/1.0',
-        },
-        body: params.toString(),
-        signal: AbortSignal.timeout(12000),
-      });
-
-      const testText = await testResp.text();
-      let testData: any = null;
-      try {
-        testData = JSON.parse(testText);
-      } catch {
-        return res.status(200).json({
-          success: false,
-          error: `No se pudo verificar la API: El proveedor no devolvió una respuesta JSON válida (${testResp.status}). Revisa la URL.`
-        });
-      }
-
-      if (testData?.error) {
-        return res.status(200).json({
-          success: false,
-          error: `El proveedor rechazó las credenciales: "${testData.error}". Verifica que la clave API sea la correcta.`
-        });
-      }
-
-      persistProviderCredentialsToEnv(cleanUrl, cleanKey);
-
-      return res.json({
+  try {
+    // 0. Health Check
+    if (route === '/health' || route === '/') {
+      const { apiUrl, apiKey } = await resolveProviderCredentials(req, body, true);
+      return sendJson(res, 200, {
         success: true,
-        providerUrl: cleanUrl,
-        maskedKey: `••••••••${cleanKey.slice(-4)}`,
-        balance: testData.balance ?? null,
-        currency: testData.currency ?? 'USD',
-        message: '¡Credenciales verificadas y guardadas exitosamente!'
-      });
-    } catch (err: any) {
-      return res.status(200).json({
-        success: false,
-        error: `Error al conectar con el proveedor: ${err.message || 'Error de red.'}`
-      });
-    }
-  });
-
-  // 4. Check balance on provider
-  apiRouter.get('/provider/balance', async (req: Request, res: Response) => {
-    const { apiUrl, apiKey } = await resolveProviderCredentials(req, true);
-
-    if (!apiUrl || !apiKey) {
-      return res.status(200).json({
-        success: false,
-        configured: false,
-        error: 'Clave API de MazSocialMarket no configurada. Agrégala en Configuración > Integración API.'
+        server: 'online',
+        providerConfigured: Boolean(apiUrl && apiKey),
+        providerUrl: apiUrl,
+        rapidApiConfigured: Boolean(process.env.RAPIDAPI_KEY?.trim()),
+        timestamp: new Date().toISOString(),
       });
     }
 
-    try {
-      const params = new URLSearchParams();
-      params.append('key', apiKey);
-      params.append('action', 'balance');
-
-      const response = await fetch(apiUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          'User-Agent': 'ImpulsaNet-OrderSync/1.0',
-        },
-        body: params.toString(),
-        signal: AbortSignal.timeout(12000),
+    // 1. Provider Config Status
+    if (route === '/provider/config') {
+      const { apiUrl, apiKey } = await resolveProviderCredentials(req, body, true);
+      const isConfigured = Boolean(apiUrl && apiKey);
+      return sendJson(res, 200, {
+        configured: isConfigured,
+        providerUrl: apiUrl,
+        providerType: 'smm_v2',
+        maskedKey: apiKey ? `••••••••${apiKey.slice(-4)}` : null,
+        message: isConfigured
+          ? 'API de proveedor SMM configurada y lista.'
+          : 'API no configurada. Ingresa tu clave API en Configuración > Integración API.',
       });
+    }
 
-      const text = await response.text();
-      let data: any = null;
+    // 2. Test Connection
+    if (route === '/provider/test-connection') {
+      const resolved = await resolveProviderCredentials(req, body, false);
+      const targetUrl = body?.providerUrl?.trim() || resolved.apiUrl;
+      const targetKey = body?.apiKey?.trim() || resolved.apiKey;
+
+      if (!targetUrl || !targetKey) {
+        return sendJson(res, 200, {
+          success: false,
+          error: 'Debes proporcionar la URL de la API y la Clave API para realizar la prueba.',
+        });
+      }
+
       try {
-        data = JSON.parse(text);
-      } catch {
-        return res.status(200).json({
-          success: false,
-          error: `Respuesta no válida del proveedor (${response.status}): ${text.slice(0, 150)}`
+        const params = new URLSearchParams();
+        params.append('key', targetKey);
+        params.append('action', 'balance');
+
+        const response = await fetch(targetUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'User-Agent': 'ImpulsaNet-OrderSync/1.0',
+          },
+          body: params.toString(),
+          signal: AbortSignal.timeout(12000),
         });
-      }
 
-      if (data?.error) {
-        return res.status(200).json({
-          success: false,
-          error: data.error
-        });
-      }
-
-      return res.json({
-        success: true,
-        balance: data.balance ?? null,
-        currency: data.currency ?? 'USD'
-      });
-    } catch (err: any) {
-      return res.status(200).json({
-        success: false,
-        error: err.message || 'Error al conectar con la API del proveedor.'
-      });
-    }
-  });
-
-  // 5. Sync status for single or multiple Order IDs
-  apiRouter.post('/provider/order-status', async (req: Request, res: Response) => {
-    const { orderId, orderIds } = req.body;
-    const { apiUrl, apiKey } = await resolveProviderCredentials(req, true);
-
-    const targetIds: string[] = [];
-    if (orderId && typeof orderId === 'string') {
-      const split = orderId.split(/[\s,]+/).map(s => s.replace(/^#/, '').trim()).filter(Boolean);
-      targetIds.push(...split);
-    }
-    if (Array.isArray(orderIds)) {
-      orderIds.forEach(id => {
-        if (typeof id === 'string') {
-          const split = id.split(/[\s,]+/).map(s => s.replace(/^#/, '').trim()).filter(Boolean);
-          targetIds.push(...split);
+        const text = await response.text();
+        let data = null;
+        try {
+          data = JSON.parse(text);
+        } catch {
+          return sendJson(res, 200, {
+            success: false,
+            error: `El servidor del proveedor respondió (${response.status}) pero no devolvió JSON válido. Verifica que la URL sea https://mazsocialmarket.com/api/v2`,
+          });
         }
-      });
-    }
 
-    const uniqueIds = Array.from(new Set(targetIds));
+        if (data?.error) {
+          return sendJson(res, 200, {
+            success: false,
+            error: `Error reportado por el proveedor: "${data.error}"`,
+          });
+        }
 
-    if (uniqueIds.length === 0) {
-      return res.status(200).json({
-        success: false,
-        error: 'Debes proporcionar al menos un ID de orden de proveedor.'
-      });
-    }
+        if (data?.balance !== undefined) {
+          return sendJson(res, 200, {
+            success: true,
+            balance: data.balance,
+            currency: data.currency || 'USD',
+            message: `¡Conexión exitosa! Saldo disponible: $${data.balance} ${data.currency || 'USD'}`,
+          });
+        }
 
-    if (!apiUrl || !apiKey) {
-      return res.status(200).json({
-        success: false,
-        configured: false,
-        error: 'La clave API del proveedor (MazSocialMarket) no está configurada. Ingresa tu API Key abajo o en Configuración > Integración API.'
-      });
-    }
-
-    try {
-      const providerRes = await fetchOrdersFromProvider(apiUrl, apiKey, uniqueIds);
-      if (!providerRes.success) {
-        return res.status(200).json({
+        return sendJson(res, 200, {
           success: false,
-          error: providerRes.error
+          error: `Respuesta inesperada del proveedor: ${text.slice(0, 150)}`,
+        });
+      } catch (err) {
+        return sendJson(res, 200, {
+          success: false,
+          error: `Fallo de conexión de red: ${err?.message || 'No se pudo contactar con el host del proveedor.'}`,
+        });
+      }
+    }
+
+    // 3. Save Provider Config
+    if (route === '/provider/save-config') {
+      const { providerUrl, apiKey } = body || {};
+      if (!providerUrl?.trim() || !apiKey?.trim()) {
+        return sendJson(res, 200, {
+          success: false,
+          error: 'La URL de la API y la Clave de API son requeridas.',
         });
       }
 
-      return res.json({
-        success: true,
-        results: providerRes.results
-      });
-    } catch (err: any) {
-      return res.status(200).json({
-        success: false,
-        error: err.message || 'Error al comunicarse con la API del proveedor.'
-      });
+      const cleanUrl = providerUrl.trim();
+      const cleanKey = apiKey.trim();
+
+      try {
+        const params = new URLSearchParams();
+        params.append('key', cleanKey);
+        params.append('action', 'balance');
+
+        const testResp = await fetch(cleanUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'User-Agent': 'ImpulsaNet-OrderSync/1.0',
+          },
+          body: params.toString(),
+          signal: AbortSignal.timeout(12000),
+        });
+
+        const testText = await testResp.text();
+        let testData = null;
+        try {
+          testData = JSON.parse(testText);
+        } catch {
+          return sendJson(res, 200, {
+            success: false,
+            error: `No se pudo verificar la API: El proveedor no devolvió una respuesta JSON válida (${testResp.status}). Revisa la URL.`,
+          });
+        }
+
+        if (testData?.error) {
+          return sendJson(res, 200, {
+            success: false,
+            error: `El proveedor rechazó las credenciales: "${testData.error}". Verifica que la clave API sea la correcta.`,
+          });
+        }
+
+        persistProviderCredentialsToEnv(cleanUrl, cleanKey);
+
+        return sendJson(res, 200, {
+          success: true,
+          providerUrl: cleanUrl,
+          maskedKey: `••••••••${cleanKey.slice(-4)}`,
+          balance: testData.balance ?? null,
+          currency: testData.currency ?? 'USD',
+          message: '¡Credenciales verificadas y guardadas exitosamente!',
+        });
+      } catch (err) {
+        return sendJson(res, 200, {
+          success: false,
+          error: `Error al conectar con el proveedor: ${err?.message || 'Error de red.'}`,
+        });
+      }
     }
-  });
 
-  // 6. Live Instagram Profile Public Lookup Endpoint
-  apiRouter.get('/instagram/profile', async (req: Request, res: Response) => {
-    const rawUsername = (req.query.username as string) || '';
-    const customKey = (req.query.rapidApiKey as string) || '';
-    if (!rawUsername.trim()) {
-      return res.status(400).json({
-        success: false,
-        error: 'Debes proporcionar un nombre de usuario o enlace de Instagram.'
-      });
+    // 4. Provider Balance
+    if (route === '/provider/balance') {
+      const { apiUrl, apiKey } = await resolveProviderCredentials(req, body, true);
+      if (!apiUrl || !apiKey) {
+        return sendJson(res, 200, {
+          success: false,
+          configured: false,
+          error: 'Clave API de MazSocialMarket no configurada. Agrégala en Configuración > Integración API.',
+        });
+      }
+
+      try {
+        const params = new URLSearchParams();
+        params.append('key', apiKey);
+        params.append('action', 'balance');
+
+        const response = await fetch(apiUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'User-Agent': 'ImpulsaNet-OrderSync/1.0',
+          },
+          body: params.toString(),
+          signal: AbortSignal.timeout(12000),
+        });
+
+        const text = await response.text();
+        let data = null;
+        try {
+          data = JSON.parse(text);
+        } catch {
+          return sendJson(res, 200, {
+            success: false,
+            error: `Respuesta no válida del proveedor (${response.status}): ${text.slice(0, 150)}`,
+          });
+        }
+
+        if (data?.error) {
+          return sendJson(res, 200, {
+            success: false,
+            error: data.error,
+          });
+        }
+
+        return sendJson(res, 200, {
+          success: true,
+          balance: data.balance ?? null,
+          currency: data.currency ?? 'USD',
+        });
+      } catch (err) {
+        return sendJson(res, 200, {
+          success: false,
+          error: err?.message || 'Error al conectar con la API del proveedor.',
+        });
+      }
     }
 
-    try {
-      const profile = await fetchLiveInstagramProfile(rawUsername, customKey);
-      return res.json({
-        success: profile.followersCount !== null,
-        profile
-      });
-    } catch (err: any) {
-      return res.status(500).json({
-        success: false,
-        error: err.message || 'Error al consultar perfil de Instagram.'
-      });
-    }
-  });
+    // 5. Sync Order Status
+    if (route === '/provider/order-status') {
+      const { orderId, orderIds } = body || {};
+      const { apiUrl, apiKey } = await resolveProviderCredentials(req, body, true);
 
-  // 7. Safe Customer Tracking Endpoint
-  apiRouter.post('/tracking/customer-status', async (req: Request, res: Response) => {
-    try {
-      const { orderIds, items, receiptTargetAccount, rapidApiKey } = req.body;
-      const { apiUrl, apiKey } = await resolveProviderCredentials(req, true);
-
-      const targetIds: string[] = [];
+      const targetIds = [];
+      if (orderId && typeof orderId === 'string') {
+        const split = orderId.split(/[\s,]+/).map((s) => s.replace(/^#/, '').trim()).filter(Boolean);
+        targetIds.push(...split);
+      }
       if (Array.isArray(orderIds)) {
-        orderIds.forEach(id => {
+        orderIds.forEach((id) => {
+          if (typeof id === 'string') {
+            const split = id.split(/[\s,]+/).map((s) => s.replace(/^#/, '').trim()).filter(Boolean);
+            targetIds.push(...split);
+          }
+        });
+      }
+
+      const uniqueIds = Array.from(new Set(targetIds));
+      if (uniqueIds.length === 0) {
+        return sendJson(res, 200, {
+          success: false,
+          error: 'Debes proporcionar al menos un ID de orden de proveedor.',
+        });
+      }
+
+      if (!apiUrl || !apiKey) {
+        return sendJson(res, 200, {
+          success: false,
+          configured: false,
+          error: 'La clave API del proveedor (MazSocialMarket) no está configurada. Ingresa tu API Key abajo o en Configuración > Integración API.',
+        });
+      }
+
+      try {
+        const providerRes = await fetchOrdersFromProvider(apiUrl, apiKey, uniqueIds);
+        if (!providerRes.success) {
+          return sendJson(res, 200, {
+            success: false,
+            error: providerRes.error,
+          });
+        }
+
+        return sendJson(res, 200, {
+          success: true,
+          results: providerRes.results,
+        });
+      } catch (err) {
+        return sendJson(res, 200, {
+          success: false,
+          error: err?.message || 'Error al comunicarse con la API del proveedor.',
+        });
+      }
+    }
+
+    // 6. Live Instagram Profile Lookup
+    if (route === '/instagram/profile') {
+      const rawUsername =
+        (typeof req?.query?.username === 'string' && req.query.username) ||
+        urlObj.searchParams.get('username') ||
+        '';
+      const customKey =
+        (typeof req?.query?.rapidApiKey === 'string' && req.query.rapidApiKey) ||
+        urlObj.searchParams.get('rapidApiKey') ||
+        '';
+      if (!rawUsername.trim()) {
+        return sendJson(res, 400, {
+          success: false,
+          error: 'Debes proporcionar un nombre de usuario o enlace de Instagram.',
+        });
+      }
+
+      const profile = await fetchLiveInstagramProfile(rawUsername, customKey);
+      return sendJson(res, 200, {
+        success: profile.followersCount !== null,
+        profile,
+      });
+    }
+
+    // 7. Customer Public Tracking Status
+    if (route === '/tracking/customer-status') {
+      const { orderIds, items, receiptTargetAccount, rapidApiKey } = body || {};
+      const { apiUrl, apiKey } = await resolveProviderCredentials(req, body, true);
+
+      const targetIds = [];
+      if (Array.isArray(orderIds)) {
+        orderIds.forEach((id) => {
           if (typeof id === 'string' && id.trim()) {
             targetIds.push(id.replace(/^#/, '').trim());
           }
@@ -842,8 +867,8 @@ export function createApiMiddleware() {
       }
       const uniqueIds = Array.from(new Set(targetIds));
 
-      let igProfilePromise: Promise<any> | null = null;
-      const igItem = Array.isArray(items) ? items.find(i => isItemForInstagram(i) && i.targetAccount) : null;
+      let igProfilePromise = null;
+      const igItem = Array.isArray(items) ? items.find((i) => isItemForInstagram(i) && i.targetAccount) : null;
       const targetIg = igItem?.targetAccount || (items?.length === 1 && isItemForInstagram(items[0]) ? receiptTargetAccount : null);
       if (targetIg && typeof targetIg === 'string') {
         const u = extractInstagramUsername(targetIg);
@@ -855,11 +880,11 @@ export function createApiMiddleware() {
       const liveIgResult = igProfilePromise ? await igProfilePromise.catch(() => null) : null;
 
       if (uniqueIds.length === 0) {
-        return res.json({ success: true, tracking: [] });
+        return sendJson(res, 200, { success: true, tracking: [] });
       }
 
       if (!apiUrl || !apiKey) {
-        const mockTracking = uniqueIds.map(id => {
+        const mockTracking = uniqueIds.map((id) => {
           const itemInfo = findMatchingItemForOrderId(items, id);
           const qty = itemInfo?.quantity ? Number(itemInfo.quantity) : 1000;
           const isIg = isItemForInstagram(itemInfo);
@@ -869,25 +894,28 @@ export function createApiMiddleware() {
             found: true,
             status: 'En curso',
             rawStatus: 'In progress',
-            mappedStatus: 'en_proceso' as const,
+            mappedStatus: 'en_proceso',
             startCount: itemInfo?.startCount ?? 1200,
             remains: Math.round(qty * 0.15),
             progressPercent: 85,
             delivered: Math.round(qty * 0.85),
             estimatedDelivery: 'Aprox. 1 a 4 horas',
-            liveInstagram: isIg && liveIgResult?.followersCount !== null && liveIgResult?.followersCount !== undefined ? {
-              username: liveIgResult.username,
-              currentFollowers: liveIgResult.followersCount,
-              verified: true,
-              source: liveIgResult.source
-            } : null
+            liveInstagram:
+              isIg && liveIgResult?.followersCount !== null && liveIgResult?.followersCount !== undefined
+                ? {
+                    username: liveIgResult.username,
+                    currentFollowers: liveIgResult.followersCount,
+                    verified: true,
+                    source: liveIgResult.source,
+                  }
+                : null,
           };
         });
-        return res.json({ success: true, tracking: mockTracking });
+        return sendJson(res, 200, { success: true, tracking: mockTracking });
       }
 
       const providerRes = await fetchOrdersFromProvider(apiUrl, apiKey, uniqueIds);
-      const orderMap = new Map<string, NormalizedOrderResult>();
+      const orderMap = new Map();
       providerRes.results.forEach((r) => orderMap.set(r.orderId, r));
 
       const trackingList = uniqueIds.map((id) => {
@@ -908,7 +936,7 @@ export function createApiMiddleware() {
             ? Number(orderInfo.startCount)
             : null;
 
-        let delivered: number | null = null;
+        let delivered = null;
         let progress = mapped === 'completado' ? 100 : 20;
 
         if (remains !== null && !isNaN(remains)) {
@@ -978,21 +1006,20 @@ export function createApiMiddleware() {
         };
       });
 
-      return res.json({
+      return sendJson(res, 200, {
         success: true,
-        tracking: trackingList
-      });
-    } catch (err: any) {
-      return res.status(500).json({
-        success: false,
-        error: 'No se pudo consultar el estado en tiempo real.'
+        tracking: trackingList,
       });
     }
-  });
 
-  // Mount router on BOTH '/api' and '/' so it works regardless of Vercel path rewrite stripping
-  app.use('/api', apiRouter);
-  app.use('/', apiRouter);
-
-  return app;
+    return sendJson(res, 404, {
+      success: false,
+      error: `Endpoint de API no encontrado: ${route}`,
+    });
+  } catch (err) {
+    return sendJson(res, 500, {
+      success: false,
+      error: err?.message || 'Error interno en el servidor de API.',
+    });
+  }
 }

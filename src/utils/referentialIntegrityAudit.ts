@@ -271,13 +271,16 @@ export function runReferentialIntegrityAudit(
     const services = Array.isArray(receipt.services) ? receipt.services : [];
     services.forEach((srv, sIdx) => {
       const rawOrderId = String(srv.orderId || "").trim();
+      const splitFromOrderId = rawOrderId
+        ? rawOrderId.split(/[\s,]+/).map((id) => id.trim()).filter(Boolean)
+        : [];
       const rawOrderIds = Array.isArray(srv.orderIds)
         ? srv.orderIds.map((id) => String(id || "").trim()).filter(Boolean)
         : [];
-      const extractedIds = getItemOrderIds(srv);
 
-      const realIds = extractedIds.filter((id) => !/^PED-\d+$/i.test(id));
-      const pedIds = extractedIds.filter((id) => /^PED-\d+$/i.test(id));
+      const combinedRaw = Array.from(new Set([...splitFromOrderId, ...rawOrderIds]));
+      const realIds = combinedRaw.filter((id) => !/^PED-\d+$/i.test(id));
+      const pedIds = combinedRaw.filter((id) => /^PED-\d+$/i.test(id));
 
       // Caso 1: Tiene ID real de proveedor mezclado con un placeholder temporal PED-xxxxxx
       if (realIds.length > 0 && pedIds.length > 0) {
@@ -293,33 +296,55 @@ export function runReferentialIntegrityAudit(
           suggestedFix: `Conservar únicamente el ID real de seguimiento (${realIds.join(", ")}) y eliminar el placeholder temporal.`,
           metadata: { serviceIndex: sIdx, realIds, pedIds },
         });
-      }
+      } else if (splitFromOrderId.length > 0 && rawOrderIds.length > 0) {
+        // Caso 2: Discrepancia real entre 'orderId' y 'orderIds' cuando ambos existen
+        // Nota: Si es un servicio reenviado/reordenado, es válido que 'orderId' tenga el ID nuevo activo
+        // y 'orderIds' conserve [nuevoId, idAnterior] para historial de búsqueda.
+        const isValidReorderHistory =
+          (Boolean(srv.isResent) || Boolean(srv.previousOrderId) || rawOrderIds.length > splitFromOrderId.length) &&
+          splitFromOrderId.every((id) => rawOrderIds.includes(id));
 
-      // Caso 2: Discrepancia entre el campo primario 'orderId' y el arreglo 'orderIds'
-      const expectedPrimary = (realIds.length > 0 ? realIds : extractedIds).join(", ");
-      if (
-        extractedIds.length > 0 &&
-        (rawOrderId !== expectedPrimary || rawOrderIds.join(", ") !== expectedPrimary)
-      ) {
+        const normalizedPrimaryTokens = splitFromOrderId.join(",");
+        const normalizedArrayTokens = rawOrderIds.join(",");
+
+        if (!isValidReorderHistory && normalizedPrimaryTokens !== normalizedArrayTokens) {
+          const expectedPrimary = (realIds.length > 0 ? realIds : getItemOrderIds(srv)).join(", ");
+          issues.push({
+            id: `tracking_desync_${receipt.id}_${sIdx}`,
+            category: "tracking_id_discrepancy",
+            severity: "medium",
+            title: `Desincronización entre orderId y orderIds en Pedido #${receipt.consecutive}`,
+            description: `En el pedido #${receipt.consecutive} (${srv.serviceName}), el campo 'orderId' ("${rawOrderId}") tiene IDs distintos a la lista 'orderIds' ([${rawOrderIds.join(", ")}]).`,
+            entityType: "receipt",
+            entityId: receipt.id,
+            entityLabel: `Pedido #${receipt.consecutive} - ${srv.serviceName}`,
+            suggestedFix: `Unificar ambos campos de seguimiento a "${expectedPrimary}".`,
+            metadata: { serviceIndex: sIdx, expectedPrimary },
+          });
+        }
+      } else if (splitFromOrderId.length === 0 && rawOrderIds.length > 0) {
+        // Tiene 'orderIds' pero 'orderId' está vacío
+        const expectedPrimary = (realIds.length > 0 ? realIds : rawOrderIds).join(", ");
         issues.push({
           id: `tracking_desync_${receipt.id}_${sIdx}`,
           category: "tracking_id_discrepancy",
-          severity: "medium",
-          title: `Desincronización entre orderId y orderIds en Pedido #${receipt.consecutive}`,
-          description: `En el pedido #${receipt.consecutive} (${srv.serviceName}), el campo 'orderId' ("${rawOrderId || "vacío"}") no coincide con la lista 'orderIds' ([${rawOrderIds.join(", ")}]).`,
+          severity: "low",
+          title: `Campo primario orderId vacío en Pedido #${receipt.consecutive}`,
+          description: `En el pedido #${receipt.consecutive} (${srv.serviceName}), 'orderIds' contiene [${rawOrderIds.join(", ")}] pero 'orderId' está vacío.`,
           entityType: "receipt",
           entityId: receipt.id,
           entityLabel: `Pedido #${receipt.consecutive} - ${srv.serviceName}`,
-          suggestedFix: `Unificar ambos campos de seguimiento a "${expectedPrimary}".`,
+          suggestedFix: `Asignar "${expectedPrimary}" al campo 'orderId'.`,
           metadata: { serviceIndex: sIdx, expectedPrimary },
         });
       }
 
       // Caso 3: Marcado como reenvío por error cuando previousOrderId era un placeholder PED- o igual al orderId actual
+      const currentActiveId = splitFromOrderId.join(", ");
       if (
         srv.isResent &&
         ((srv.previousOrderId && /^PED-\d+$/i.test(srv.previousOrderId.trim())) ||
-          (srv.previousOrderId && srv.previousOrderId.trim() === expectedPrimary))
+          (srv.previousOrderId && srv.previousOrderId.trim() === currentActiveId))
       ) {
         issues.push({
           id: `tracking_false_resend_${receipt.id}_${sIdx}`,

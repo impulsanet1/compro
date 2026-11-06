@@ -140,20 +140,47 @@ function cleanForFirestore<T>(data: T): T {
 
 function normalizeReceiptFromDb(id: string, raw: Record<string, any>): Receipt {
   const safeServices = Array.isArray(raw.services)
-    ? raw.services.filter(Boolean).map((s: any, idx: number) => ({
-        ...s,
-        id: String(s.id || `${id}_srv_${idx}`),
-        socialNetworkId: String(s.socialNetworkId || "general"),
-        socialNetworkName: String(s.socialNetworkName || "General"),
-        serviceId: String(s.serviceId || "custom"),
-        serviceName: String(s.serviceName || "Servicio"),
-        quantity: Number(s.quantity) || 0,
-        suggestedPrice: Number(s.suggestedPrice) || 0,
-        chargedPrice: Number(s.chargedPrice) || 0,
-        providerCostAtPurchase: Number(s.providerCostAtPurchase) || 0,
-        orderId: s.orderId !== undefined && s.orderId !== null ? String(s.orderId) : undefined,
-        orderIds: Array.isArray(s.orderIds) ? s.orderIds.map((oid: any) => String(oid ?? "").trim()).filter(Boolean) : undefined,
-      }))
+    ? raw.services.filter(Boolean).map((s: any, idx: number) => {
+        const rawOrderId = s.orderId !== undefined && s.orderId !== null ? String(s.orderId).trim() : "";
+        const splitFromOrderId = rawOrderId
+          ? rawOrderId.split(/[\s,]+/).map((oid: string) => oid.trim()).filter(Boolean)
+          : [];
+        const rawOrderIds = Array.isArray(s.orderIds)
+          ? s.orderIds.map((oid: any) => String(oid ?? "").trim()).filter(Boolean)
+          : [];
+
+        const combined = Array.from(new Set([...splitFromOrderId, ...rawOrderIds]));
+        const realIds = combined.filter((oid) => !/^PED-\d+$/i.test(oid));
+        const finalIds = realIds.length > 0 ? realIds : combined;
+
+        const isValidReorderHistory =
+          (Boolean(s.isResent) || Boolean(s.previousOrderId)) &&
+          splitFromOrderId.length > 0 &&
+          splitFromOrderId.every((oid) => finalIds.includes(oid));
+
+        const normalizedOrderId = isValidReorderHistory
+          ? splitFromOrderId.join(", ")
+          : finalIds.length > 0
+          ? finalIds.join(", ")
+          : rawOrderId || undefined;
+
+        const normalizedOrderIds = finalIds.length > 0 ? finalIds : undefined;
+
+        return {
+          ...s,
+          id: String(s.id || `${id}_srv_${idx}`),
+          socialNetworkId: String(s.socialNetworkId || "general"),
+          socialNetworkName: String(s.socialNetworkName || "General"),
+          serviceId: String(s.serviceId || "custom"),
+          serviceName: String(s.serviceName || "Servicio"),
+          quantity: Number(s.quantity) || 0,
+          suggestedPrice: Number(s.suggestedPrice) || 0,
+          chargedPrice: Number(s.chargedPrice) || 0,
+          providerCostAtPurchase: Number(s.providerCostAtPurchase) || 0,
+          orderId: normalizedOrderId,
+          orderIds: normalizedOrderIds,
+        };
+      })
     : [];
 
   return {
@@ -2514,13 +2541,33 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // Check tracking IDs on services
       let servicesModified = false;
       const cleanedServices = (r.services || []).map((srv) => {
-        const extracted = getItemOrderIds(srv);
-        const realIds = extracted.filter((id) => !/^PED-\d+$/i.test(id));
-        const finalIds = realIds.length > 0 ? realIds : extracted;
-        const expectedPrimary = finalIds.join(", ");
-
         const rawOrderId = String(srv.orderId || "").trim();
-        const rawOrderIdsStr = (srv.orderIds || []).join(", ");
+        const splitFromOrderId = rawOrderId
+          ? rawOrderId.split(/[\s,]+/).map((id) => id.trim()).filter(Boolean)
+          : [];
+        const rawOrderIds = Array.isArray(srv.orderIds)
+          ? srv.orderIds.map((id) => String(id || "").trim()).filter(Boolean)
+          : [];
+
+        const combined = Array.from(new Set([...splitFromOrderId, ...rawOrderIds]));
+        const realIds = combined.filter((id) => !/^PED-\d+$/i.test(id));
+        const pedIds = combined.filter((id) => /^PED-\d+$/i.test(id));
+        const finalIds = realIds.length > 0 ? realIds : combined;
+
+        const isValidReorderHistory =
+          (Boolean(srv.isResent) || Boolean(srv.previousOrderId) || finalIds.length > splitFromOrderId.length) &&
+          splitFromOrderId.length > 0 &&
+          splitFromOrderId.every((id) => finalIds.includes(id));
+
+        const expectedPrimary = isValidReorderHistory
+          ? splitFromOrderId.join(", ")
+          : finalIds.join(", ");
+
+        const hasMixedPed = realIds.length > 0 && pedIds.length > 0;
+        const hasDesync =
+          finalIds.length > 0 &&
+          !isValidReorderHistory &&
+          (splitFromOrderId.join(",") !== finalIds.join(",") || (rawOrderIds.length > 0 && rawOrderIds.join(",") !== finalIds.join(",")));
 
         const falseResend =
           Boolean(srv.isResent) &&
@@ -2529,10 +2576,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               (srv.previousOrderId && srv.previousOrderId.trim() === expectedPrimary)
           );
 
-        if (
-          (finalIds.length > 0 && (rawOrderId !== expectedPrimary || rawOrderIdsStr !== expectedPrimary)) ||
-          falseResend
-        ) {
+        if (hasMixedPed || hasDesync || falseResend) {
           servicesModified = true;
           return {
             ...srv,

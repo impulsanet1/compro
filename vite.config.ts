@@ -3,10 +3,17 @@ import react from '@vitejs/plugin-react';
 import path from 'path';
 import { defineConfig } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
+import { createApiMiddleware } from './server';
 
 export default defineConfig(() => {
   return {
     plugins: [
+      {
+        name: 'impulsanet-api-preview-middleware',
+        configurePreviewServer(server) {
+          server.middlewares.use(createApiMiddleware());
+        },
+      },
       {
         name: 'disable-vite-hmr-ws',
         transform(code, id) {
@@ -56,11 +63,18 @@ export default defineConfig(() => {
           ],
         },
         workbox: {
+          skipWaiting: true,
+          clientsClaim: true,
+          cleanupOutdatedCaches: true,
           maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
           navigateFallback: '/index.html',
           navigateFallbackDenylist: [/^\/api\//],
           runtimeCaching: [
+            {
+              urlPattern: /\/api\/.*/i,
+              handler: 'NetworkOnly',
+            },
             {
               urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,
               handler: 'CacheFirst',

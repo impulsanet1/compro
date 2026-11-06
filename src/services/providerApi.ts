@@ -72,6 +72,7 @@ function mapClientSmmStatus(rawStatus?: string): "procesando" | "en_proceso" | "
 async function callSmmProviderDirect(targetUrl: string, params: URLSearchParams): Promise<any> {
   const bodyStr = params.toString();
 
+  // Attempt 1: Direct POST to SMM provider
   try {
     const directRes = await fetch(targetUrl, {
       method: "POST",
@@ -82,21 +83,37 @@ async function callSmmProviderDirect(targetUrl: string, params: URLSearchParams)
       signal: AbortSignal.timeout(12000),
     });
     const text = await directRes.text();
-    return JSON.parse(text);
+    if (!text.trim().startsWith("<")) {
+      const parsed = JSON.parse(text);
+      if (parsed?.error !== "keyless_legacy_url") {
+        return parsed;
+      }
+    }
   } catch {
-    // Fallback via CORS proxy when running on static hosting where browser blocks cross-origin POST
-    const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`;
-    const proxyRes = await fetch(proxyUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body: bodyStr,
+    // Continue to Attempt 2
+  }
+
+  // Attempt 2: Direct GET with query parameters
+  try {
+    const sep = targetUrl.includes("?") ? "&" : "?";
+    const getRes = await fetch(`${targetUrl}${sep}${bodyStr}`, {
+      method: "GET",
       signal: AbortSignal.timeout(12000),
     });
-    const proxyText = await proxyRes.text();
-    return JSON.parse(proxyText);
+    const text = await getRes.text();
+    if (!text.trim().startsWith("<")) {
+      const parsed = JSON.parse(text);
+      if (parsed?.error !== "keyless_legacy_url") {
+        return parsed;
+      }
+    }
+  } catch {
+    // Fall through to descriptive error
   }
+
+  throw new Error(
+    "No se pudo conectar directamente desde el navegador por políticas CORS del proveedor. Asegúrate de desplegar el servidor Node.js (server.ts) para usar el proxy integrado /api/*."
+  );
 }
 
 export interface ProviderSyncResponse {

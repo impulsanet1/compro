@@ -267,7 +267,10 @@ function persistProviderCredentialsToEnv(apiUrl: string, apiKey: string) {
   }
 }
 
-async function resolveProviderCredentials(req?: Request): Promise<{ apiUrl: string; apiKey: string | null }> {
+async function resolveProviderCredentials(
+  req?: Request,
+  persistIfProvided = true
+): Promise<{ apiUrl: string; apiKey: string | null }> {
   const DEFAULT_URL = 'https://mazsocialmarket.com/api/v2';
 
   const headerUrl = typeof req?.headers?.['x-provider-api-url'] === 'string' ? req.headers['x-provider-api-url'].trim() : '';
@@ -278,15 +281,15 @@ async function resolveProviderCredentials(req?: Request): Promise<{ apiUrl: stri
   const providedUrl = bodyUrl || headerUrl;
   const providedKey = bodyKey || headerKey;
 
-  if (providedKey) {
-    const targetUrl = providedUrl || process.env.PROVIDER_API_URL?.trim() || DEFAULT_URL;
-    if (process.env.PROVIDER_API_KEY !== providedKey || process.env.PROVIDER_API_URL !== targetUrl) {
-      persistProviderCredentialsToEnv(targetUrl, providedKey);
+  if (persistIfProvided && headerKey) {
+    const targetUrl = headerUrl || process.env.PROVIDER_API_URL?.trim() || DEFAULT_URL;
+    if (process.env.PROVIDER_API_KEY !== headerKey || process.env.PROVIDER_API_URL !== targetUrl) {
+      persistProviderCredentialsToEnv(targetUrl, headerKey);
     }
   }
 
-  const apiUrl = process.env.PROVIDER_API_URL?.trim() || providedUrl || DEFAULT_URL;
-  const apiKey = process.env.PROVIDER_API_KEY?.trim() || providedKey || null;
+  const apiUrl = providedUrl || process.env.PROVIDER_API_URL?.trim() || DEFAULT_URL;
+  const apiKey = providedKey || process.env.PROVIDER_API_KEY?.trim() || null;
 
   return { apiUrl, apiKey };
 }
@@ -441,19 +444,28 @@ function findMatchingItemForOrderId(items: any[] | undefined, targetId: string):
   );
 }
 
-async function startServer() {
+export function createApiMiddleware() {
   const app = express();
-  const server = http.createServer(app);
-  const PORT = Number(process.env.DEFAULT_APP_PORT) || Number(process.env.PORT) || 3000;
-  const isProd = process.env.NODE_ENV === 'production';
-
   app.use(express.json());
+
+  // Enable CORS on /api/* so deployed frontends on any domain can reach the backend proxy
+  app.use('/api', (req: Request, res: Response, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-provider-api-url, x-provider-api-key');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    if (req.method === 'OPTIONS') {
+      res.status(204).end();
+      return;
+    }
+    next();
+  });
 
   // --- API Routes for SMM Provider Integration ---
 
   // 0. System & API Health Check
   app.get('/api/health', async (req: Request, res: Response) => {
-    const { apiUrl, apiKey } = await resolveProviderCredentials(req);
+    const { apiUrl, apiKey } = await resolveProviderCredentials(req, true);
     res.json({
       success: true,
       server: 'online',
@@ -466,7 +478,7 @@ async function startServer() {
 
   // 1. Check API configuration status
   app.get('/api/provider/config', async (req: Request, res: Response) => {
-    const { apiUrl, apiKey } = await resolveProviderCredentials(req);
+    const { apiUrl, apiKey } = await resolveProviderCredentials(req, true);
     const isConfigured = Boolean(apiUrl && apiKey);
 
     res.json({
@@ -482,7 +494,7 @@ async function startServer() {
 
   // 2. Test connection with SMM provider (supports custom or configured credentials)
   app.post('/api/provider/test-connection', async (req: Request, res: Response) => {
-    const resolved = await resolveProviderCredentials(req);
+    const resolved = await resolveProviderCredentials(req, false);
     const targetUrl = req.body?.providerUrl?.trim() || resolved.apiUrl;
     const targetKey = req.body?.apiKey?.trim() || resolved.apiKey;
 
@@ -972,6 +984,32 @@ async function startServer() {
     }
   });
 
+  // Ensure any unknown /api/* path returns JSON 404 instead of falling through to SPA index.html
+  app.all('/api/*', (_req: Request, res: Response) => {
+    res.status(404).json({
+      success: false,
+      error: 'Endpoint de API no encontrado.',
+    });
+  });
+
+  return app;
+}
+
+async function startServer() {
+  const app = createApiMiddleware();
+  const server = http.createServer(app);
+
+  // In AI Studio dev sandbox, nginx proxies 8080 -> DEFAULT_APP_PORT (3000).
+  // In standalone Cloud Run deployments, Cloud Run sends traffic directly to process.env.PORT (8080).
+  const isAiStudioDevSandbox = Boolean(process.env.CONTROL_PLANE_PORT) && process.env.NODE_ENV !== 'production';
+  const PORT = isAiStudioDevSandbox
+    ? Number(process.env.DEFAULT_APP_PORT) || 3000
+    : Number(process.env.PORT) || Number(process.env.DEFAULT_APP_PORT) || 3000;
+
+  const distPath = path.resolve(__dirname, 'dist');
+  const distIndex = path.resolve(distPath, 'index.html');
+  const isProd = process.env.NODE_ENV === 'production' || (!isAiStudioDevSandbox && fs.existsSync(distIndex));
+
   // --- Vite / Static Files Mounting ---
   if (!isProd) {
     const { createServer: createViteServer } = await import('vite');
@@ -984,9 +1022,9 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    app.use(express.static(path.resolve(__dirname, 'dist')));
+    app.use(express.static(distPath));
     app.get('*', (_req: Request, res: Response) => {
-      res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
+      res.sendFile(distIndex);
     });
   }
 
@@ -1024,8 +1062,14 @@ async function startServer() {
   });
 
   server.listen(PORT, '0.0.0.0', () => {
-    console.log(`ImpulsaNet Full-Stack Server running on port ${PORT}`);
+    console.log(`ImpulsaNet Full-Stack Server running on port ${PORT} (mode: ${isProd ? 'production' : 'development'})`);
   });
 }
 
-startServer();
+const isMainModule =
+  process.argv[1] &&
+  path.resolve(process.argv[1]).replace(/\.[jt]s$/, '') === path.resolve(__filename).replace(/\.[jt]s$/, '');
+
+if (isMainModule) {
+  startServer();
+}

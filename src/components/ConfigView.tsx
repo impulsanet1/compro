@@ -58,6 +58,7 @@ import {
   fetchInstagramProfile,
   testProviderConnection,
   saveProviderConfig,
+  setCachedProviderCredentials,
   auditProviderApiHealth,
   ApiSystemAuditResult
 } from "../services/providerApi";
@@ -577,6 +578,9 @@ export const ConfigView: React.FC = () => {
   };
 
   useEffect(() => {
+    if (businessConfig.providerApiUrl || businessConfig.providerApiKey) {
+      setCachedProviderCredentials(businessConfig.providerApiUrl, businessConfig.providerApiKey);
+    }
     if (activeTab === "provider_api") {
       fetchProviderConfig().then((cfg) => {
         setProviderConfig(cfg);
@@ -590,7 +594,7 @@ export const ConfigView: React.FC = () => {
         .then((res) => setApiAuditResult(res))
         .finally(() => setIsAuditingApi(false));
     }
-  }, [activeTab]);
+  }, [activeTab, businessConfig.providerApiUrl, businessConfig.providerApiKey]);
 
   useEffect(() => {
     if (businessConfig.providerApiUrl) {

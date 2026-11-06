@@ -3,17 +3,10 @@ import react from '@vitejs/plugin-react';
 import path from 'path';
 import { defineConfig } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
-import { createApiMiddleware } from './server';
 
 export default defineConfig(() => {
   return {
     plugins: [
-      {
-        name: 'impulsanet-api-preview-middleware',
-        configurePreviewServer(server) {
-          server.middlewares.use(createApiMiddleware());
-        },
-      },
       {
         name: 'disable-vite-hmr-ws',
         transform(code, id) {

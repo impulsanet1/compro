@@ -999,16 +999,13 @@ async function startServer() {
   const app = createApiMiddleware();
   const server = http.createServer(app);
 
-  // In AI Studio dev sandbox, nginx proxies 8080 -> DEFAULT_APP_PORT (3000).
-  // In standalone Cloud Run deployments, Cloud Run sends traffic directly to process.env.PORT (8080).
-  const isAiStudioDevSandbox = Boolean(process.env.CONTROL_PLANE_PORT) && process.env.NODE_ENV !== 'production';
-  const PORT = isAiStudioDevSandbox
-    ? Number(process.env.DEFAULT_APP_PORT) || 3000
-    : Number(process.env.PORT) || Number(process.env.DEFAULT_APP_PORT) || 3000;
+  // In AI Studio (both dev and Cloud Run production), Nginx listens on 8080 and proxies to DEFAULT_APP_PORT (3000).
+  // The Node.js application must always bind to port 3000.
+  const PORT = Number(process.env.DEFAULT_APP_PORT) || 3000;
 
   const distPath = path.resolve(__dirname, 'dist');
   const distIndex = path.resolve(distPath, 'index.html');
-  const isProd = process.env.NODE_ENV === 'production' || (!isAiStudioDevSandbox && fs.existsSync(distIndex));
+  const isProd = process.env.NODE_ENV === 'production' || (fs.existsSync(distIndex) && process.env.NODE_ENV !== 'development');
 
   // --- Vite / Static Files Mounting ---
   if (!isProd) {
@@ -1066,10 +1063,4 @@ async function startServer() {
   });
 }
 
-const isMainModule =
-  process.argv[1] &&
-  path.resolve(process.argv[1]).replace(/\.[jt]s$/, '') === path.resolve(__filename).replace(/\.[jt]s$/, '');
-
-if (isMainModule) {
-  startServer();
-}
+startServer();

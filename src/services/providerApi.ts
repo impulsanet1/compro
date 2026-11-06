@@ -71,22 +71,29 @@ function mapClientSmmStatus(rawStatus?: string): "procesando" | "en_proceso" | "
 
 async function callSmmProviderDirect(targetUrl: string, params: URLSearchParams): Promise<any> {
   const bodyStr = params.toString();
-  const reqInit: RequestInit = {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: bodyStr,
-  };
 
   try {
-    const directRes = await fetch(targetUrl, reqInit);
+    const directRes = await fetch(targetUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: bodyStr,
+      signal: AbortSignal.timeout(12000),
+    });
     const text = await directRes.text();
     return JSON.parse(text);
   } catch {
     // Fallback via CORS proxy when running on static hosting where browser blocks cross-origin POST
     const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`;
-    const proxyRes = await fetch(proxyUrl, reqInit);
+    const proxyRes = await fetch(proxyUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: bodyStr,
+      signal: AbortSignal.timeout(12000),
+    });
     const proxyText = await proxyRes.text();
     return JSON.parse(proxyText);
   }
@@ -114,6 +121,7 @@ export async function fetchProviderConfig(): Promise<ProviderApiConfig> {
   try {
     const res = await fetch("/api/provider/config", {
       headers: getAuthHeaders(),
+      signal: AbortSignal.timeout(8000),
     });
     const text = await res.text();
     if (!text.trim().startsWith("<")) {
@@ -177,6 +185,7 @@ export async function testProviderConnection(providerUrl?: string, apiKey?: stri
         ...getAuthHeaders(),
       },
       body: JSON.stringify({ providerUrl: targetUrl, apiKey: targetKey }),
+      signal: AbortSignal.timeout(12000),
     });
     const text = await res.text();
     if (!text.trim().startsWith("<")) {
@@ -232,6 +241,7 @@ export async function saveProviderConfig(providerUrl: string, apiKey: string): P
         ...getAuthHeaders(),
       },
       body: JSON.stringify({ providerUrl: cleanUrl, apiKey: cleanKey }),
+      signal: AbortSignal.timeout(12000),
     });
     const text = await res.text();
     if (!text.trim().startsWith("<")) {
@@ -264,6 +274,7 @@ export async function fetchProviderBalance(): Promise<ProviderBalanceResponse> {
   try {
     const res = await fetch("/api/provider/balance", {
       headers: getAuthHeaders(),
+      signal: AbortSignal.timeout(12000),
     });
     const text = await res.text();
     if (!text.trim().startsWith("<")) {
@@ -329,12 +340,12 @@ export async function syncOrderWithProvider(
         ...getAuthHeaders(),
       },
       body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(15000),
     });
 
     const text = await res.text();
     if (!text.trim().startsWith("<")) {
-      const data = JSON.parse(text);
-      return data;
+      return JSON.parse(text);
     }
   } catch {
     // Fallback to direct SMM provider call if server returned HTML or was unreachable
@@ -368,47 +379,51 @@ export async function syncOrderWithProvider(
 
   try {
     const results: ProviderOrderSyncResult[] = [];
-    if (uniqueIds.length === 1) {
-      const singleId = uniqueIds[0];
+    const CHUNK_SIZE = 50;
+
+    for (let i = 0; i < uniqueIds.length; i += CHUNK_SIZE) {
+      const chunk = uniqueIds.slice(i, i + CHUNK_SIZE);
       const params = new URLSearchParams();
       params.append("key", cached.apiKey);
       params.append("action", "status");
-      params.append("order", singleId);
 
-      const data = await callSmmProviderDirect(cached.providerUrl, params);
-      if (data?.error) {
-        results.push({
-          orderId: singleId,
-          found: false,
-          rawStatus: "Error",
-          mappedStatus: "en_proceso",
-          startCount: null,
-          remains: null,
-          charge: null,
-          currency: null,
-          error: data.error,
-        });
+      if (chunk.length === 1) {
+        params.append("order", chunk[0]);
       } else {
-        results.push({
-          orderId: singleId,
-          found: true,
-          rawStatus: data.status || "Unknown",
-          mappedStatus: mapClientSmmStatus(data.status),
-          startCount: data.start_count ?? null,
-          remains: data.remains ?? null,
-          charge: data.charge ?? null,
-          currency: data.currency ?? "USD",
-        });
+        params.append("orders", chunk.join(","));
       }
-    } else {
-      const params = new URLSearchParams();
-      params.append("key", cached.apiKey);
-      params.append("action", "status");
-      params.append("orders", uniqueIds.join(","));
 
       const data = await callSmmProviderDirect(cached.providerUrl, params);
-      if (data && typeof data === "object" && data.error && !Array.isArray(data)) {
-        for (const id of uniqueIds) {
+
+      if (chunk.length === 1) {
+        const singleId = chunk[0];
+        const itemData = data?.[singleId] && typeof data[singleId] === "object" ? data[singleId] : data;
+        if (itemData?.error) {
+          results.push({
+            orderId: singleId,
+            found: false,
+            rawStatus: "Error",
+            mappedStatus: "en_proceso",
+            startCount: null,
+            remains: null,
+            charge: null,
+            currency: null,
+            error: itemData.error,
+          });
+        } else {
+          results.push({
+            orderId: singleId,
+            found: true,
+            rawStatus: itemData?.status || "Unknown",
+            mappedStatus: mapClientSmmStatus(itemData?.status),
+            startCount: itemData?.start_count ?? null,
+            remains: itemData?.remains ?? null,
+            charge: itemData?.charge ?? null,
+            currency: itemData?.currency ?? "USD",
+          });
+        }
+      } else if (data && typeof data === "object" && data.error && !Array.isArray(data)) {
+        for (const id of chunk) {
           results.push({
             orderId: id,
             found: false,
@@ -422,7 +437,7 @@ export async function syncOrderWithProvider(
           });
         }
       } else {
-        for (const id of uniqueIds) {
+        for (const id of chunk) {
           const item = data?.[id];
           if (!item || item.error) {
             results.push({
@@ -485,7 +500,9 @@ export interface InstagramProfileResponse {
 
 export async function fetchInstagramProfile(usernameOrUrl: string): Promise<InstagramProfileResponse> {
   try {
-    const res = await fetch(`/api/instagram/profile?username=${encodeURIComponent(usernameOrUrl)}`);
+    const res = await fetch(`/api/instagram/profile?username=${encodeURIComponent(usernameOrUrl)}`, {
+      signal: AbortSignal.timeout(12000),
+    });
     const text = await res.text();
     if (!text.trim().startsWith("<")) {
       return JSON.parse(text);
@@ -500,4 +517,86 @@ export async function fetchInstagramProfile(usernameOrUrl: string): Promise<Inst
       error: err.message || "Error al consultar perfil de Instagram en vivo.",
     };
   }
+}
+
+export interface ApiSystemAuditResult {
+  checkedAt: string;
+  backendServerOnline: boolean;
+  providerConfigured: boolean;
+  providerReachable: boolean;
+  providerUrl: string;
+  maskedKey: string | null;
+  balance: string | number | null;
+  currency: string;
+  latencyMs: number;
+  message: string;
+}
+
+/**
+ * Performs an end-to-end health and connectivity audit of the backend proxy and MazSocialMarket SMM API.
+ */
+export async function auditProviderApiHealth(): Promise<ApiSystemAuditResult> {
+  const startMs = Date.now();
+  let backendServerOnline = false;
+
+  try {
+    const healthRes = await fetch("/api/health", {
+      headers: getAuthHeaders(),
+      signal: AbortSignal.timeout(6000),
+    });
+    const text = await healthRes.text();
+    if (healthRes.ok && !text.trim().startsWith("<")) {
+      const json = JSON.parse(text);
+      backendServerOnline = Boolean(json?.server === "online");
+    }
+  } catch {
+    backendServerOnline = false;
+  }
+
+  const cfg = await fetchProviderConfig();
+  if (!cfg.configured) {
+    return {
+      checkedAt: new Date().toISOString(),
+      backendServerOnline,
+      providerConfigured: false,
+      providerReachable: false,
+      providerUrl: cfg.providerUrl || DEFAULT_PROVIDER_URL,
+      maskedKey: null,
+      balance: null,
+      currency: "USD",
+      latencyMs: Date.now() - startMs,
+      message: "La clave API de MazSocialMarket aún no está configurada.",
+    };
+  }
+
+  const bal = await fetchProviderBalance();
+  const latencyMs = Date.now() - startMs;
+
+  if (bal.success) {
+    return {
+      checkedAt: new Date().toISOString(),
+      backendServerOnline,
+      providerConfigured: true,
+      providerReachable: true,
+      providerUrl: cfg.providerUrl || DEFAULT_PROVIDER_URL,
+      maskedKey: cfg.maskedKey,
+      balance: bal.balance ?? null,
+      currency: bal.currency || "USD",
+      latencyMs,
+      message: `API de MazSocialMarket operativa (${latencyMs} ms). Saldo: $${bal.balance ?? "0.00"} ${bal.currency || "USD"}.`,
+    };
+  }
+
+  return {
+    checkedAt: new Date().toISOString(),
+    backendServerOnline,
+    providerConfigured: true,
+    providerReachable: false,
+    providerUrl: cfg.providerUrl || DEFAULT_PROVIDER_URL,
+    maskedKey: cfg.maskedKey,
+    balance: null,
+    currency: "USD",
+    latencyMs,
+    message: bal.error || "Error al conectar con MazSocialMarket API.",
+  };
 }

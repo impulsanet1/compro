@@ -1,5 +1,5 @@
 import React from "react";
-import { WifiOff, RefreshCw } from "lucide-react";
+import { WifiOff } from "lucide-react";
 import { useOnlineStatus } from "../hooks/useOnlineStatus";
 
 export const OfflineIndicator: React.FC = () => {

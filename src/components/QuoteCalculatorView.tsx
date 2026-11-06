@@ -18,8 +18,6 @@ import {
   Smartphone
 } from "lucide-react";
 import {
-  SocialNetwork,
-  Service,
   ReceiptItem,
   getServiceBaseCosts
 } from "../types";
@@ -78,7 +76,6 @@ export const QuoteCalculatorView: React.FC<QuoteCalculatorViewProps> = ({ onTran
   });
 
   const [copiedText, setCopiedText] = useState(false);
-  const [copiedSummary, setCopiedSummary] = useState(false);
 
   // Helper to get Social Network object
   const getSocial = (id: string) => socialNetworks.find((sn) => sn.id === id);

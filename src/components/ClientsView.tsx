@@ -16,7 +16,6 @@ import {
   Copy,
   Check,
   Gift,
-  ShieldCheck,
   ShieldAlert,
   AlertTriangle,
   CheckCircle2,
@@ -37,7 +36,7 @@ interface ClientsViewProps {
 }
 
 export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => {
-  const { clients, receipts, supplierWarranties, updateClientTag, updateClient, reassignClientCode, resolveDuplicateClientCodes, mergeDuplicateClients, separateReceiptToNewClient, isDarkMode } = useApp();
+  const { clients, receipts, supplierWarranties, updateClientTag, updateClient, reassignClientCode, resolveDuplicateClientCodes, separateReceiptToNewClient, isDarkMode } = useApp();
   const formatCOP = (val: number) => "$" + Math.round(val).toLocaleString("es-CO");
 
   const [searchText, setSearchText] = useState("");
@@ -110,10 +109,20 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
       );
       const firstDate = sortedAscReceipts.length > 0 ? sortedAscReceipts[0].date : (c.lastPurchaseDate || "");
 
-      const totalSpent = actualReceipts.reduce((sum, r) => sum + (r.totalCharged || 0), 0);
+      const totalSpent =
+        actualReceipts.length > 0
+          ? actualReceipts.reduce((sum, r) => sum + (r.totalCharged || 0), 0)
+          : c.totalSpent || 0;
+      const effectivePurchaseCount =
+        actualReceipts.length > 0
+          ? actualReceipts.length
+          : c.purchaseCount || (c.receiptIds ? c.receiptIds.length : 0);
       const profitGenerated = actualReceipts.reduce((sum, r) => sum + (r.totalProfit || 0), 0);
-      const averagePurchase = actualReceipts.length > 0 ? totalSpent / actualReceipts.length : 0;
-      const numServicesAcquired = actualReceipts.reduce((sum, r) => sum + (r.services?.length || 0), 0);
+      const averagePurchase = effectivePurchaseCount > 0 ? totalSpent / effectivePurchaseCount : 0;
+      const numServicesAcquired =
+        actualReceipts.length > 0
+          ? actualReceipts.reduce((sum, r) => sum + (r.services?.length || 0), 0)
+          : effectivePurchaseCount;
 
       // Match warranties for this client
       const matchedWarranties = supplierWarranties.filter((w) => isWarrantyForClient(c, w, actualReceipts));
@@ -134,7 +143,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
       return {
         ...c,
         computedCode: code,
-        actualPurchaseCount: actualReceipts.length,
+        actualPurchaseCount: effectivePurchaseCount,
         actualTotalSpent: totalSpent,
         actualLastPurchaseDate: lastDate,
         daysSinceLastPurchase,
@@ -152,7 +161,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
         receiptsInProcess,
         hasActiveWarranty,
         totalWarrantiesCount,
-        isNewClient: totalSpent > 150000 ? false : (c.tag === "Nuevo" || actualReceipts.length <= 1),
+        isNewClient: totalSpent > 150000 ? false : (c.tag === "Nuevo" || effectivePurchaseCount <= 1),
         effectiveTag: totalSpent > 300000 ? "VIP" : totalSpent > 150000 ? "Frecuente" : (c.tag && c.tag !== "Mayorista" ? c.tag : "Nuevo")
       };
     });
@@ -161,7 +170,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
   // Filter clients by search query and warranty/promo eligibility filter
   const filteredClients = useMemo(() => {
     const filtered = enrichedClients.filter((c) => {
-      if (c.actualPurchaseCount <= 0) return false;
+      if (c.actualPurchaseCount <= 0 && !c.clientCode && !c.name) return false;
 
       // Filter by warranty/promo eligibility tab
       if (warrantyFilter === "new_clients" && !c.isNewClient) return false;
@@ -170,17 +179,25 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
       if (warrantyFilter === "active_warranty" && !c.hasActiveWarranty) return false;
       if (warrantyFilter === "with_history" && c.totalWarrantiesCount === 0) return false;
 
-      const search = searchText.toLowerCase().trim();
-      const searchClean = search.replace(/^@+/, "");
+      const search = (searchText || "").toLowerCase().trim();
+      const searchClean = search.replace(/^[@#]+/, "");
+      const matchesReceiptOrOrder = c.actualReceipts.some(
+        (r) =>
+          (r.consecutive !== undefined && String(r.consecutive).toLowerCase().includes(searchClean)) ||
+          (r.targetAccount && r.targetAccount.toLowerCase().includes(searchClean)) ||
+          (r.services || []).some((s) => s.orderId && String(s.orderId).toLowerCase().includes(searchClean))
+      );
+
       return (
         search === "" ||
-        c.computedCode.toLowerCase().includes(search) ||
-        (c.clientCode && c.clientCode.toLowerCase().includes(search)) ||
-        c.name.toLowerCase().includes(search) ||
-        c.name.toLowerCase().includes(searchClean) ||
+        c.computedCode.toLowerCase().includes(searchClean) ||
+        (c.clientCode && c.clientCode.toLowerCase().includes(searchClean)) ||
+        (c.name || "").toLowerCase().includes(search) ||
+        (c.name || "").toLowerCase().includes(searchClean) ||
         (c.phone && c.phone.toLowerCase().includes(search)) ||
         (c.phone && c.phone.toLowerCase().replace(/^@+/, "").includes(searchClean)) ||
-        (c.id && c.id.toLowerCase().includes(searchClean))
+        (c.id && c.id.toLowerCase().includes(searchClean)) ||
+        matchesReceiptOrOrder
       );
     });
 
@@ -207,7 +224,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
 
   // Overall warranty & promo stats for quick summary bar
   const clientsWarrantyStats = useMemo(() => {
-    const totalBuyers = enrichedClients.filter((c) => c.actualPurchaseCount > 0);
+    const totalBuyers = enrichedClients.filter((c) => c.actualPurchaseCount > 0 || Boolean(c.clientCode));
     const newClients = totalBuyers.filter((c) => c.isNewClient);
     const withActiveWarranty = totalBuyers.filter((c) => c.hasActiveWarranty);
     const withWarrantyHistory = totalBuyers.filter((c) => c.totalWarrantiesCount > 0 && !c.hasActiveWarranty);
@@ -305,13 +322,11 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
   const handleResolveDuplicates = async () => {
     setIsResolvingDuplicates(true);
     try {
-      const mergeRes = await mergeDuplicateClients();
       const codeRes = await resolveDuplicateClientCodes();
-      const totalResolved = mergeRes.deletedDocsCount + codeRes.resolvedCount;
       setUserNotification({
         type: "success",
-        message: totalResolved > 0
-          ? `¡Clientes unificados! Se fusionaron y limpiaron ${mergeRes.deletedDocsCount} perfil(es) duplicados y se verificaron los códigos únicos.`
+        message: codeRes.resolvedCount > 0
+          ? `¡Clientes unificados! Se fusionaron y reasignaron ${codeRes.resolvedCount} perfil(es)/código(s) en conflicto.`
           : "Todos los clientes tienen perfiles e IDs únicos y verificados sin duplicados."
       });
     } catch (err: any) {
@@ -977,7 +992,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
                       </button>
 
                       <a
-                        href={`https://wa.me/${selectedClient.phone.replace(/\D/g, '').length === 10 && !selectedClient.phone.replace(/\D/g, '').startsWith('57') ? '57' + selectedClient.phone.replace(/\D/g, '') : selectedClient.phone.replace(/\D/g, '')}?text=${encodeURIComponent(`Hola ${selectedClient.name.split(' ')[0]}! 👋 Te saludamos de ImpulsaNet. ¿En qué podemos ayudarte hoy?`)}`}
+                        href={`https://wa.me/${(selectedClient.phone || '').replace(/\D/g, '').length === 10 && !(selectedClient.phone || '').replace(/\D/g, '').startsWith('57') ? '57' + (selectedClient.phone || '').replace(/\D/g, '') : (selectedClient.phone || '').replace(/\D/g, '')}?text=${encodeURIComponent(`Hola ${(selectedClient.name || 'Cliente').split(' ')[0]}! 👋 Te saludamos de ImpulsaNet. ¿En qué podemos ayudarte hoy?`)}`}
                         target="_blank"
                         rel="noopener noreferrer"
                         className={`inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1.5 rounded-lg transition active:scale-95 cursor-pointer shadow-2xs border ${
@@ -1212,7 +1227,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
                             <Calendar className="w-3 h-3" />
                             {formatDateSimple(receipt.date)}
                             <span className={isDarkMode ? "text-slate-600" : "text-gray-200"}>|</span>
-                            <span>{receipt.services.length} {receipt.services.length === 1 ? "servicio" : "servicios"}</span>
+                            <span>{(receipt.services || []).length} {(receipt.services || []).length === 1 ? "servicio" : "servicios"}</span>
                             <span className={isDarkMode ? "text-slate-600" : "text-gray-200"}>|</span>
                             {(() => {
                               const wRes = resolveReceiptWarranty(receipt, 30);

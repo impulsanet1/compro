@@ -19,7 +19,7 @@ import {
   CheckCircle2,
   Clock
 } from "lucide-react";
-import { Client, Receipt, ReceiptItem, getClientCode, getNormalizedStatus, isReceiptForClient, isWarrantyForClient } from "../types";
+import { Client, ReceiptItem, getClientCode, getNormalizedStatus, isReceiptForClient, isWarrantyForClient } from "../types";
 import { useApp } from "../context/AppContext";
 import { safeCopyToClipboard } from "../utils";
 
@@ -142,7 +142,7 @@ export const RepurchaseModal: React.FC<RepurchaseModalProps> = ({ initialClient,
     if (initialClient?.name) {
       const match = enrichedClients.find(
         (c) =>
-          c.name.trim().toLowerCase() === initialClient.name.trim().toLowerCase() ||
+          String(c.name || "").trim().toLowerCase() === String(initialClient.name || "").trim().toLowerCase() ||
           (initialClient.phone && c.phone === initialClient.phone)
       );
       if (match) return match.id;
@@ -301,7 +301,6 @@ export const RepurchaseModal: React.FC<RepurchaseModalProps> = ({ initialClient,
   const {
     previousCharged,
     providerCost,
-    minSafePrice30Margin,
     calculatedPromoPrice,
     actualDiscountPct,
     clientSavings,
@@ -355,7 +354,7 @@ export const RepurchaseModal: React.FC<RepurchaseModalProps> = ({ initialClient,
   const generatedMessage = useMemo(() => {
     if (!selectedClient) return "";
 
-    const firstName = selectedClient.name.trim().split(" ")[0] || "Cliente";
+    const firstName = String(selectedClient.name || "").trim().split(" ")[0] || "Cliente";
 
     switch (templateType) {
       case "smart_promo":

@@ -4,9 +4,9 @@
  */
 
 import React, { useRef, useState, useEffect, useMemo } from "react";
-import { X, ShieldCheck, Edit3, Save, Trash2, ShieldAlert, Calendar, ChevronDown, ChevronUp, MessageSquare, Send, PhoneCall, ExternalLink, Bell, Plus, DollarSign, Layers, Check, RotateCcw, AlertCircle, Clock, Sparkles, ArrowRight, Hash, RefreshCw, Radio, QrCode, Instagram } from "lucide-react";
-import { Receipt, ReceiptItem, ReceiptStatus, getNormalizedStatus, getItemOrderIds, getItemOrderIdDisplay, getOrderIdTypeLabel, isCustomServiceCode, resolveReceiptWarranty, ProviderOrderSyncResult, formatProviderStatus } from "../types";
-import { motion, AnimatePresence } from "motion/react";
+import { X, ShieldCheck, Edit3, Save, Trash2, ShieldAlert, Calendar, ChevronDown, ChevronUp, MessageSquare, Send, PhoneCall, ExternalLink, Bell, Plus, Check, RotateCcw, AlertCircle, Clock, Hash, RefreshCw, QrCode, Instagram } from "lucide-react";
+import { Receipt, ReceiptItem, ReceiptStatus, getNormalizedStatus, getItemOrderIds, getItemOrderIdDisplay, getOrderIdTypeLabel, resolveReceiptWarranty, ProviderOrderSyncResult, formatProviderStatus } from "../types";
+import { motion } from "motion/react";
 import { useApp } from "../context/AppContext";
 import { syncOrderWithProvider, saveProviderConfig } from "../services/providerApi";
 import { getCustomerTrackingUrl } from "../utils/trackingUrl";
@@ -26,7 +26,7 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
   whatsapp,
   initialIsEditing = false,
 }) => {
-  const { businessConfig, updateBusinessConfig, updateReceipt, socialNetworks, services, addSupplierWarranty, reopenOrResendWarrantyForCancelledOrder, syncReceiptWithProvider } = useApp();
+  const { businessConfig, updateBusinessConfig, updateReceipt, addSupplierWarranty, reopenOrResendWarrantyForCancelledOrder, syncReceiptWithProvider } = useApp();
   const receiptRef = useRef<HTMLDivElement>(null);
   
   // Format utility
@@ -123,7 +123,6 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [resendSuccess, setResendSuccess] = useState<string | null>(null);
   const [showCancelConfirm, setShowCancelConfirm] = useState(false);
-  const [isResendingWarranty, setIsResendingWarranty] = useState(false);
   const [copiedTracking, setCopiedTracking] = useState(false);
 
   const handleSaveQuickTargetAccount = async () => {
@@ -161,7 +160,7 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
   const [quickEditServiceIndex, setQuickEditServiceIndex] = useState<number | null>(null);
   const [quickNewOrderId, setQuickNewOrderId] = useState<string>("");
   const [quickReactivateStatus, setQuickReactivateStatus] = useState<ReceiptStatus>("en_proceso");
-  const [quickIsResent, setQuickIsResent] = useState<boolean>(true);
+  const [quickIsResent, setQuickIsResent] = useState<boolean>(false);
   const [quickResendNote, setQuickResendNote] = useState<string>("Servicio reenviado con nuevo ID del servidor para asegurar la entrega completa.");
   const [isSavingQuickId, setIsSavingQuickId] = useState(false);
   const [quickIdSuccess, setQuickIdSuccess] = useState<string | null>(null);
@@ -189,24 +188,10 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
     updated?: boolean;
   } | null>(null);
 
-  // Helper to reliably detect if a service was resent (even previously before flags)
-  const getIsItemResent = (item: ReceiptItem, rec?: Receipt): boolean => {
+  // Helper to reliably detect if a service was explicitly marked as resent
+  const getIsItemResent = (item: ReceiptItem, _rec?: Receipt): boolean => {
     if (!item) return false;
-    if (item.isResent) return true;
-    if (item.previousOrderId && item.previousOrderId !== item.orderId) return true;
-    if (item.orderIds && item.orderIds.length > 1) return true;
-    if (rec?.internalNotes) {
-      const sName = (item.serviceName || "").toLowerCase();
-      const notesLower = rec.internalNotes.toLowerCase();
-      if (
-        notesLower.includes(`"${sName}" reenviado`) ||
-        notesLower.includes(`para "${sName}":`) ||
-        notesLower.includes(`actualizado para "${sName}"`)
-      ) {
-        return true;
-      }
-    }
-    return false;
+    return Boolean(item.isResent);
   };
 
   // Automatic Background Sync with MazSocialMarket when opening receipt
@@ -763,10 +748,12 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
     const service = receipt?.services?.[index];
     if (!service) return;
     setQuickEditServiceIndex(index);
-    setQuickNewOrderId(getItemOrderIdDisplay(service) || "");
+    const currentRealIds = getItemOrderIds(service).filter((id) => !/^PED-\d+$/i.test(id.trim()));
+    setQuickNewOrderId(currentRealIds.length > 0 ? currentRealIds.join(", ") : "");
     const curStatus = getNormalizedStatus(receipt.status);
     setQuickReactivateStatus(curStatus === "cancelado" ? "en_proceso" : curStatus);
-    setQuickIsResent(true);
+    // Default to false for new/active orders unless the item was already explicitly marked as resent
+    setQuickIsResent(Boolean(service.isResent));
     setQuickResendNote(
       service.resendNote || (curStatus === "cancelado" ? "Reposición por cancelación de proveedor" : "Servicio reenviado con nuevo ID")
     );
@@ -788,20 +775,32 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
     setError(null);
     try {
       const cleanIdsList = cleanId.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
-      const prevId = getItemOrderIdDisplay(targetService) || "sin ID previo";
+      const prevRealIds = getItemOrderIds(targetService).filter((id) => !/^PED-\d+$/i.test(id.trim()));
+      const prevId = prevRealIds.length > 0 ? prevRealIds.join(", ") : "sin ID previo";
 
       const updatedServices = (receipt.services || []).map((s, idx) => {
         if (idx === quickEditServiceIndex) {
-          const existingIds = getItemOrderIds(s);
-          const combined = Array.from(new Set([cleanId, ...existingIds]));
+          if (!quickIsResent) {
+            return {
+              ...s,
+              orderId: cleanIdsList.join(", "),
+              orderIds: cleanIdsList,
+              isResent: false,
+              previousOrderId: undefined,
+              resendDate: undefined,
+              resendNote: undefined,
+            };
+          }
+          const existingRealIds = getItemOrderIds(s).filter((id) => !/^PED-\d+$/i.test(id.trim()));
+          const combined = Array.from(new Set([...cleanIdsList, ...existingRealIds]));
           return {
             ...s,
-            orderId: cleanId,
+            orderId: cleanIdsList.join(", "),
             orderIds: combined,
-            isResent: quickIsResent,
-            previousOrderId: prevId !== "sin ID previo" && prevId !== cleanId ? prevId : (s.previousOrderId || undefined),
-            resendDate: quickIsResent ? new Date().toISOString() : undefined,
-            resendNote: quickIsResent && quickResendNote.trim() ? quickResendNote.trim() : undefined,
+            isResent: true,
+            previousOrderId: prevId !== "sin ID previo" && prevId !== cleanIdsList.join(", ") ? prevId : (s.previousOrderId || undefined),
+            resendDate: new Date().toISOString(),
+            resendNote: quickResendNote.trim() ? quickResendNote.trim() : undefined,
           };
         }
         return s;
@@ -809,7 +808,7 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
 
       const nowFormatted = new Date().toLocaleString("es-CO", { dateStyle: "short", timeStyle: "short" });
       const resentLabel = quickIsResent ? " [REENVIADO]" : "";
-      const noteEntry = `[${nowFormatted}] 🔄 Servicio "${targetService.serviceName}"${resentLabel} actualizado con nuevo ID Proveedor: ${cleanId} (anterior: ${prevId})${quickIsResent && quickResendNote.trim() ? ` - Nota: ${quickResendNote.trim()}` : ""}`;
+      const noteEntry = `[${nowFormatted}] ${quickIsResent ? "🔄" : "🔢"} Servicio "${targetService.serviceName}"${resentLabel} actualizado con ID Proveedor: ${cleanIdsList.join(", ")}${prevId !== "sin ID previo" ? ` (anterior: ${prevId})` : ""}${quickIsResent && quickResendNote.trim() ? ` - Nota: ${quickResendNote.trim()}` : ""}`;
       const updatedNotes = receipt.internalNotes ? `${receipt.internalNotes}\n${noteEntry}` : noteEntry;
 
       const patch: Partial<Receipt> = {
@@ -822,7 +821,7 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
       setEditedServices(updatedServices);
       setEditedStatus(quickReactivateStatus);
       setEditedInternalNotes(updatedNotes);
-      setQuickIdSuccess(`¡Servicio actualizado con nuevo ID #${cleanId}! Factura actualizada.`);
+      setQuickIdSuccess(`¡Servicio actualizado con ID #${cleanIdsList.join(", ")}!`);
       setQuickEditServiceIndex(null);
       setTimeout(() => setQuickIdSuccess(null), 5000);
     } catch (err: any) {

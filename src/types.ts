@@ -146,9 +146,10 @@ export function getClientTagForSpending(totalSpent: number = 0): "VIP" | "Frecue
   return "Nuevo";
 }
 
-export function getClientCode(client: Partial<Client>, fallbackIndex: number = 0): string {
-  if (client.clientCode && client.clientCode.trim()) {
-    return client.clientCode.trim().padStart(4, "0");
+export function getClientCode(client: Partial<Client> | null | undefined, fallbackIndex: number = 0): string {
+  const code = String(client?.clientCode || "").trim();
+  if (code) {
+    return code.padStart(4, "0");
   }
   return String(fallbackIndex + 1).padStart(4, "0");
 }
@@ -163,7 +164,7 @@ export type ReceiptStatus =
 
 export function getNormalizedStatus(status?: string): ReceiptStatus {
   if (!status) return "en_proceso";
-  const s = status.trim().toLowerCase();
+  const s = String(status).trim().toLowerCase();
   if (s === "parcial" || s === "partial") return "parcial";
   if (s === "procesando" || s === "processing" || s === "pendiente" || s === "pending") return "procesando";
   if (s === "completado" || s === "completed" || s === "finalizado" || s === "garantia_finalizada") return "completado";
@@ -175,7 +176,7 @@ export function getNormalizedStatus(status?: string): ReceiptStatus {
 
 export function formatProviderStatus(rawStatus?: string): string {
   if (!rawStatus) return "En curso";
-  const s = rawStatus.toLowerCase().trim();
+  const s = String(rawStatus).toLowerCase().trim();
   if (s === "partial" || s === "parcial") {
     return "Parcial";
   }
@@ -211,8 +212,8 @@ export function formatProviderStatus(rawStatus?: string): string {
 export function getItemOrderIds(item?: Partial<ReceiptItem> | null): string[] {
   if (!item) return [];
 
-  const rawOrderId = (item.orderId || "").trim();
-  const rawOrderIds = (item.orderIds || []).map((id) => (id || "").trim()).filter(Boolean);
+  const rawOrderId = String(item.orderId || "").trim();
+  const rawOrderIds = (item.orderIds || []).map((id) => String(id || "").trim()).filter(Boolean);
 
   if (rawOrderId) {
     const splitFromOrderId = rawOrderId.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
@@ -407,9 +408,19 @@ export function isReceiptForClient(
 ): boolean {
   if (!client || !receipt) return false;
 
-  // 0. Primary explicit check: If receipt has clientId, it is the authoritative foreign key
-  if (receipt.clientId && client.id) {
-    return receipt.clientId === client.id;
+  // 0. Primary explicit check: If receipt has clientId matching client.id
+  if (receipt.clientId && client.id && receipt.clientId === client.id) {
+    return true;
+  }
+
+  // 0b. If client explicitly lists this receipt ID in its receiptIds array
+  if (receipt.id && client.receiptIds && Array.isArray(client.receiptIds) && client.receiptIds.includes(receipt.id)) {
+    return true;
+  }
+
+  // If receipt explicitly belongs to a different clientId (and wasn't in this client's receiptIds)
+  if (receipt.clientId && client.id && receipt.clientId !== client.id) {
+    return false;
   }
 
   const clientContact = normalizeContact(client.phone);
@@ -443,25 +454,20 @@ export function isReceiptForClient(
         return true;
       }
     }
-    // Different contact types (e.g. handle vs phone) -> do not match
+    // Different contact types (e.g. handle vs phone) -> do not match unless targetAccount matches
+    if (receipt.targetAccount) {
+      const targetNorm = normalizeContact(receipt.targetAccount);
+      if (targetNorm.type !== "none" && targetNorm.type === clientContact.type && targetNorm.key === clientContact.key) {
+        return true;
+      }
+    }
     return false;
   }
 
-  // 2. Direct receipt ID list check when one party has contact and other has none:
-  if (receipt.id && client.receiptIds && client.receiptIds.includes(receipt.id)) {
-    // If both have contacts, they must not conflict
-    if (clientContact.type !== "none" && receiptContact.type !== "none") {
-      return matchContacts(client.phone, receipt.clientPhone);
-    }
-    return true;
-  }
-
-  // 3. Neither has a contact:
-  if (clientContact.type === "none" && receiptContact.type === "none") {
-    if (clientNameClean && receiptNameClean && clientNameClean === receiptNameClean) {
-      // Must be at least 2 distinct words to prevent generic single-name collisions like "Luis"
-      const words = clientNameClean.split(/\s+/).filter(Boolean);
-      return words.length >= 2 && clientNameClean !== "cliente";
+  // 2. Neither has a contact (or one is missing): match by exact full name
+  if (clientNameClean && receiptNameClean && clientNameClean === receiptNameClean && clientNameClean !== "cliente") {
+    if (clientContact.type === "none" && receiptContact.type === "none") {
+      return true;
     }
   }
 
@@ -495,7 +501,7 @@ export function buildReceiptsClientIndex(clients: Client[], receipts: Receipt[])
     clientToReceipts.set(c.id, []);
   });
 
-  // 0. Primary explicit mapping: receipt.clientId
+  // 0. Primary explicit mapping: receipt.clientId when that client exists in clientMap
   receipts.forEach((r) => {
     if (r.clientId && clientMap.has(r.clientId)) {
       const c = clientMap.get(r.clientId)!;
@@ -507,13 +513,13 @@ export function buildReceiptsClientIndex(clients: Client[], receipts: Receipt[])
     }
   });
 
-  // 1. Initial direct lookup via client.receiptIds (for legacy receipts without receipt.clientId)
+  // 1. Direct lookup via client.receiptIds (honors explicit receiptIds on the client document)
   clients.forEach((c) => {
     if (c.receiptIds && Array.isArray(c.receiptIds)) {
       c.receiptIds.forEach((rId) => {
         if (assignedReceiptIds.has(rId)) return; // Strictly prevent duplicate receipt assignment to multiple clients
         const r = receiptMap.get(rId);
-        if (r && isReceiptForClient(c, r)) {
+        if (r) {
           const cur = clientToReceipts.get(c.id) || [];
           cur.push(r);
           clientToReceipts.set(c.id, cur);
@@ -524,7 +530,7 @@ export function buildReceiptsClientIndex(clients: Client[], receipts: Receipt[])
     }
   });
 
-  // 2. Map remaining unassigned receipts by verified contact in O(N + M)
+  // 2. Map remaining unassigned receipts by verified contact or name in O(N + M)
   const remainingReceipts = receipts.filter((r) => !assignedReceiptIds.has(r.id));
   if (remainingReceipts.length > 0) {
     const handleMap = new Map<string, Client>();
@@ -537,9 +543,7 @@ export function buildReceiptsClientIndex(clients: Client[], receipts: Receipt[])
       else if (norm.type === "phone") phoneMap.set(norm.key, c);
 
       const cleanName = (c.name || "").trim().toLowerCase().replace(/^@+/, "");
-      // Only multi-word full names (e.g. "Luis Gómez") can be safely mapped in fallback
-      const words = cleanName.split(/\s+/).filter(Boolean);
-      if (words.length >= 2 && cleanName !== "cliente") {
+      if (cleanName && cleanName !== "cliente") {
         if (!nameMap.has(cleanName)) nameMap.set(cleanName, c);
       }
     });
@@ -554,10 +558,14 @@ export function buildReceiptsClientIndex(clients: Client[], receipts: Receipt[])
         matchedClient = phoneMap.get(rNorm.key);
       }
 
+      if (!matchedClient && r.targetAccount) {
+        const tNorm = normalizeContact(r.targetAccount);
+        if (tNorm.type === "handle") matchedClient = handleMap.get(tNorm.key);
+      }
+
       if (!matchedClient) {
         const rCleanName = (r.clientName || "").trim().toLowerCase().replace(/^@+/, "");
-        const words = rCleanName.split(/\s+/).filter(Boolean);
-        if (rNorm.type === "none" && words.length >= 2 && nameMap.has(rCleanName)) {
+        if (rCleanName && rCleanName !== "cliente" && nameMap.has(rCleanName)) {
           matchedClient = nameMap.get(rCleanName);
         }
       }
@@ -592,14 +600,6 @@ export function isTarjetaDigitalService(item: { serviceName?: string; customCate
   if (isSocial) return false;
 
   return name.includes("tarjeta") || name.includes("nfc") || code.startsWith("TDIG") || cat.includes("tarjeta");
-}
-
-/**
- * Checks if a receipt consists EXCLUSIVELY of digital cards / NFC services.
- */
-export function isOnlyTarjetaDigitalReceipt(services?: Array<{ serviceName?: string; customCategory?: string; serviceCode?: string }>): boolean {
-  if (!services || services.length === 0) return false;
-  return services.every(isTarjetaDigitalService);
 }
 
 /**
@@ -1081,7 +1081,7 @@ export function generateCustomServiceCode(category: string = "", serviceName: st
  */
 export function isCustomServiceCode(code: string = ""): boolean {
   if (!code) return false;
-  const upper = code.trim().toUpperCase();
+  const upper = String(code).trim().toUpperCase();
   return (
     upper.startsWith("TDIG-") ||
     upper.startsWith("OPTM-") ||
@@ -1100,7 +1100,7 @@ export function isCustomServiceCode(code: string = ""): boolean {
  */
 export function getOrderIdTypeLabel(code: string = "", isCustomItem?: boolean): string {
   if (isCustomItem || isCustomServiceCode(code)) {
-    const upper = code.trim().toUpperCase();
+    const upper = String(code || "").trim().toUpperCase();
     if (upper.startsWith("TDIG-")) return "Cód. Tarjeta Digital";
     if (upper.startsWith("OPTM-")) return "Cód. Optimización";
     if (upper.startsWith("PUBL-")) return "Cód. Publicidad";
@@ -1152,7 +1152,7 @@ export interface InstagramProfileData {
  */
 export function extractInstagramUsername(input?: string | null): string | null {
   if (!input) return null;
-  const trimmed = input.trim();
+  const trimmed = String(input).trim();
   if (!trimmed) return null;
 
   // Match @username

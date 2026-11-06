@@ -7,8 +7,6 @@ import React, { useState, useMemo, useEffect } from "react";
 import { useApp } from "../context/AppContext";
 import {
   Search,
-  Calendar,
-  FileText,
   Eye,
   Edit3,
   Trash2,
@@ -20,7 +18,6 @@ import {
   ChevronLeft,
   ChevronRight,
   RotateCcw,
-  ShieldAlert,
   ShieldCheck,
   RefreshCw
 } from "lucide-react";
@@ -46,11 +43,6 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => 
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
   const [isSyncingHistory, setIsSyncingHistory] = useState(false);
-  const [syncHistoryFeedback, setSyncHistoryFeedback] = useState<{
-    checkedCount: number;
-    updatedCount: number;
-    details: string[];
-  } | null>(null);
   const [hasAutoSyncedOnMount, setHasAutoSyncedOnMount] = useState(false);
 
   // Status counts for quick filter buttons
@@ -171,31 +163,31 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => 
   const filteredReceipts = useMemo(() => {
     const filtered = receipts.filter((r) => {
       // 1. Search text filter (matches name, phone, consecutive, service, order id, month, or year)
-      const search = searchText.toLowerCase().trim();
+      const search = (searchText || "").toLowerCase().trim();
       if (search !== "") {
         const clientObj = receiptToClient.get(r.id);
         const clientCodeStr = clientObj ? getClientCode(clientObj) : "";
-        const nameToSearch = (clientObj?.name || r.clientName).toLowerCase();
-        const phoneToSearch = clientObj?.phone || r.clientPhone;
+        const nameToSearch = (clientObj?.name || r.clientName || "").toLowerCase();
+        const phoneToSearch = (clientObj?.phone || r.clientPhone || "").toLowerCase();
 
         // Matches basic info
         const matchesBasic =
           nameToSearch.includes(search) ||
           phoneToSearch.includes(search) ||
-          clientCodeStr.includes(search) ||
-          `id:${clientCodeStr}`.includes(search) ||
-          r.clientName.toLowerCase().includes(search) ||
-          r.clientPhone.includes(search) ||
-          r.consecutive.toString().includes(search) ||
-          r.id.toLowerCase().includes(search);
+          clientCodeStr.toLowerCase().includes(search) ||
+          `id:${clientCodeStr}`.toLowerCase().includes(search) ||
+          (r.clientName || "").toLowerCase().includes(search) ||
+          (r.clientPhone || "").toLowerCase().includes(search) ||
+          String(r.consecutive ?? "").toLowerCase().includes(search) ||
+          (r.id || "").toLowerCase().includes(search);
 
         let matchesServices = false;
         if (!matchesBasic) {
-          matchesServices = r.services.some((item) => {
-            const sNetwork = item.socialNetworkName.toLowerCase();
-            const sName = item.serviceName.toLowerCase();
+          matchesServices = (r.services || []).some((item) => {
+            const sNetwork = (item?.socialNetworkName || "").toLowerCase();
+            const sName = (item?.serviceName || "").toLowerCase();
             const itemIds = getItemOrderIds(item);
-            const orderIdMatch = itemIds.some((id) => id.toLowerCase().includes(search));
+            const orderIdMatch = itemIds.some((id) => (id || "").toLowerCase().includes(search));
             return sNetwork.includes(search) || sName.includes(search) || orderIdMatch;
           });
         }
@@ -313,10 +305,8 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => 
   const handleSyncHistoryWithProvider = async () => {
     setIsSyncingHistory(true);
     setBulkSuccessMessage(null);
-    setSyncHistoryFeedback(null);
     try {
       const res = await syncAllInProcessOrdersWithProvider();
-      setSyncHistoryFeedback(res);
       if (res.updatedCount > 0) {
         setBulkSuccessMessage(
           `¡Sincronización completada! ${res.updatedCount} pedido(s) en proceso fueron actualizados con MazSocialMarket.`
@@ -778,7 +768,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => 
                   const wInfo = getWarrantyDetails(r);
 
                   // Extract order IDs
-                  const providerIds = r.services.flatMap((s) => getItemOrderIds(s));
+                  const providerIds = (r.services || []).flatMap((s) => getItemOrderIds(s));
 
                   return (
                     <tr key={r.id} className={`transition ${

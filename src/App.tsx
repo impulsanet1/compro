@@ -17,7 +17,7 @@ import { ReceiptModal } from "./components/ReceiptModal";
 import { PublicTrackingView } from "./components/PublicTrackingView";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Receipt, ReceiptItem, getSupplierWarrantyTimeStatus } from "./types";
-import { LiveServerSyncBadge } from "./components/PWAInstallButton";
+import { LiveServerSyncBadge } from "./components/LiveServerSyncBadge";
 import { OfflineIndicator } from "./components/OfflineIndicator";
 import { useOnlineStatus } from "./hooks/useOnlineStatus";
 import {
@@ -172,12 +172,6 @@ const MainLayout: React.FC = () => {
     setIsEditModeModal(editMode);
   };
 
-  // Handler to transfer quote items to Generator
-  const handleTransferQuoteToReceipt = (items: Partial<ReceiptItem>[]) => {
-    setTransferredItemsFromQuote(items);
-    setActiveTab("generator");
-  };
-
   // Sync selectedReceipt with latest data in receipts collection
   const activeSelectedReceipt = React.useMemo(() => {
     if (!selectedReceipt) return null;
@@ -285,7 +279,7 @@ const MainLayout: React.FC = () => {
 
 const AppContent: React.FC = () => {
   const { user, loadingAuth, isDarkMode } = useApp();
-  const [trackingId, setTrackingId] = useState<string | null>(() => {
+  const [trackingId] = useState<string | null>(() => {
     if (typeof window !== "undefined") {
       const params = new URLSearchParams(window.location.search);
       return params.get("rastreo") || params.get("tracking") || null;

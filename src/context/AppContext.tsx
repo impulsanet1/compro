@@ -12,9 +12,9 @@ import {
   getDocs,
   setDoc,
   addDoc,
-  updateDoc,
   deleteDoc,
-  onSnapshot
+  onSnapshot,
+  writeBatch
 } from "firebase/firestore";
 import { auth, db } from "../firebase";
 import {
@@ -41,6 +41,7 @@ import {
 } from "../types";
 import { DEFAULT_BUSINESS_CONFIG, DEFAULT_SOCIAL_NETWORKS, DEFAULT_SERVICES, DEFAULT_COMBOS } from "../defaultData";
 import { syncOrderWithProvider, setCachedProviderCredentials, getCachedProviderCredentials } from "../services/providerApi";
+import { runReferentialIntegrityAudit, IntegrityAuditReport } from "../utils/referentialIntegrityAudit";
 
 interface AppContextType {
   user: User | null;
@@ -68,7 +69,6 @@ interface AppContextType {
   deleteSupplierWarranty: (id: string) => Promise<void>;
   resolveSupplierWarranty: (id: string, notes?: string) => Promise<void>;
   claimAgainSupplierWarranty: (id: string, notes?: string) => Promise<void>;
-  resolveAllWarrantiesInProcess: () => Promise<{ updatedReceiptsCount: number; resolvedWarrantiesCount: number }>;
   reopenOrResendWarrantyForCancelledOrder: (params: ReopenWarrantyParams) => Promise<SupplierWarrantyRecord>;
 
   // Auth actions
@@ -109,8 +109,10 @@ interface AppContextType {
   mergeDuplicateClients: () => Promise<{ mergedGroupsCount: number; deletedDocsCount: number; details: string[] }>;
   separateReceiptToNewClient: (receiptId: string, fromClientId?: string, newClientName?: string, newClientPhone?: string) => Promise<string>;
   
-  // System Maintenance
+  // System Maintenance & Referential Integrity Audit
   restoreDefaults: () => Promise<void>;
+  runIntegrityAudit: () => IntegrityAuditReport;
+  repairReferentialIntegrity: () => Promise<{ fixedCount: number; details: string[]; reportAfter: IntegrityAuditReport }>;
 }
 
 export const AUTHORIZED_ADMIN_EMAIL = "estebanruiz.12vrgassergio@gmail.com";
@@ -136,6 +138,73 @@ function cleanForFirestore<T>(data: T): T {
   return data;
 }
 
+function normalizeReceiptFromDb(id: string, raw: Record<string, any>): Receipt {
+  const safeServices = Array.isArray(raw.services)
+    ? raw.services.filter(Boolean).map((s: any, idx: number) => ({
+        ...s,
+        id: String(s.id || `${id}_srv_${idx}`),
+        socialNetworkId: String(s.socialNetworkId || "general"),
+        socialNetworkName: String(s.socialNetworkName || "General"),
+        serviceId: String(s.serviceId || "custom"),
+        serviceName: String(s.serviceName || "Servicio"),
+        quantity: Number(s.quantity) || 0,
+        suggestedPrice: Number(s.suggestedPrice) || 0,
+        chargedPrice: Number(s.chargedPrice) || 0,
+        providerCostAtPurchase: Number(s.providerCostAtPurchase) || 0,
+        orderId: s.orderId !== undefined && s.orderId !== null ? String(s.orderId) : undefined,
+        orderIds: Array.isArray(s.orderIds) ? s.orderIds.map((oid: any) => String(oid ?? "").trim()).filter(Boolean) : undefined,
+      }))
+    : [];
+
+  return {
+    ...(raw as Receipt),
+    id,
+    consecutive: Number(raw.consecutive) || 0,
+    clientName: String(raw.clientName ?? ""),
+    clientPhone: String(raw.clientPhone ?? ""),
+    date: String(raw.date || new Date().toISOString()),
+    services: safeServices,
+    subtotal: Number(raw.subtotal) || 0,
+    totalCharged: Number(raw.totalCharged) || 0,
+    totalProviderCost: Number(raw.totalProviderCost) || 0,
+    totalProfit: Number(raw.totalProfit) || 0,
+    warranty: String(raw.warranty ?? "30 días"),
+    thankYouMessage: String(raw.thankYouMessage ?? ""),
+    status: raw.status || "en_proceso",
+  };
+}
+
+function normalizeClientFromDb(id: string, raw: Record<string, any>): Client {
+  return {
+    ...(raw as Client),
+    id,
+    clientCode: raw.clientCode !== undefined && raw.clientCode !== null ? String(raw.clientCode) : undefined,
+    name: String(raw.name ?? ""),
+    phone: String(raw.phone ?? ""),
+    purchaseCount: Number(raw.purchaseCount) || 0,
+    totalSpent: Number(raw.totalSpent) || 0,
+    lastPurchaseDate: String(raw.lastPurchaseDate ?? ""),
+    receiptIds: Array.isArray(raw.receiptIds) ? raw.receiptIds.filter(Boolean).map(String) : [],
+  };
+}
+
+function normalizeWarrantyFromDb(id: string, raw: Record<string, any>): SupplierWarrantyRecord {
+  return {
+    ...(raw as SupplierWarrantyRecord),
+    id,
+    providerOrderId: String(raw.providerOrderId ?? ""),
+    providerOrderIds: Array.isArray(raw.providerOrderIds) ? raw.providerOrderIds.filter(Boolean).map(String) : undefined,
+    clientName: String(raw.clientName ?? ""),
+    clientPhone: String(raw.clientPhone ?? ""),
+    serviceName: String(raw.serviceName ?? ""),
+    reason: String(raw.reason ?? ""),
+    status: raw.status || "en_espera",
+    sentDate: String(raw.sentDate || raw.createdAt || new Date().toISOString()),
+    expectedResponseHours: Number(raw.expectedResponseHours) || 48,
+    createdAt: String(raw.createdAt || new Date().toISOString()),
+  };
+}
+
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
   const [loadingAuth, setLoadingAuth] = useState(true);
@@ -152,6 +221,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Guards to prevent runaway loops under large client/receipt volume
   const isSyncingRef = useRef(false);
   const lastSyncFingerprintRef = useRef("");
+  const hasRunOneTimeRepairsRef = useRef(false);
 
   // TRM Colombia State
   const [trmState, setTrmState] = useState<TrmState>({
@@ -415,8 +485,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       receiptsRef,
       (querySnap) => {
         const recs: Receipt[] = [];
-        querySnap.forEach((doc) => {
-          recs.push({ id: doc.id, ...doc.data() } as Receipt);
+        querySnap.forEach((docSnap) => {
+          recs.push(normalizeReceiptFromDb(docSnap.id, docSnap.data()));
         });
         recs.sort((a, b) => {
           const dateA = a.date ? new Date(a.date).getTime() : 0;
@@ -436,8 +506,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       clientsRef,
       (querySnap) => {
         const cls: Client[] = [];
-        querySnap.forEach((doc) => {
-          cls.push({ id: doc.id, ...doc.data() } as Client);
+        querySnap.forEach((docSnap) => {
+          cls.push(normalizeClientFromDb(docSnap.id, docSnap.data()));
         });
         setClients(cls);
         setLoadingData(false);
@@ -455,7 +525,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       (querySnap) => {
         const items: SupplierWarrantyRecord[] = [];
         querySnap.forEach((docSnap) => {
-          items.push({ id: docSnap.id, ...docSnap.data() } as SupplierWarrantyRecord);
+          items.push(normalizeWarrantyFromDb(docSnap.id, docSnap.data()));
         });
         items.sort((a, b) => new Date(b.sentDate || b.createdAt || 0).getTime() - new Date(a.sentDate || a.createdAt || 0).getTime());
         setSupplierWarranties(items);
@@ -488,8 +558,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
     const duplicateCount = Array.from(codeCounts.values()).filter((cnt) => cnt > 1).length;
 
+    const hasClient0107 = clients.some(
+      (c) => String(c.clientCode || "").trim().padStart(4, "0") === "0107"
+    );
+
     // Build quick fingerprint to avoid running sync when nothing structurally changed
-    const currentFingerprint = `${clients.length}_${receipts.length}_${clients.filter((c) => !c.clientCode).length}_${duplicateCount}`;
+    const currentFingerprint = `${clients.length}_${receipts.length}_${clients.filter((c) => !c.clientCode).length}_${duplicateCount}_${hasClient0107 ? "107ok" : "107missing"}`;
     if (lastSyncFingerprintRef.current === currentFingerprint) {
       return;
     }
@@ -502,196 +576,435 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         // Build fast O(N + M) index mapping clients to receipts
         const { clientToReceipts } = buildReceiptsClientIndex(clients, receipts);
 
-        // Step 0: Auto-merge any duplicate client documents sharing the same phone/handle
-        const contactGroups = new Map<string, Client[]>();
-        clients.forEach((c) => {
-          const norm = normalizeContact(c.phone);
-          if (norm.type !== "none") {
-            const gKey = `${norm.type}:${norm.key}`;
-            if (!contactGroups.has(gKey)) contactGroups.set(gKey, []);
-            contactGroups.get(gKey)!.push(c);
-          }
-        });
+        // ---------------------------------------------------------------------
+        // REPAIR 0107: Restore missing Client #0107 and its orders if it was
+        // renumbered (e.g. to 0130+ by legacy 0097 repair), merged, or unmapped
+        // ---------------------------------------------------------------------
+        if (!hasClient0107 && clients.length > 0) {
+          // Helper: get earliest receipt timestamp and consecutive for a client
+          const getFirstOrderStats = (c: Client) => {
+            const recs = clientToReceipts.get(c.id) || [];
+            let minMs = c.createdAt ? new Date(c.createdAt).getTime() : Infinity;
+            if (isNaN(minMs)) minMs = Infinity;
+            let minConsec = Infinity;
+            recs.forEach((r) => {
+              const t = r.date ? new Date(r.date).getTime() : Infinity;
+              if (!isNaN(t) && t < minMs) minMs = t;
+              const cs = Number(r.consecutive);
+              if (!isNaN(cs) && cs > 0 && cs < minConsec) minConsec = cs;
+            });
+            if (minMs === Infinity && c.lastPurchaseDate) {
+              const lp = new Date(c.lastPurchaseDate).getTime();
+              if (!isNaN(lp)) minMs = lp;
+            }
+            return { minMs, minConsec, recs };
+          };
 
-        for (const [gKey, group] of contactGroups.entries()) {
-          if (group.length > 1) {
-            console.log(`Auto-merging duplicate clients for ${gKey}:`, group.map((c) => c.id));
-            await mergeDuplicateClients();
+          // 1. Check supplierWarranties for explicit clientCode 0107
+          const w0107 = supplierWarranties.find(
+            (w) => String(w.clientCode || "").trim().padStart(4, "0") === "0107"
+          );
+          if (w0107) {
+            const matchedFromWarranty = clients.find(
+              (c) =>
+                (w0107.clientId && c.id === w0107.clientId) ||
+                (w0107.receiptId && (c.receiptIds || []).includes(w0107.receiptId)) ||
+                (w0107.clientPhone && matchContacts(c.phone, w0107.clientPhone)) ||
+                (w0107.clientName &&
+                  String(c.name || "").trim().toLowerCase() === String(w0107.clientName || "").trim().toLowerCase())
+            );
+            if (matchedFromWarranty) {
+              console.log("Restoring Client #0107 from warranty record:", matchedFromWarranty.id);
+              await setDoc(doc(db, "clients", matchedFromWarranty.id), { clientCode: "0107" }, { merge: true });
+              return;
+            }
+          }
+
+          // Find reference window around 0106 and 0108
+          const findByCode = (num: number) =>
+            clients.find((c) => parseInt(String(c.clientCode || "0"), 10) === num);
+
+          const lowerNeighbor = findByCode(106) || findByCode(105) || findByCode(104) || findByCode(103);
+          const upperNeighbor = findByCode(108) || findByCode(109) || findByCode(110) || findByCode(111);
+          const lowerStats = lowerNeighbor ? getFirstOrderStats(lowerNeighbor) : null;
+          const upperStats = upperNeighbor ? getFirstOrderStats(upperNeighbor) : null;
+
+          const lowerMs = lowerStats && lowerStats.minMs !== Infinity ? lowerStats.minMs : 0;
+          const upperMs = upperStats && upperStats.minMs !== Infinity ? upperStats.minMs : Infinity;
+          const lowerConsec = lowerStats && lowerStats.minConsec !== Infinity ? lowerStats.minConsec : 0;
+          const upperConsec = upperStats && upperStats.minConsec !== Infinity ? upperStats.minConsec : Infinity;
+
+          const targetMidMs =
+            lowerMs > 0 && upperMs !== Infinity
+              ? (lowerMs + upperMs) / 2
+              : lowerMs > 0
+              ? lowerMs + 1000
+              : upperMs !== Infinity
+              ? upperMs - 1000
+              : 0;
+
+          const targetMidConsec =
+            lowerConsec > 0 && upperConsec !== Infinity
+              ? (lowerConsec + upperConsec) / 2
+              : lowerConsec > 0
+              ? lowerConsec + 1
+              : upperConsec !== Infinity
+              ? upperConsec - 1
+              : 0;
+
+          // 2. Check any client with code > 108 (e.g. renumbered to 0120+/0130+ or recreated at end) or unassigned
+          // whose earliest order actually belongs in the 0107 slot (before 0108/0109)
+          const shiftedCandidates = clients
+            .filter((c) => {
+              const num = parseInt(String(c.clientCode || "0"), 10);
+              return num > 108 || num === 97 || !c.clientCode;
+            })
+            .map((c) => ({
+              client: c,
+              num: parseInt(String(c.clientCode || "0"), 10) || 9999,
+              stats: getFirstOrderStats(c),
+            }));
+
+          // Priority 2A: Candidate whose earliest order consecutive or timestamp is strictly in [0106..0108] window
+          const exactWindowCandidates = shiftedCandidates.filter(({ stats }) => {
+            if (lowerConsec > 0 && upperConsec !== Infinity && stats.minConsec !== Infinity) {
+              if (stats.minConsec >= lowerConsec && stats.minConsec <= upperConsec) {
+                return true;
+              }
+            }
+            if (lowerMs > 0 && upperMs !== Infinity && stats.minMs !== Infinity) {
+              if (stats.minMs >= lowerMs && stats.minMs <= upperMs) {
+                return true;
+              }
+            }
+            return false;
+          });
+
+          if (exactWindowCandidates.length > 0) {
+            exactWindowCandidates.sort((a, b) => {
+              // Prefer higher/end-of-list reassigned codes (like 130+ or max code) first, then closest to midpoint
+              if (targetMidConsec > 0 && a.stats.minConsec !== Infinity && b.stats.minConsec !== Infinity) {
+                return Math.abs(a.stats.minConsec - targetMidConsec) - Math.abs(b.stats.minConsec - targetMidConsec);
+              }
+              if (targetMidMs > 0) {
+                return Math.abs(a.stats.minMs - targetMidMs) - Math.abs(b.stats.minMs - targetMidMs);
+              }
+              return b.num - a.num;
+            });
+            const restoredClient = exactWindowCandidates[0].client;
+            console.log("Restoring exact-window Client #0107:", restoredClient.id, restoredClient.name);
+            await setDoc(doc(db, "clients", restoredClient.id), { clientCode: "0107" }, { merge: true });
             return;
           }
-        }
 
-        // ---------------------------------------------------------------------
-        // REPAIR 1: Fix Client 0097 -> Reassign to 0130, subsequent to 0131+, eliminate 0097
-        // ---------------------------------------------------------------------
-        const client0097 = clients.find((c) => (c.clientCode || "").trim().padStart(4, "0") === "0097");
-        if (client0097) {
-          console.log("Auto-repair: Reassigning client 0097 to 0130 and reordering subsequent clients...");
-          const date0097 = client0097.createdAt 
-            ? new Date(client0097.createdAt).getTime() 
-            : (client0097.lastPurchaseDate ? new Date(client0097.lastPurchaseDate).getTime() : 0);
-
-          const subsequentClients = clients
-            .filter((c) => {
-              if (c.id === client0097.id) return false;
-              const cNum = parseInt(c.clientCode || "0", 10);
-              const cDate = c.createdAt ? new Date(c.createdAt).getTime() : (c.lastPurchaseDate ? new Date(c.lastPurchaseDate).getTime() : 0);
-              return cNum >= 130 || (date0097 > 0 && cDate >= date0097);
-            })
-            .sort((a, b) => {
-              const dA = a.createdAt ? new Date(a.createdAt).getTime() : (a.lastPurchaseDate ? new Date(a.lastPurchaseDate).getTime() : 0);
-              const dB = b.createdAt ? new Date(b.createdAt).getTime() : (b.lastPurchaseDate ? new Date(b.lastPurchaseDate).getTime() : 0);
-              return dA - dB;
-            });
-
-          // Reassign client 0097 to 0130
-          await setDoc(doc(db, "clients", client0097.id), { clientCode: "0130" }, { merge: true });
-
-          // Subsequent clients get 0131, 0132...
-          let nextSub = 131;
-          for (const sub of subsequentClients) {
-            const newCode = String(nextSub).padStart(4, "0");
-            if (sub.clientCode !== newCode) {
-              await setDoc(doc(db, "clients", sub.id), { clientCode: newCode }, { merge: true });
+          // Priority 2B: Candidate with high code (>= 125 or unassigned) whose earliest order is older than neighbor 0110
+          const broadWindowCandidates = shiftedCandidates.filter(({ num, stats }) => {
+            if (num < 120 && cHasSequentialPlacement(num, stats.minConsec)) return false;
+            if (upperConsec !== Infinity && stats.minConsec !== Infinity && stats.minConsec <= upperConsec + 3) {
+              return true;
             }
-            nextSub++;
+            if (upperMs !== Infinity && stats.minMs !== Infinity) {
+              const bufferMs = 7 * 24 * 60 * 60 * 1000;
+              if (stats.minMs <= upperMs + bufferMs) return true;
+            }
+            return false;
+          });
+
+          function cHasSequentialPlacement(codeNum: number, minConsec: number): boolean {
+            const prev = findByCode(codeNum - 1);
+            if (!prev) return false;
+            const prevSt = getFirstOrderStats(prev);
+            return prevSt.minConsec !== Infinity && minConsec >= prevSt.minConsec;
           }
-          return;
+
+          if (broadWindowCandidates.length > 0) {
+            broadWindowCandidates.sort((a, b) => {
+              if (targetMidConsec > 0 && a.stats.minConsec !== Infinity && b.stats.minConsec !== Infinity) {
+                return Math.abs(a.stats.minConsec - targetMidConsec) - Math.abs(b.stats.minConsec - targetMidConsec);
+              }
+              if (targetMidMs > 0) {
+                return Math.abs(a.stats.minMs - targetMidMs) - Math.abs(b.stats.minMs - targetMidMs);
+              }
+              return a.stats.minMs - b.stats.minMs;
+            });
+            const restoredClient = broadWindowCandidates[0].client;
+            console.log("Restoring broad-window Client #0107:", restoredClient.id, restoredClient.name);
+            await setDoc(doc(db, "clients", restoredClient.id), { clientCode: "0107" }, { merge: true });
+            return;
+          }
+
+          // 3. Check if Client #0107's receipts were merged into another client (< 130) or left unmapped
+          const allMappedReceiptIds = new Set<string>();
+          clientToReceipts.forEach((list) => list.forEach((r) => allMappedReceiptIds.add(r.id)));
+          const orphanReceipts = receipts.filter((r) => !allMappedReceiptIds.has(r.id));
+
+          if (orphanReceipts.length > 0) {
+            // Sort orphan receipts closest to the 0107 window
+            const sortedOrphans = [...orphanReceipts].sort((a, b) => {
+              const tA = a.date ? new Date(a.date).getTime() : 0;
+              const tB = b.date ? new Date(b.date).getTime() : 0;
+              if (targetMidMs > 0) {
+                return Math.abs(tA - targetMidMs) - Math.abs(tB - targetMidMs);
+              }
+              return tA - tB;
+            });
+            const targetSample = sortedOrphans[0];
+            const matchingOrphans = orphanReceipts.filter(
+              (r) =>
+                r.id === targetSample.id ||
+                (r.clientId && r.clientId === targetSample.clientId) ||
+                matchContacts(r.clientPhone, targetSample.clientPhone) ||
+                String(r.clientName || "").trim().toLowerCase() === String(targetSample.clientName || "").trim().toLowerCase()
+            );
+            const restoredId =
+              targetSample.clientId && !clients.some((c) => c.id === targetSample.clientId)
+                ? targetSample.clientId
+                : generateClientId(targetSample.clientName, targetSample.clientPhone, true);
+            const sortedRecs = [...matchingOrphans].sort(
+              (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()
+            );
+            const totalSpent = matchingOrphans.reduce((sum, r) => sum + (r.totalCharged || 0), 0);
+            const restoredDoc: Client = {
+              id: restoredId,
+              clientCode: "0107",
+              name: String(targetSample.clientName || "Cliente").trim(),
+              phone: String(targetSample.clientPhone || "").trim(),
+              purchaseCount: matchingOrphans.length,
+              totalSpent,
+              lastPurchaseDate: sortedRecs[0].date,
+              receiptIds: matchingOrphans.map((r) => r.id),
+              createdAt: sortedRecs[sortedRecs.length - 1].date,
+              tag: getClientTagForSpending(totalSpent),
+            };
+            console.log("Recreating Client #0107 from orphan receipts:", restoredDoc);
+            await setDoc(doc(db, "clients", restoredId), cleanForFirestore(restoredDoc));
+            for (const r of matchingOrphans) {
+              await setDoc(doc(db, "receipts", r.id), { clientId: restoredId }, { merge: true });
+            }
+            return;
+          }
+
+          // 4. Check if Client #0107 was merged into an older client (< 107) by mergeDuplicateClients
+          // (where receipts created in the [0106..0108] window have a different clientId or clientName than the older client's initial order)
+          for (const c of clients) {
+            const num = parseInt(c.clientCode || "0", 10) || 0;
+            if (num <= 0 || num >= 107) continue;
+            const recs = clientToReceipts.get(c.id) || [];
+            if (recs.length < 2) continue;
+
+            const windowRecs = recs.filter((r) => {
+              const consecNum = parseInt(String(r.consecutive || "").replace(/\D/g, ""), 10);
+              const tMs = r.date ? new Date(r.date).getTime() : 0;
+              const inConsec =
+                lowerConsec > 0 &&
+                upperConsec !== Infinity &&
+                !isNaN(consecNum) &&
+                consecNum >= lowerConsec &&
+                consecNum <= upperConsec;
+              const inMs =
+                lowerMs > 0 && upperMs !== Infinity && tMs >= lowerMs && tMs <= upperMs;
+              const hasDifferentIdentity =
+                (r.clientId && r.clientId !== c.id) ||
+                (r.clientName &&
+                  c.name &&
+                  r.clientName.trim().toLowerCase() !== c.name.trim().toLowerCase());
+              return (inConsec || inMs) && hasDifferentIdentity;
+            });
+
+            if (windowRecs.length > 0) {
+              const sample = windowRecs[0];
+              const allFor0107 = recs.filter(
+                (r) =>
+                  windowRecs.some((w) => w.id === r.id) ||
+                  (sample.clientId && sample.clientId !== c.id && r.clientId === sample.clientId) ||
+                  (sample.clientName &&
+                    r.clientName &&
+                    r.clientName.trim().toLowerCase() === sample.clientName.trim().toLowerCase() &&
+                    r.clientName.trim().toLowerCase() !== c.name.trim().toLowerCase())
+              );
+              if (allFor0107.length > 0 && allFor0107.length < recs.length) {
+                const restoredId =
+                  sample.clientId && sample.clientId !== c.id && !clients.some((cl) => cl.id === sample.clientId)
+                    ? sample.clientId
+                    : generateClientId(sample.clientName || c.name, sample.clientPhone || c.phone, true);
+                const sorted0107 = [...allFor0107].sort(
+                  (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()
+                );
+                const totalSpent0107 = allFor0107.reduce((sum, r) => sum + (r.totalCharged || 0), 0);
+                const restoredDoc: Client = {
+                  id: restoredId,
+                  clientCode: "0107",
+                  name: String(sample.clientName || c.name || "Cliente").trim(),
+                  phone: String(sample.clientPhone || c.phone || "").trim(),
+                  purchaseCount: allFor0107.length,
+                  totalSpent: totalSpent0107,
+                  lastPurchaseDate: sorted0107[0].date,
+                  receiptIds: allFor0107.map((r) => r.id),
+                  createdAt: sorted0107[sorted0107.length - 1].date,
+                  tag: getClientTagForSpending(totalSpent0107),
+                };
+                const remainingIds = (c.receiptIds || []).filter(
+                  (id) => !allFor0107.some((r) => r.id === id)
+                );
+                console.log("Unmerging Client #0107 from older client:", c.clientCode, restoredDoc);
+                await setDoc(doc(db, "clients", restoredId), cleanForFirestore(restoredDoc));
+                await setDoc(doc(db, "clients", c.id), { receiptIds: remainingIds }, { merge: true });
+                for (const r of allFor0107) {
+                  await setDoc(doc(db, "receipts", r.id), { clientId: restoredId }, { merge: true });
+                }
+                return;
+              }
+            }
+          }
+
+          // 5. Fallback: If any client with code >= 130 has multiple orders and its earliest order is older than client 0125's earliest order
+          const highCodeRepeatCandidates = shiftedCandidates.filter(
+            ({ num, stats }) => num >= 130 && stats.recs.length >= 1
+          );
+          if (highCodeRepeatCandidates.length > 0) {
+            const ref125 = findByCode(125) || findByCode(120) || findByCode(115);
+            const refMs = ref125 ? getFirstOrderStats(ref125).minMs : Infinity;
+            const olderHighCandidates = highCodeRepeatCandidates.filter(
+              ({ stats }) => stats.minMs < refMs
+            );
+            if (olderHighCandidates.length > 0) {
+              olderHighCandidates.sort((a, b) => {
+                if (targetMidMs > 0) {
+                  return Math.abs(a.stats.minMs - targetMidMs) - Math.abs(b.stats.minMs - targetMidMs);
+                }
+                return a.stats.minMs - b.stats.minMs;
+              });
+              const restoredClient = olderHighCandidates[0].client;
+              console.log("Restoring high-code repeat Client #0107:", restoredClient.id, restoredClient.name);
+              await setDoc(doc(db, "clients", restoredClient.id), { clientCode: "0107" }, { merge: true });
+              return;
+            }
+          }
         }
 
         // ---------------------------------------------------------------------
-        // REPAIR 2: Fix Client 0120's receipts -> Set service to Optimización de Instagram
+        // ONE-TIME SESSION REPAIRS (Run once per session to prevent repeated writes)
         // ---------------------------------------------------------------------
-        const client0120 = clients.find((c) => (c.clientCode || "").trim().padStart(4, "0") === "0120");
-        if (client0120) {
-          const recs0120 = receipts.filter(
-            (r) =>
-              (client0120.receiptIds || []).includes(r.id) ||
-              isReceiptForClient(r, client0120) ||
-              (r.clientPhone && matchPhones(r.clientPhone, client0120.phone))
-          );
+        if (!hasRunOneTimeRepairsRef.current && receipts.length > 0) {
+          hasRunOneTimeRepairsRef.current = true;
 
-          for (const rec of recs0120) {
-            let receiptNeedsFix = false;
-            const fixedServices = (rec.services || []).map((s) => {
-              const isAlreadyOpt = s.serviceId === "ig-optimizacion" && s.serviceName === "Optimización de Instagram";
-              if (!isAlreadyOpt) {
-                receiptNeedsFix = true;
+          // REPAIR 1186: Clear accidental resend flag on new Order #1186 (and any order where previousOrderId was just a PED- placeholder)
+          for (const rec of receipts) {
+            const consecClean = String(rec.consecutive || "").replace(/\D/g, "");
+            const is1186 = consecClean === "1186";
+            const hasAccidentalResend = (rec.services || []).some(
+              (s) =>
+                (is1186 && (s.isResent || s.previousOrderId || s.resendNote || s.resendDate)) ||
+                (s.isResent && s.previousOrderId && /^PED-\d+$/i.test(s.previousOrderId.trim()))
+            );
+
+            if (hasAccidentalResend) {
+              const cleanedServices = (rec.services || []).map((s) => {
+                const allIds = getItemOrderIds(s);
+                const realIds = allIds.filter((id) => !/^PED-\d+$/i.test(id.trim()));
+                const finalIds = realIds.length > 0 ? realIds : allIds;
                 return {
                   ...s,
-                  socialNetworkId: "instagram",
-                  socialNetworkName: "Instagram",
-                  serviceId: "ig-optimizacion",
-                  serviceName: "Optimización de Instagram",
-                  providerCostAtPurchase: 0,
-                  providerCostCOP: 0,
-                  providerCostUSD: null,
-                  quantity: s.quantity || 1,
-                  suggestedPrice: s.chargedPrice || s.suggestedPrice || 65000,
-                  chargedPrice: s.chargedPrice || 65000,
+                  orderId: finalIds.join(", "),
+                  orderIds: finalIds,
+                  isResent: false,
+                  previousOrderId: undefined,
+                  resendDate: undefined,
+                  resendNote: undefined,
                 };
-              }
-              if (s.providerCostAtPurchase !== 0 || s.providerCostCOP !== 0) {
-                receiptNeedsFix = true;
-                return {
-                  ...s,
-                  providerCostAtPurchase: 0,
-                  providerCostCOP: 0,
-                  providerCostUSD: null,
-                };
-              }
-              return s;
-            });
+              });
 
-            if (receiptNeedsFix || rec.totalProviderCost !== 0) {
-              console.log(`Auto-repair: Updating receipt ${rec.id} for client 0120 to Optimización de Instagram...`);
+              const cleanedNotes = rec.internalNotes
+                ? rec.internalNotes
+                    .split("\n")
+                    .filter((line) => !line.includes("[REENVIADO]") && !line.includes("anterior: PED-"))
+                    .join("\n")
+                : undefined;
+
               await setDoc(
                 doc(db, "receipts", rec.id),
-                {
-                  services: fixedServices,
-                  totalProviderCost: 0,
-                  totalProfit: rec.totalCharged || 0,
-                },
+                cleanForFirestore({
+                  services: cleanedServices,
+                  internalNotes: cleanedNotes ?? "",
+                }),
                 { merge: true }
               );
             }
           }
+
+          // REPAIR 3: Remove deprecated Alertas Digitales from Firestore if exists
+          const deprecatedServices = services.filter((s) => {
+            const sName = (s.name || "").toLowerCase();
+            const sId = (s.id || "").toLowerCase();
+            return sName.includes("alerta") || sId.includes("alrt") || sId.includes("alerta");
+          });
+          for (const dep of deprecatedServices) {
+            await deleteDoc(doc(db, "services", dep.id));
+          }
+
+          // REPAIR 4: Fix Pedido 1184 status from completado to procesando (once)
+          const receipts1184 = receipts.filter((r) => {
+            const isConsecutive1184 = String(r.consecutive || "").trim() === "1184";
+            const hasOrderId1184 = (r.services || []).some((s) =>
+              getItemOrderIds(s).some((id) => id.replace(/^#/, "").trim() === "1184")
+            );
+            return (
+              (isConsecutive1184 || hasOrderId1184) &&
+              getNormalizedStatus(r.status) === "completado" &&
+              !(r.internalNotes || "").includes("[Ajuste Proveedor #1184]")
+            );
+          });
+          for (const r1184 of receipts1184) {
+            const note1184 = r1184.internalNotes
+              ? `${r1184.internalNotes}\n[Ajuste Proveedor #1184] Estado actualizado a "procesando" según estado en proveedor.`
+              : `[Ajuste Proveedor #1184] Estado actualizado a "procesando" según estado en proveedor.`;
+            await setDoc(
+              doc(db, "receipts", r1184.id),
+              {
+                status: "procesando",
+                internalNotes: note1184,
+              },
+              { merge: true }
+            );
+          }
         }
 
-        // ---------------------------------------------------------------------
-        // REPAIR 3: Remove deprecated Alertas Digitales from Firestore if exists
-        // ---------------------------------------------------------------------
-        const deprecatedServices = services.filter((s) => {
-          const sName = (s.name || "").toLowerCase();
-          const sId = (s.id || "").toLowerCase();
-          return sName.includes("alerta") || sId.includes("alrt") || sId.includes("alerta");
-        });
-        for (const dep of deprecatedServices) {
-          console.log("Auto-repair: Removing deprecated Alertas Digitales service:", dep.id);
-          await deleteDoc(doc(db, "services", dep.id));
-        }
+        // Helper to compute earliest order timestamp for a client (so repeat purchases never alter client age sorting)
+        const getClientEarliestMs = (c: Client): number => {
+          const recs = clientToReceipts.get(c.id) || [];
+          let minMs = c.createdAt ? new Date(c.createdAt).getTime() : Infinity;
+          if (isNaN(minMs)) minMs = Infinity;
+          for (const r of recs) {
+            const t = r.date ? new Date(r.date).getTime() : Infinity;
+            if (!isNaN(t) && t < minMs) minMs = t;
+          }
+          if (minMs === Infinity && c.lastPurchaseDate) {
+            const lp = new Date(c.lastPurchaseDate).getTime();
+            if (!isNaN(lp)) minMs = lp;
+          }
+          return minMs === Infinity ? 0 : minMs;
+        };
 
-        // ---------------------------------------------------------------------
-        // REPAIR 4: Fix Pedido 1184 status from completado to procesando
-        // ---------------------------------------------------------------------
-        const receipts1184 = receipts.filter((r) => {
-          const isConsecutive1184 = String(r.consecutive || "").trim() === "1184";
-          const hasOrderId1184 = (r.services || []).some((s) =>
-            getItemOrderIds(s).some((id) => id.replace(/^#/, "").trim() === "1184")
-          );
-          return (
-            (isConsecutive1184 || hasOrderId1184) &&
-            getNormalizedStatus(r.status) === "completado" &&
-            !(r.internalNotes || "").includes("[Ajuste Proveedor #1184]")
-          );
-        });
-        for (const r1184 of receipts1184) {
-          const note1184 = r1184.internalNotes
-            ? `${r1184.internalNotes}\n[Ajuste Proveedor #1184] Estado actualizado a "procesando" según estado en proveedor.`
-            : `[Ajuste Proveedor #1184] Estado actualizado a "procesando" según estado en proveedor.`;
-          await setDoc(
-            doc(db, "receipts", r1184.id),
-            {
-              status: "procesando",
-              internalNotes: note1184,
-            },
-            { merge: true }
-          );
-        }
-
-        // Sort clients deterministically: older clients or clients with earlier dates keep their assigned code
+        // Sort clients deterministically by earliest order/creation date
         const sortedClients = [...clients].sort((a, b) => {
-          const dateA = a.createdAt ? new Date(a.createdAt).getTime() : (a.lastPurchaseDate ? new Date(a.lastPurchaseDate).getTime() : 0);
-          const dateB = b.createdAt ? new Date(b.createdAt).getTime() : (b.lastPurchaseDate ? new Date(b.lastPurchaseDate).getTime() : 0);
+          const dateA = getClientEarliestMs(a);
+          const dateB = getClientEarliestMs(b);
           if (dateA !== dateB) return dateA - dateB;
           return (b.purchaseCount || 0) - (a.purchaseCount || 0);
         });
 
-        // Detect duplicate codes (e.g., if two distinct people share ID 0083) and map unique codes
-        const codeOwners = new Map<string, string>(); // code -> clientId
-        const duplicateClientIds = new Set<string>();
+        // Gather all currently used valid codes without overwriting existing valid codes
         const usedCodes = new Set<number>();
-
+        usedCodes.add(97);
         sortedClients.forEach((c) => {
           if (c.clientCode && c.clientCode.trim()) {
-            const cleanCode = c.clientCode.trim().padStart(4, "0");
-            if (cleanCode === "0097") {
-              duplicateClientIds.add(c.id);
-              return;
-            }
-            const existingOwner = codeOwners.get(cleanCode);
-            if (!existingOwner) {
-              codeOwners.set(cleanCode, c.id);
-              const num = parseInt(cleanCode, 10);
-              if (!isNaN(num) && num > 0 && num !== 97) usedCodes.add(num);
-            } else {
-              console.warn(`Duplicate clientCode #${cleanCode} detected between ${existingOwner} and ${c.id}`);
-              duplicateClientIds.add(c.id);
+            const num = parseInt(c.clientCode.trim(), 10);
+            if (!isNaN(num) && num > 0 && num !== 97) {
+              usedCodes.add(num);
             }
           }
         });
 
-        // Always assign codes strictly sequential after max existing code, never filling gaps or using 97
         const validCodesArray = Array.from(usedCodes).filter((n) => n !== 97);
         let nextSequentialCode = validCodesArray.length > 0 ? Math.max(...validCodesArray) + 1 : 1;
         if (nextSequentialCode === 97) nextSequentialCode = 98;
@@ -702,15 +1015,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         for (const client of sortedClients) {
           const updatePayload: Record<string, any> = {};
 
-          const is0097 = (client.clientCode || "").trim().padStart(4, "0") === "0097";
-          const needsNewCode = !client.clientCode || !client.clientCode.trim() || duplicateClientIds.has(client.id) || is0097;
+          const rawCode = (client.clientCode || "").trim();
+          const paddedCode = rawCode ? rawCode.padStart(4, "0") : "";
+          const needsNewCode = !paddedCode || paddedCode === "0000" || paddedCode === "0097" || isNaN(parseInt(paddedCode, 10));
           if (needsNewCode) {
             while (usedCodes.has(nextSequentialCode) || nextSequentialCode === 97) {
               nextSequentialCode++;
             }
             const assignedCode = String(nextSequentialCode).padStart(4, "0");
             usedCodes.add(nextSequentialCode);
-            codeOwners.set(assignedCode, client.id);
             updatePayload.clientCode = assignedCode;
             nextSequentialCode++;
             if (nextSequentialCode === 97) nextSequentialCode = 98;
@@ -729,13 +1042,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             if (Math.abs((client.totalSpent || 0) - actualSpent) > 0.01) updatePayload.totalSpent = actualSpent;
             if (client.lastPurchaseDate !== actualLastDate) updatePayload.lastPurchaseDate = actualLastDate;
 
-            // Automatically assign tier tags: >300k => VIP, >150k => Frecuente, else => Nuevo
             const targetTag = getClientTagForSpending(actualSpent);
             if (client.tag !== targetTag) {
               updatePayload.tag = targetTag;
             }
 
-            const actualReceiptIds = matchingReceipts.map((r) => r.id).filter(Boolean);
+            const actualReceiptIds = Array.from(
+              new Set([...(client.receiptIds || []), ...matchingReceipts.map((r) => r.id).filter(Boolean)])
+            );
             const currentIds = client.receiptIds || [];
             const idsChanged =
               currentIds.length !== actualReceiptIds.length ||
@@ -743,56 +1057,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             if (idsChanged) {
               updatePayload.receiptIds = actualReceiptIds;
             }
-          } else {
-            const currentSpent = client.totalSpent || 0;
-            const targetTag = getClientTagForSpending(currentSpent);
-            if (client.tag === "Mayorista" || client.tag !== targetTag) {
-              updatePayload.tag = targetTag;
-            }
           }
 
           if (Object.keys(updatePayload).length > 0) {
-            updatesQueue.push({ id: client.id, payload: updatePayload });
+            updatesQueue.push({ id: client.id, payload: cleanForFirestore(updatePayload) });
           }
         }
 
-        // Apply any needed client doc updates in small controlled batches
-        for (const item of updatesQueue.slice(0, 10)) {
+        // Apply any needed client doc updates in a single atomic Firestore writeBatch for high scalability
+        if (updatesQueue.length > 0) {
           try {
-            await setDoc(doc(db, "clients", item.id), item.payload, { merge: true });
-          } catch (e) {
-            console.warn("Failed to sync client doc:", e);
-          }
-        }
-
-        // Step 1.5: Auto-separate mistakenly merged clients
-        // If a client has multiple receipts where one is for a Tarjeta Digital / base service
-        // and another is for social media (TikTok/Instagram/etc.), separate the tarjeta receipt into its own client!
-        for (const client of clients) {
-          const clientRecs = clientToReceipts.get(client.id) || [];
-          if (clientRecs.length > 1) {
-            const tarjetaRec = clientRecs.find((r) => {
-              return (r.services || []).some((s) => {
-                const sName = (s.serviceName || "").toLowerCase();
-                const sCat = (s.customCategory || "").toLowerCase();
-                const sCode = (s.serviceCode || "").toUpperCase();
-                return sName.includes("tarjeta") || sName.includes("nfc") || sCat.includes("tarjeta") || sCode.startsWith("TDIG");
-              });
-            });
-
-            const socialRec = clientRecs.find((r) => {
-              if (tarjetaRec && r.id === tarjetaRec.id) return false;
-              return (r.services || []).some((s) => {
-                const sName = (s.serviceName || "").toLowerCase();
-                return sName.includes("tiktok") || sName.includes("instagram") || sName.includes("facebook") || sName.includes("seguidor");
-              });
-            });
-
-            if (tarjetaRec && socialRec) {
-              console.log("Auto-separating erroneously merged tarjeta order into independent client:", tarjetaRec.id);
-              await separateReceiptToNewClient(tarjetaRec.id, client.id);
-              return; // Allow the database change to trigger the next clean sync cycle
+            const batch = writeBatch(db);
+            for (const item of updatesQueue.slice(0, 250)) {
+              batch.set(doc(db, "clients", item.id), item.payload, { merge: true });
             }
+            await batch.commit();
+          } catch (e) {
+            console.warn("Failed to batch sync client docs:", e);
           }
         }
 
@@ -862,8 +1143,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               const newClientDoc: Client = {
                 id: cId,
                 clientCode: assignedCode,
-                name: sample.clientName.trim(),
-                phone: sample.clientPhone.trim(),
+                name: String(sample.clientName || "").trim(),
+                phone: String(sample.clientPhone || "").trim(),
                 purchaseCount: recList.length,
                 totalSpent,
                 lastPurchaseDate: sortedRecs[0].date,
@@ -1135,8 +1416,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const newClient: Client = {
         id: clientId,
         clientCode: newCode,
-        name: receiptData.clientName.trim(),
-        phone: receiptData.clientPhone.trim(),
+        name: String(receiptData.clientName || "").trim(),
+        phone: String(receiptData.clientPhone || "").trim(),
         purchaseCount: 1,
         totalSpent: receiptData.totalCharged,
         lastPurchaseDate: receiptData.date,
@@ -1273,7 +1554,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
    * Reassigns or manually sets a client's 4-digit code, checking for uniqueness and updating Firestore.
    */
   const reassignClientCode = async (clientId: string, customCode?: string): Promise<string> => {
+    const computeNextCode = () => {
+      const existingCodes = clients
+        .filter((c) => c.id !== clientId && c.clientCode && c.clientCode.trim().padStart(4, "0") !== "0097")
+        .map((c) => parseInt(c.clientCode!, 10))
+        .filter((n) => !isNaN(n) && n > 0 && n !== 97);
+      const maxCode = existingCodes.length > 0 ? Math.max(...existingCodes) : 0;
+      let nextId = maxCode + 1;
+      if (nextId === 97) nextId = 98;
+      return String(nextId).padStart(4, "0");
+    };
+
     let finalCode = "";
+    const currentClient = clients.find((c) => c.id === clientId);
     if (customCode && customCode.trim()) {
       const normalized = customCode.trim().replace(/\D/g, "").padStart(4, "0");
       if (normalized === "0097") {
@@ -1286,18 +1579,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         (c) => c.id !== clientId && c.clientCode?.trim().padStart(4, "0") === normalized
       );
       if (conflict) {
-        throw new Error(`El código #${normalized} ya está asignado al cliente "${conflict.name}".`);
+        const fallbackForConflict =
+          currentClient?.clientCode &&
+          currentClient.clientCode.trim().padStart(4, "0") !== normalized &&
+          currentClient.clientCode.trim().padStart(4, "0") !== "0097"
+            ? currentClient.clientCode.trim().padStart(4, "0")
+            : computeNextCode();
+        await setDoc(doc(db, "clients", conflict.id), { clientCode: fallbackForConflict }, { merge: true });
       }
       finalCode = normalized;
     } else {
-      const existingCodes = clients
-        .filter((c) => c.id !== clientId && c.clientCode && c.clientCode.trim().padStart(4, "0") !== "0097")
-        .map((c) => parseInt(c.clientCode!, 10))
-        .filter((n) => !isNaN(n) && n > 0 && n !== 97);
-      const maxCode = existingCodes.length > 0 ? Math.max(...existingCodes) : 0;
-      let nextId = maxCode + 1;
-      if (nextId === 97) nextId = 98;
-      finalCode = String(nextId).padStart(4, "0");
+      finalCode = computeNextCode();
     }
 
     const clientRef = doc(db, "clients", clientId);
@@ -1333,7 +1625,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     });
 
-    for (const [key, group] of contactGroups.entries()) {
+    for (const group of contactGroups.values()) {
       if (group.length <= 1) continue;
 
       mergedGroupsCount++;
@@ -1497,20 +1789,29 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (clientSnap.exists()) {
       const clientData = clientSnap.data() as Client;
       
-      // Filter out this receipt ID from client's receiptIds
+      // Find all remaining receipts that still belong to this client
       const updatedReceiptIds = (clientData.receiptIds || []).filter((rId) => rId !== id);
-      const newPurchaseCount = Math.max(0, (clientData.purchaseCount || 1) - 1);
+      const remainingClientReceipts = receipts.filter(
+        (r) =>
+          r.id !== id &&
+          (r.clientId === clientId || updatedReceiptIds.includes(r.id) || isReceiptForClient(clientData, r))
+      );
       
-      if (updatedReceiptIds.length === 0 || newPurchaseCount <= 0 || (clientData.purchaseCount || 1) <= 1) {
-        // Delete the client if no receipts are left or purchase count becomes 0
+      if (remainingClientReceipts.length === 0 && updatedReceiptIds.length === 0) {
+        // Delete the client only if truly no receipts remain
         await deleteDoc(clientRef);
       } else {
-        // Otherwise, update client purchaseCount, totalSpent, and receiptIds
-        const newTotalSpent = Math.max(0, (clientData.totalSpent || 0) - (receiptData.totalCharged || 0));
+        // Otherwise, update client purchaseCount, totalSpent, and receiptIds from remaining receipts
+        const allRemainingIds = Array.from(
+          new Set([...updatedReceiptIds, ...remainingClientReceipts.map((r) => r.id)])
+        );
+        const newPurchaseCount = Math.max(1, remainingClientReceipts.length || allRemainingIds.length);
+        const newTotalSpent =
+          remainingClientReceipts.length > 0
+            ? remainingClientReceipts.reduce((sum, r) => sum + (r.totalCharged || 0), 0)
+            : Math.max(0, (clientData.totalSpent || 0) - (receiptData.totalCharged || 0));
         
-        // Find new lastPurchaseDate by looking up the remaining receipts of this client
         let lastPurchaseDate = clientData.lastPurchaseDate;
-        const remainingClientReceipts = receipts.filter((r) => r.id !== id && isReceiptForClient(clientData, r));
         if (remainingClientReceipts.length > 0) {
           remainingClientReceipts.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
           lastPurchaseDate = remainingClientReceipts[0].date;
@@ -1520,7 +1821,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           ...clientData,
           purchaseCount: newPurchaseCount,
           totalSpent: newTotalSpent,
-          receiptIds: updatedReceiptIds,
+          receiptIds: allRemainingIds,
           lastPurchaseDate: lastPurchaseDate
         });
       }
@@ -1974,42 +2275,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     await setDoc(docRef, updateData, { merge: true });
   };
 
-  const resolveAllWarrantiesInProcess = async () => {
-    let updatedReceiptsCount = 0;
-    let resolvedWarrantiesCount = 0;
-
-    // 1. Resolve warranty receipts
-    const warrantyReceipts = receipts.filter(
-      (r) => getNormalizedStatus(r.status) === "garantia_en_proceso"
-    );
-    for (const r of warrantyReceipts) {
-      try {
-        await setDoc(doc(db, "receipts", r.id), { status: "completado" }, { merge: true });
-        updatedReceiptsCount++;
-      } catch (err) {
-        console.error("Error completing warranty receipt:", r.id, err);
-      }
-    }
-
-    // 2. Resolve active supplier warranty records in background
-    const activeWarranties = supplierWarranties.filter(
-      (w) => w.status === "en_espera" || w.status === "reclamado_nuevamente"
-    );
-    for (const w of activeWarranties) {
-      try {
-        await setDoc(doc(db, "supplier_warranties", w.id), {
-          status: "resuelto",
-          resolvedDate: new Date().toISOString()
-        }, { merge: true });
-        resolvedWarrantiesCount++;
-      } catch (err) {
-        console.error("Error resolving warranty record:", w.id, err);
-      }
-    }
-
-    return { updatedReceiptsCount, resolvedWarrantiesCount };
-  };
-
   const claimAgainSupplierWarranty = async (id: string, notes?: string) => {
     const docRef = doc(db, "supplier_warranties", id);
     const snap = await getDoc(docRef);
@@ -2154,6 +2419,216 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     } as SupplierWarrantyRecord;
   };
 
+  /**
+   * Executes the referential integrity audit between clients, receipts, and warranties.
+   */
+  const runIntegrityAudit = (): IntegrityAuditReport => {
+    return runReferentialIntegrityAudit(clients, receipts, supplierWarranties);
+  };
+
+  /**
+   * Automatically repairs all referential integrity discrepancies in Firestore:
+   * - Re-links or creates clients for orphan receipts
+   * - Synchronizes bidirectional links (receipt.clientId <-> client.receiptIds)
+   * - Removes dangling deleted receiptIds from client documents
+   * - Normalizes tracking IDs (orderId <-> orderIds, strips temporary PED- placeholders when real IDs exist, clears false resend flags)
+   * - Recalculates purchaseCount, totalSpent, and lastPurchaseDate
+   */
+  const repairReferentialIntegrity = async (): Promise<{
+    fixedCount: number;
+    details: string[];
+    reportAfter: IntegrityAuditReport;
+  }> => {
+    const details: string[] = [];
+    let fixedCount = 0;
+
+    const receiptById = new Map<string, Receipt>();
+    receipts.forEach((r) => receiptById.set(r.id, r));
+
+    const { clientToReceipts, receiptToClient } = buildReceiptsClientIndex(clients, receipts);
+
+    const usedCodes = new Set<number>([97]);
+    clients.forEach((c) => {
+      const n = parseInt((c.clientCode || "").trim(), 10);
+      if (!isNaN(n) && n > 0 && n !== 97) usedCodes.add(n);
+    });
+    const getNextCode = () => {
+      const valid = Array.from(usedCodes).filter((n) => n !== 97);
+      let next = valid.length > 0 ? Math.max(...valid) + 1 : 1;
+      while (usedCodes.has(next) || next === 97) next++;
+      usedCodes.add(next);
+      return String(next).padStart(4, "0");
+    };
+
+    const batch = writeBatch(db);
+    let batchOps = 0;
+
+    // 1. Repair receipts: orphan receipts, clientId foreign keys, and tracking ID discrepancies
+    const newlyLinkedToClient = new Map<string, string[]>();
+
+    for (const r of receipts) {
+      const receiptPatch: Record<string, any> = {};
+      let targetClient = receiptToClient.get(r.id);
+
+      // If orphan, match by contact/name or create client
+      if (!targetClient) {
+        targetClient = clients.find(
+          (c) =>
+            matchContacts(c.phone, r.clientPhone) ||
+            (r.clientName && c.name && c.name.trim().toLowerCase() === r.clientName.trim().toLowerCase())
+        );
+
+        if (targetClient) {
+          receiptPatch.clientId = targetClient.id;
+          if (!newlyLinkedToClient.has(targetClient.id)) newlyLinkedToClient.set(targetClient.id, []);
+          newlyLinkedToClient.get(targetClient.id)!.push(r.id);
+          details.push(`Pedido huérfano #${r.consecutive} vinculado al cliente existente #${targetClient.clientCode || "---"} "${targetClient.name}".`);
+          fixedCount++;
+        } else {
+          const newId = r.clientId || generateClientId(r.clientName, r.clientPhone, true);
+          const newCode = getNextCode();
+          const newClient: Client = {
+            id: newId,
+            clientCode: newCode,
+            name: (r.clientName || "Cliente").trim(),
+            phone: (r.clientPhone || "").trim(),
+            purchaseCount: 1,
+            totalSpent: Number(r.totalCharged) || 0,
+            lastPurchaseDate: r.date,
+            receiptIds: [r.id],
+            createdAt: r.date,
+            tag: getClientTagForSpending(Number(r.totalCharged) || 0),
+          };
+          batch.set(doc(db, "clients", newId), cleanForFirestore(newClient), { merge: true });
+          batchOps++;
+          receiptPatch.clientId = newId;
+          details.push(`Pedido huérfano #${r.consecutive}: se creó ficha de cliente #${newCode} "${newClient.name}" y se vinculó.`);
+          fixedCount++;
+        }
+      } else if (r.clientId !== targetClient.id) {
+        receiptPatch.clientId = targetClient.id;
+        details.push(`Pedido #${r.consecutive}: actualizado clientId -> "${targetClient.id}" (Cliente #${targetClient.clientCode || "---"}).`);
+        fixedCount++;
+      }
+
+      // Check tracking IDs on services
+      let servicesModified = false;
+      const cleanedServices = (r.services || []).map((srv) => {
+        const extracted = getItemOrderIds(srv);
+        const realIds = extracted.filter((id) => !/^PED-\d+$/i.test(id));
+        const finalIds = realIds.length > 0 ? realIds : extracted;
+        const expectedPrimary = finalIds.join(", ");
+
+        const rawOrderId = String(srv.orderId || "").trim();
+        const rawOrderIdsStr = (srv.orderIds || []).join(", ");
+
+        const falseResend =
+          Boolean(srv.isResent) &&
+          Boolean(
+            (srv.previousOrderId && /^PED-\d+$/i.test(srv.previousOrderId.trim())) ||
+              (srv.previousOrderId && srv.previousOrderId.trim() === expectedPrimary)
+          );
+
+        if (
+          (finalIds.length > 0 && (rawOrderId !== expectedPrimary || rawOrderIdsStr !== expectedPrimary)) ||
+          falseResend
+        ) {
+          servicesModified = true;
+          return {
+            ...srv,
+            orderId: expectedPrimary || srv.orderId,
+            orderIds: finalIds.length > 0 ? finalIds : srv.orderIds,
+            isResent: falseResend ? false : srv.isResent,
+            previousOrderId: falseResend ? undefined : srv.previousOrderId,
+            resendDate: falseResend ? undefined : srv.resendDate,
+            resendNote: falseResend ? undefined : srv.resendNote,
+          };
+        }
+        return srv;
+      });
+
+      if (servicesModified) {
+        receiptPatch.services = cleanedServices;
+        details.push(`Pedido #${r.consecutive}: normalizados IDs de seguimiento (orderId / orderIds).`);
+        fixedCount++;
+      }
+
+      if (Object.keys(receiptPatch).length > 0 && batchOps < 420) {
+        batch.set(doc(db, "receipts", r.id), cleanForFirestore(receiptPatch), { merge: true });
+        batchOps++;
+      }
+    }
+
+    // 2. Repair clients: dangling receiptIds, missing receiptIds, missing codes, and stats
+    for (const c of clients) {
+      const clientPatch: Record<string, any> = {};
+      const rawCode = (c.clientCode || "").trim();
+      const paddedCode = rawCode ? rawCode.padStart(4, "0") : "";
+      if (!paddedCode || paddedCode === "0000" || paddedCode === "0097" || isNaN(parseInt(paddedCode, 10))) {
+        const assigned = getNextCode();
+        clientPatch.clientCode = assigned;
+        details.push(`Cliente "${c.name}": asignado código válido #${assigned}.`);
+        fixedCount++;
+      }
+
+      const storedValidIds = (c.receiptIds || []).filter((rid) => receiptById.has(rid));
+      const danglingCount = (c.receiptIds || []).length - storedValidIds.length;
+      const indexedRecs = clientToReceipts.get(c.id) || [];
+      const extraLinked = newlyLinkedToClient.get(c.id) || [];
+
+      const consolidatedIds = Array.from(
+        new Set([...storedValidIds, ...indexedRecs.map((r) => r.id), ...extraLinked])
+      ).filter((rid) => receiptById.has(rid));
+
+      const currentIds = c.receiptIds || [];
+      const idsChanged =
+        danglingCount > 0 ||
+        currentIds.length !== consolidatedIds.length ||
+        !consolidatedIds.every((id) => currentIds.includes(id));
+
+      if (idsChanged) {
+        clientPatch.receiptIds = consolidatedIds;
+        details.push(
+          `Cliente #${c.clientCode || "---"} "${c.name}": sincronizada lista 'receiptIds' (${consolidatedIds.length} pedidos válidos${danglingCount > 0 ? `, ${danglingCount} IDs huérfanos eliminados` : ""}).`
+        );
+        fixedCount++;
+      }
+
+      const validReceipts = consolidatedIds.map((rid) => receiptById.get(rid)!).filter(Boolean);
+      if (validReceipts.length > 0) {
+        const actualCount = validReceipts.length;
+        const actualSpent = validReceipts.reduce((sum, r) => sum + (Number(r.totalCharged) || 0), 0);
+        const sortedRecs = [...validReceipts].sort(
+          (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()
+        );
+        const actualLastDate = sortedRecs[0].date;
+
+        if ((c.purchaseCount || 0) !== actualCount || Math.abs((c.totalSpent || 0) - actualSpent) > 1) {
+          clientPatch.purchaseCount = actualCount;
+          clientPatch.totalSpent = actualSpent;
+          clientPatch.lastPurchaseDate = actualLastDate;
+          clientPatch.tag = getClientTagForSpending(actualSpent);
+          details.push(
+            `Cliente #${c.clientCode || "---"} "${c.name}": estadísticas recalculadas (${actualCount} pedidos / $${Math.round(actualSpent).toLocaleString("es-CO")}).`
+          );
+          fixedCount++;
+        }
+      }
+
+      if (Object.keys(clientPatch).length > 0 && batchOps < 450) {
+        batch.set(doc(db, "clients", c.id), cleanForFirestore(clientPatch), { merge: true });
+        batchOps++;
+      }
+    }
+
+    if (batchOps > 0) {
+      await batch.commit();
+    }
+
+    const reportAfter = runReferentialIntegrityAudit(clients, receipts, supplierWarranties);
+    return { fixedCount, details, reportAfter };
+  };
+
   return (
     <AppContext.Provider
       value={{
@@ -2176,7 +2651,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         deleteSupplierWarranty,
         resolveSupplierWarranty,
         claimAgainSupplierWarranty,
-        resolveAllWarrantiesInProcess,
         reopenOrResendWarrantyForCancelledOrder,
         login,
         loginWithGoogle,
@@ -2204,7 +2678,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         resolveDuplicateClientCodes,
         mergeDuplicateClients,
         separateReceiptToNewClient,
-        restoreDefaults
+        restoreDefaults,
+        runIntegrityAudit,
+        repairReferentialIntegrity
       }}
     >
       {children}

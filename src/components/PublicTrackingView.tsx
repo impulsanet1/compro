@@ -4,9 +4,10 @@
  */
 
 import React, { useState, useEffect } from "react";
-import { doc, getDoc } from "firebase/firestore";
+import { doc, getDoc, collection, query, where, getDocs } from "firebase/firestore";
 import { db } from "../firebase";
 import { Receipt, ReceiptItem, getItemOrderIds, formatProviderStatus } from "../types";
+import { syncOrderWithProvider } from "../services/providerApi";
 import {
   CheckCircle2,
   Clock,
@@ -15,7 +16,6 @@ import {
   ShieldCheck,
   Package,
   Calendar,
-  ArrowLeft,
   TrendingUp,
   MessageCircle,
   Search,
@@ -193,9 +193,10 @@ export const PublicTrackingView: React.FC<PublicTrackingViewProps> = ({
     loadBusinessInfo();
   }, []);
 
-  // Function to load receipt safely
+  // Function to load receipt safely (by Firestore ID or Folio consecutive e.g. IMP-1186 or 1186)
   const fetchReceipt = async (id: string) => {
-    if (!id || !id.trim()) {
+    const cleanInput = (id || "").trim();
+    if (!cleanInput) {
       setLoading(false);
       return;
     }
@@ -204,17 +205,32 @@ export const PublicTrackingView: React.FC<PublicTrackingViewProps> = ({
     setError(null);
 
     try {
-      const docRef = doc(db, "receipts", id.trim());
+      const docRef = doc(db, "receipts", cleanInput);
       const snapshot = await getDoc(docRef);
 
       if (snapshot.exists()) {
         const data = { id: snapshot.id, ...snapshot.data() } as Receipt;
         setReceipt(data);
         await fetchLiveMetrics(data);
-      } else {
-        setError("No se encontró ningún comprobante con este identificador. Por favor verifica el enlace o código QR de tu factura.");
-        setReceipt(null);
+        return;
       }
+
+      // Fallback: if user searched by Folio number (e.g., "IMP-1186", "#1186", "1186")
+      const digitsOnly = cleanInput.replace(/^IMP-/i, "").replace(/^#/, "").trim();
+      const folioNum = /^\d+$/.test(digitsOnly) ? parseInt(digitsOnly, 10) : NaN;
+      if (!isNaN(folioNum) && folioNum > 0) {
+        const qSnap = await getDocs(query(collection(db, "receipts"), where("consecutive", "==", folioNum)));
+        if (!qSnap.empty) {
+          const firstDoc = qSnap.docs[0];
+          const data = { id: firstDoc.id, ...firstDoc.data() } as Receipt;
+          setReceipt(data);
+          await fetchLiveMetrics(data);
+          return;
+        }
+      }
+
+      setError("No se encontró ningún comprobante con este identificador. Por favor verifica el enlace o código QR de tu factura.");
+      setReceipt(null);
     } catch (err: any) {
       console.error("Error loading tracking receipt:", err);
       setError("No se pudo cargar la información del pedido. Por favor intenta nuevamente.");
@@ -248,6 +264,7 @@ export const PublicTrackingView: React.FC<PublicTrackingViewProps> = ({
           receiptTargetAccount: receiptData.targetAccount,
           items: services.map(item => ({
             orderId: item.orderId?.trim(),
+            orderIds: getItemOrderIds(item),
             quantity: item.quantity,
             socialNetworkId: item.socialNetworkId,
             socialNetworkName: item.socialNetworkName,
@@ -256,21 +273,79 @@ export const PublicTrackingView: React.FC<PublicTrackingViewProps> = ({
             startCount: item.startCount,
             description: `${item.socialNetworkName || ''} - ${item.serviceName || ''}`
           }))
-        })
+        }),
+        signal: AbortSignal.timeout(15000),
       });
 
       if (res.ok) {
-        const data = await res.json();
-        if (data.success && Array.isArray(data.tracking)) {
-          const metricsMap: Record<string, ItemTrackingMetrics> = {};
-          data.tracking.forEach((t: ItemTrackingMetrics) => {
-            metricsMap[t.orderId] = t;
-          });
-          setLiveMetrics(metricsMap);
+        const text = await res.text();
+        if (!text.trim().startsWith("<")) {
+          const data = JSON.parse(text);
+          if (data.success && Array.isArray(data.tracking)) {
+            const metricsMap: Record<string, ItemTrackingMetrics> = {};
+            data.tracking.forEach((t: ItemTrackingMetrics) => {
+              metricsMap[t.orderId] = t;
+            });
+            setLiveMetrics(metricsMap);
+            return;
+          }
         }
       }
     } catch (err) {
-      console.error("Error updating live provider tracking metrics:", err);
+      console.warn("Primary customer tracking endpoint fallback:", err);
+    }
+
+    // Fallback to direct provider sync if server endpoint returned HTML or was unreachable
+    if (orderIds.length > 0) {
+      try {
+        const fallbackRes = await syncOrderWithProvider(orderIds);
+        if (fallbackRes.success && Array.isArray(fallbackRes.results)) {
+          const metricsMap: Record<string, ItemTrackingMetrics> = {};
+          fallbackRes.results.forEach((r) => {
+            const matchingItem = services.find((it) => getItemOrderIds(it).includes(r.orderId));
+            const qty = Number(matchingItem?.quantity) || 1000;
+            const remains = r.remains !== null && r.remains !== undefined ? Number(r.remains) : null;
+            const startCount =
+              matchingItem?.startCount ?? (r.startCount !== null && r.startCount !== undefined ? Number(r.startCount) : null);
+            const mapped: "en_proceso" | "completado" | "cancelado" =
+              r.mappedStatus === "completado"
+                ? "completado"
+                : r.mappedStatus === "cancelado"
+                ? "cancelado"
+                : "en_proceso";
+            const delivered =
+              mapped === "completado"
+                ? qty
+                : remains !== null && !isNaN(remains)
+                ? Math.max(0, qty - remains)
+                : null;
+            const progressPercent =
+              mapped === "completado"
+                ? 100
+                : mapped === "cancelado"
+                ? 0
+                : delivered !== null && qty > 0
+                ? Math.min(100, Math.max(5, Math.round((delivered / qty) * 100)))
+                : 25;
+
+            metricsMap[r.orderId] = {
+              orderId: r.orderId,
+              found: r.found,
+              status: formatProviderStatus(r.rawStatus),
+              rawStatus: r.rawStatus,
+              mappedStatus: mapped,
+              startCount,
+              remains,
+              delivered,
+              progressPercent,
+              estimatedDelivery: mapped === "completado" ? "Pedido completado con éxito" : "Aprox. 2 a 8 horas",
+            };
+          });
+          setLiveMetrics(metricsMap);
+        }
+      } catch {
+        // Ignore fallback error
+      }
     }
   };
 

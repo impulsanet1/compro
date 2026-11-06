@@ -42,7 +42,6 @@ import {
   CheckCircle2
 } from "lucide-react";
 import {
-  BusinessConfig,
   SocialNetwork,
   Service,
   ServiceCombo,
@@ -58,8 +57,14 @@ import {
   syncOrderWithProvider,
   fetchInstagramProfile,
   testProviderConnection,
-  saveProviderConfig
+  saveProviderConfig,
+  auditProviderApiHealth,
+  ApiSystemAuditResult
 } from "../services/providerApi";
+import {
+  IntegrityAuditReport,
+  IntegrityIssueCategory
+} from "../utils/referentialIntegrityAudit";
 import { motion, AnimatePresence } from "motion/react";
 
 export const ConfigView: React.FC = () => {
@@ -68,6 +73,9 @@ export const ConfigView: React.FC = () => {
     socialNetworks,
     services,
     combos,
+    receipts,
+    clients,
+    supplierWarranties,
     trmState,
     updateBusinessConfig,
     addSocialNetwork,
@@ -80,17 +88,33 @@ export const ConfigView: React.FC = () => {
     updateCombo,
     deleteCombo,
     restoreDefaults,
+    runIntegrityAudit,
+    repairReferentialIntegrity,
     isDarkMode
   } = useApp();
 
   const formatCOP = (val: number) => "$" + Math.round(val).toLocaleString("es-CO");
 
   // Tab systems or section selectors
-  const [activeTab, setActiveTab] = useState<"general" | "services" | "combos" | "provider_api">("general");
+  const [activeTab, setActiveTab] = useState<"general" | "services" | "combos" | "provider_api" | "integrity_audit">("general");
+
+  // Referential Integrity Audit States
+  const [auditReport, setAuditReport] = useState<IntegrityAuditReport | null>(null);
+  const [auditFilterCategory, setAuditFilterCategory] = useState<"all" | IntegrityIssueCategory>("all");
+  const [isRepairingIntegrity, setIsRepairingIntegrity] = useState(false);
+  const [repairLogDetails, setRepairLogDetails] = useState<string[] | null>(null);
+  const [repairSuccessBanner, setRepairSuccessBanner] = useState<string | null>(null);
+  const [apiAuditResult, setApiAuditResult] = useState<ApiSystemAuditResult | null>(null);
+  const [isAuditingApi, setIsAuditingApi] = useState(false);
+
+  const liveAuditReport = useMemo(() => {
+    return runIntegrityAudit();
+  }, [clients, receipts, supplierWarranties]);
+
+  const displayedAuditReport = auditReport || liveAuditReport;
 
   // Provider API Tab States
   const [providerConfig, setProviderConfig] = useState<ProviderApiConfig | null>(null);
-  const [isLoadingConfig, setIsLoadingConfig] = useState(false);
   const [providerBalance, setProviderBalance] = useState<{ balance?: string | number; currency?: string } | null>(null);
   const [isLoadingBalance, setIsLoadingBalance] = useState(false);
   const [balanceError, setBalanceError] = useState<string | null>(null);
@@ -554,14 +578,17 @@ export const ConfigView: React.FC = () => {
 
   useEffect(() => {
     if (activeTab === "provider_api") {
-      setIsLoadingConfig(true);
       fetchProviderConfig().then((cfg) => {
         setProviderConfig(cfg);
         if (cfg.providerUrl && !businessConfig.providerApiUrl) {
           setProviderUrlInput(cfg.providerUrl);
         }
-        setIsLoadingConfig(false);
       });
+    } else if (activeTab === "integrity_audit") {
+      setIsAuditingApi(true);
+      auditProviderApiHealth()
+        .then((res) => setApiAuditResult(res))
+        .finally(() => setIsAuditingApi(false));
     }
   }, [activeTab]);
 
@@ -745,6 +772,31 @@ export const ConfigView: React.FC = () => {
         >
           <RefreshCw className="w-3.5 h-3.5" />
           <span>Sincronización API Proveedor</span>
+        </button>
+        <button
+          onClick={() => {
+            setActiveTab("integrity_audit");
+            setAuditReport(runIntegrityAudit());
+          }}
+          className={`pb-3 border-b-2 px-1 transition cursor-pointer flex items-center gap-1.5 ${
+            activeTab === "integrity_audit"
+              ? "border-indigo-500 text-indigo-400 font-bold"
+              : isDarkMode
+              ? "border-transparent text-slate-400 hover:text-slate-200"
+              : "border-transparent text-gray-400 hover:text-gray-600"
+          }`}
+        >
+          <ShieldAlert className="w-3.5 h-3.5" />
+          <span>Auditoría Integridad BD</span>
+          {liveAuditReport.summary.totalIssues > 0 ? (
+            <span className="px-1.5 py-0.5 text-[10px] rounded-full bg-amber-500 text-white font-bold">
+              {liveAuditReport.summary.totalIssues}
+            </span>
+          ) : (
+            <span className="px-1.5 py-0.5 text-[10px] rounded-full bg-emerald-500 text-white font-bold">
+              OK
+            </span>
+          )}
         </button>
       </div>
 
@@ -2577,6 +2629,442 @@ export const ConfigView: React.FC = () => {
                 <li><strong>Cancelado / Reembolsado:</strong> Los pedidos marcados como <code>Canceled</code> se detectan para reordenar con un nuevo proveedor o abrir garantía.</li>
                 <li><strong>En proceso / Pendiente:</strong> Las órdenes en <code>In progress</code>, <code>Pending</code> o <code>Processing</code> actualizan el conteo inicial y los restantes en tiempo real.</li>
               </ul>
+            </div>
+          </div>
+        )}
+
+        {/* Tab 5: Referential Integrity Audit & Repair */}
+        {activeTab === "integrity_audit" && (
+          <div className="lg:col-span-12 space-y-6">
+            {/* Header & Action Bar */}
+            <div className={`p-6 rounded-2xl border shadow-sm space-y-5 ${
+              isDarkMode ? "bg-slate-900/90 border-slate-800" : "bg-white border-gray-200"
+            }`}>
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <ShieldAlert className="w-5 h-5 text-indigo-500" />
+                    <h3 className={`text-base font-bold ${isDarkMode ? "text-white" : "text-gray-900"}`}>
+                      Auditoría de Integridad Referencial y Seguimiento (Firestore)
+                    </h3>
+                  </div>
+                  <p className={`text-xs mt-1 ${isDarkMode ? "text-slate-400" : "text-gray-500"}`}>
+                    Verifica bidireccionalmente todos los documentos de <code>clients</code>, <code>receipts</code> y <code>supplier_warranties</code> para detectar pedidos huérfanos, enlaces rotos y discrepancias en IDs de seguimiento (<code>orderId</code> / <code>orderIds</code>).
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const fresh = runIntegrityAudit();
+                      setAuditReport(fresh);
+                      setIsAuditingApi(true);
+                      try {
+                        const apiRes = await auditProviderApiHealth();
+                        setApiAuditResult(apiRes);
+                      } finally {
+                        setIsAuditingApi(false);
+                      }
+                      setRepairSuccessBanner("Auditoría completa ejecutada en tiempo real (Firestore + API MazSocialMarket).");
+                      setTimeout(() => setRepairSuccessBanner(null), 4000);
+                    }}
+                    className={`px-3.5 py-2 rounded-xl border text-xs font-bold flex items-center gap-1.5 transition cursor-pointer ${
+                      isDarkMode
+                        ? "bg-slate-800 hover:bg-slate-700 border-slate-700 text-slate-200"
+                        : "bg-gray-50 hover:bg-gray-100 border-gray-200 text-gray-700"
+                    }`}
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 text-indigo-500 ${isAuditingApi ? "animate-spin" : ""}`} />
+                    <span>Ejecutar Auditoría Ahora</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={isRepairingIntegrity || displayedAuditReport.summary.totalIssues === 0}
+                    onClick={async () => {
+                      setIsRepairingIntegrity(true);
+                      setRepairSuccessBanner(null);
+                      try {
+                        const res = await repairReferentialIntegrity();
+                        setAuditReport(res.reportAfter);
+                        setRepairLogDetails(res.details);
+                        setRepairSuccessBanner(
+                          res.fixedCount > 0
+                            ? `¡Se repararon ${res.fixedCount} discrepancia(s) de integridad referencial en Firestore exitosamente!`
+                            : "La base de datos ya se encuentra 100% sincronizada."
+                        );
+                      } catch (err: any) {
+                        setRepairSuccessBanner("Error durante la reparación: " + (err.message || String(err)));
+                      } finally {
+                        setIsRepairingIntegrity(false);
+                      }
+                    }}
+                    className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition cursor-pointer"
+                  >
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    <span>
+                      {isRepairingIntegrity
+                        ? "Reparando en Firestore..."
+                        : `Reparar Discrepancias (${displayedAuditReport.summary.totalIssues})`}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const blob = new Blob([JSON.stringify(displayedAuditReport, null, 2)], {
+                        type: "application/json",
+                      });
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement("a");
+                      a.href = url;
+                      a.download = `auditoria-firestore-${new Date().toISOString().slice(0, 10)}.json`;
+                      a.click();
+                      URL.revokeObjectURL(url);
+                    }}
+                    className={`px-3 py-2 rounded-xl border text-xs font-semibold transition cursor-pointer ${
+                      isDarkMode
+                        ? "bg-slate-800 hover:bg-slate-700 border-slate-700 text-slate-300"
+                        : "bg-white hover:bg-gray-50 border-gray-200 text-gray-600"
+                    }`}
+                  >
+                    Exportar JSON
+                  </button>
+                </div>
+              </div>
+
+              {repairSuccessBanner && (
+                <div className="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-600 dark:text-emerald-300 text-xs font-semibold flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 shrink-0" />
+                  <span>{repairSuccessBanner}</span>
+                </div>
+              )}
+
+              {/* API & Backend Server Health Banner */}
+              <div className={`p-4 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+                isDarkMode ? "bg-slate-950/90 border-slate-800" : "bg-slate-50 border-slate-200"
+              }`}>
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <Radio className="w-4 h-4 text-indigo-500" />
+                    <span className={`text-xs font-bold ${isDarkMode ? "text-white" : "text-gray-900"}`}>
+                      Estado de Servidor Backend y API MazSocialMarket
+                    </span>
+                    {apiAuditResult ? (
+                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                        apiAuditResult.providerReachable
+                          ? "bg-emerald-500/15 text-emerald-500 border border-emerald-500/30"
+                          : apiAuditResult.providerConfigured
+                          ? "bg-rose-500/15 text-rose-500 border border-rose-500/30"
+                          : "bg-amber-500/15 text-amber-500 border border-amber-500/30"
+                      }`}>
+                        {apiAuditResult.providerReachable
+                          ? `Operativa (${apiAuditResult.latencyMs} ms)`
+                          : apiAuditResult.providerConfigured
+                          ? "Error de Conexión"
+                          : "Clave API Pendiente"}
+                      </span>
+                    ) : (
+                      <span className="text-[11px] text-gray-400">Verificando API...</span>
+                    )}
+                  </div>
+                  <p className={`text-xs ${isDarkMode ? "text-slate-400" : "text-gray-600"}`}>
+                    {apiAuditResult
+                      ? apiAuditResult.message
+                      : "Comprobando conectividad con los endpoints /api/health, /api/provider/config y /api/provider/balance..."}
+                  </p>
+                </div>
+                {apiAuditResult && (
+                  <div className="flex items-center gap-3 text-xs font-mono shrink-0">
+                    <span className={`px-2.5 py-1 rounded-lg border ${
+                      apiAuditResult.backendServerOnline
+                        ? "border-emerald-500/30 text-emerald-500 bg-emerald-500/10"
+                        : "border-amber-500/30 text-amber-500 bg-amber-500/10"
+                    }`}>
+                      Proxy: {apiAuditResult.backendServerOnline ? "Online" : "Modo Directo"}
+                    </span>
+                    {apiAuditResult.balance !== null && (
+                      <span className={`px-2.5 py-1 rounded-lg border font-bold ${
+                        isDarkMode ? "border-slate-700 bg-slate-900 text-indigo-300" : "border-indigo-200 bg-indigo-50 text-indigo-700"
+                      }`}>
+                        Saldo: ${apiAuditResult.balance} {apiAuditResult.currency}
+                      </span>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* KPI Summary Cards */}
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+                <div className={`p-3.5 rounded-xl border ${isDarkMode ? "bg-slate-950 border-slate-800" : "bg-slate-50 border-slate-200"}`}>
+                  <div className="text-[10px] uppercase font-bold text-gray-400">Salud Integridad</div>
+                  <div className={`text-xl font-black font-mono mt-1 ${
+                    displayedAuditReport.summary.healthScore >= 95
+                      ? "text-emerald-500"
+                      : displayedAuditReport.summary.healthScore >= 75
+                      ? "text-amber-500"
+                      : "text-rose-500"
+                  }`}>
+                    {displayedAuditReport.summary.healthScore}%
+                  </div>
+                  <div className="text-[10px] text-gray-400 mt-0.5">
+                    {displayedAuditReport.summary.totalClients} clientes / {displayedAuditReport.summary.totalReceipts} pedidos
+                  </div>
+                </div>
+
+                <div
+                  onClick={() => setAuditFilterCategory("orphan_receipt")}
+                  className={`p-3.5 rounded-xl border cursor-pointer transition ${
+                    auditFilterCategory === "orphan_receipt"
+                      ? "border-indigo-500 ring-1 ring-indigo-500"
+                      : isDarkMode ? "bg-slate-950 border-slate-800" : "bg-slate-50 border-slate-200"
+                  }`}
+                >
+                  <div className="text-[10px] uppercase font-bold text-gray-400">Pedidos Huérfanos</div>
+                  <div className={`text-xl font-black font-mono mt-1 ${
+                    displayedAuditReport.summary.orphanReceiptsCount > 0 ? "text-rose-500" : "text-emerald-500"
+                  }`}>
+                    {displayedAuditReport.summary.orphanReceiptsCount}
+                  </div>
+                  <div className="text-[10px] text-gray-400 mt-0.5">Sin cliente válido</div>
+                </div>
+
+                <div
+                  onClick={() => setAuditFilterCategory("tracking_id_discrepancy")}
+                  className={`p-3.5 rounded-xl border cursor-pointer transition ${
+                    auditFilterCategory === "tracking_id_discrepancy"
+                      ? "border-indigo-500 ring-1 ring-indigo-500"
+                      : isDarkMode ? "bg-slate-950 border-slate-800" : "bg-slate-50 border-slate-200"
+                  }`}
+                >
+                  <div className="text-[10px] uppercase font-bold text-gray-400">IDs de Seguimiento</div>
+                  <div className={`text-xl font-black font-mono mt-1 ${
+                    displayedAuditReport.summary.trackingIdDiscrepanciesCount > 0 ? "text-amber-500" : "text-emerald-500"
+                  }`}>
+                    {displayedAuditReport.summary.trackingIdDiscrepanciesCount}
+                  </div>
+                  <div className="text-[10px] text-gray-400 mt-0.5">Discrepancias orderId</div>
+                </div>
+
+                <div
+                  onClick={() => setAuditFilterCategory("bidirectional_link_mismatch")}
+                  className={`p-3.5 rounded-xl border cursor-pointer transition ${
+                    auditFilterCategory === "bidirectional_link_mismatch"
+                      ? "border-indigo-500 ring-1 ring-indigo-500"
+                      : isDarkMode ? "bg-slate-950 border-slate-800" : "bg-slate-50 border-slate-200"
+                  }`}
+                >
+                  <div className="text-[10px] uppercase font-bold text-gray-400">Enlaces Cruzados</div>
+                  <div className={`text-xl font-black font-mono mt-1 ${
+                    displayedAuditReport.summary.bidirectionalMismatchesCount > 0 ? "text-amber-500" : "text-emerald-500"
+                  }`}>
+                    {displayedAuditReport.summary.bidirectionalMismatchesCount}
+                  </div>
+                  <div className="text-[10px] text-gray-400 mt-0.5">clientId ↔ receiptIds</div>
+                </div>
+
+                <div
+                  onClick={() => setAuditFilterCategory("dangling_receipt_id")}
+                  className={`p-3.5 rounded-xl border cursor-pointer transition ${
+                    auditFilterCategory === "dangling_receipt_id"
+                      ? "border-indigo-500 ring-1 ring-indigo-500"
+                      : isDarkMode ? "bg-slate-950 border-slate-800" : "bg-slate-50 border-slate-200"
+                  }`}
+                >
+                  <div className="text-[10px] uppercase font-bold text-gray-400">IDs Fantasma</div>
+                  <div className={`text-xl font-black font-mono mt-1 ${
+                    displayedAuditReport.summary.danglingReceiptIdsCount > 0 ? "text-amber-500" : "text-emerald-500"
+                  }`}>
+                    {displayedAuditReport.summary.danglingReceiptIdsCount}
+                  </div>
+                  <div className="text-[10px] text-gray-400 mt-0.5">Recibos borrados en cliente</div>
+                </div>
+
+                <div
+                  onClick={() => setAuditFilterCategory("client_code_issue")}
+                  className={`p-3.5 rounded-xl border cursor-pointer transition ${
+                    auditFilterCategory === "client_code_issue"
+                      ? "border-indigo-500 ring-1 ring-indigo-500"
+                      : isDarkMode ? "bg-slate-950 border-slate-800" : "bg-slate-50 border-slate-200"
+                  }`}
+                >
+                  <div className="text-[10px] uppercase font-bold text-gray-400">Códigos Cliente</div>
+                  <div className={`text-xl font-black font-mono mt-1 ${
+                    displayedAuditReport.summary.clientCodeIssuesCount > 0 ? "text-amber-500" : "text-emerald-500"
+                  }`}>
+                    {displayedAuditReport.summary.clientCodeIssuesCount}
+                  </div>
+                  <div className="text-[10px] text-gray-400 mt-0.5">Duplicados o sin código</div>
+                </div>
+              </div>
+
+              {/* Filter Pills */}
+              <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-gray-100 dark:border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setAuditFilterCategory("all")}
+                  className={`px-3 py-1 rounded-lg text-xs font-bold transition cursor-pointer ${
+                    auditFilterCategory === "all"
+                      ? "bg-indigo-600 text-white"
+                      : isDarkMode ? "bg-slate-800 text-slate-300" : "bg-gray-100 text-gray-600"
+                  }`}
+                >
+                  Todos ({displayedAuditReport.issues.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAuditFilterCategory("orphan_receipt")}
+                  className={`px-3 py-1 rounded-lg text-xs font-bold transition cursor-pointer ${
+                    auditFilterCategory === "orphan_receipt"
+                      ? "bg-indigo-600 text-white"
+                      : isDarkMode ? "bg-slate-800 text-slate-300" : "bg-gray-100 text-gray-600"
+                  }`}
+                >
+                  Pedidos Huérfanos ({displayedAuditReport.summary.orphanReceiptsCount})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAuditFilterCategory("tracking_id_discrepancy")}
+                  className={`px-3 py-1 rounded-lg text-xs font-bold transition cursor-pointer ${
+                    auditFilterCategory === "tracking_id_discrepancy"
+                      ? "bg-indigo-600 text-white"
+                      : isDarkMode ? "bg-slate-800 text-slate-300" : "bg-gray-100 text-gray-600"
+                  }`}
+                >
+                  Discrepancias Seguimiento ({displayedAuditReport.summary.trackingIdDiscrepanciesCount})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAuditFilterCategory("bidirectional_link_mismatch")}
+                  className={`px-3 py-1 rounded-lg text-xs font-bold transition cursor-pointer ${
+                    auditFilterCategory === "bidirectional_link_mismatch"
+                      ? "bg-indigo-600 text-white"
+                      : isDarkMode ? "bg-slate-800 text-slate-300" : "bg-gray-100 text-gray-600"
+                  }`}
+                >
+                  Enlaces Cliente↔Pedido ({displayedAuditReport.summary.bidirectionalMismatchesCount})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAuditFilterCategory("client_stats_mismatch")}
+                  className={`px-3 py-1 rounded-lg text-xs font-bold transition cursor-pointer ${
+                    auditFilterCategory === "client_stats_mismatch"
+                      ? "bg-indigo-600 text-white"
+                      : isDarkMode ? "bg-slate-800 text-slate-300" : "bg-gray-100 text-gray-600"
+                  }`}
+                >
+                  Desfase Estadísticas ({displayedAuditReport.summary.clientStatsMismatchesCount})
+                </button>
+              </div>
+            </div>
+
+            {/* Repair Execution Log (if recently run) */}
+            {repairLogDetails && repairLogDetails.length > 0 && (
+              <div className={`p-5 rounded-2xl border space-y-2.5 ${
+                isDarkMode ? "bg-slate-900 border-emerald-800/50" : "bg-emerald-50/40 border-emerald-200"
+              }`}>
+                <div className="flex items-center justify-between">
+                  <h4 className="text-xs font-bold uppercase tracking-wider text-emerald-600 dark:text-emerald-400">
+                    Registro de Reparaciones Aplicadas ({repairLogDetails.length})
+                  </h4>
+                  <button
+                    type="button"
+                    onClick={() => setRepairLogDetails(null)}
+                    className="text-xs text-gray-400 hover:text-gray-600 cursor-pointer"
+                  >
+                    Cerrar registro
+                  </button>
+                </div>
+                <div className="max-h-52 overflow-y-auto space-y-1 font-mono text-[11px]">
+                  {repairLogDetails.map((line, i) => (
+                    <div key={i} className={isDarkMode ? "text-slate-300" : "text-gray-700"}>
+                      ✓ {line}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Detailed Issues List */}
+            <div className={`p-6 rounded-2xl border space-y-4 ${
+              isDarkMode ? "bg-slate-900/90 border-slate-800" : "bg-white border-gray-200"
+            }`}>
+              <h4 className={`text-xs font-bold uppercase tracking-wider ${isDarkMode ? "text-slate-400" : "text-gray-500"}`}>
+                Hallazgos Detallados de la Auditoría
+              </h4>
+
+              {(() => {
+                const filteredIssues =
+                  auditFilterCategory === "all"
+                    ? displayedAuditReport.issues
+                    : displayedAuditReport.issues.filter((i) => i.category === auditFilterCategory);
+
+                if (filteredIssues.length === 0) {
+                  return (
+                    <div className="py-10 text-center space-y-2">
+                      <CheckCircle2 className="w-10 h-10 text-emerald-500 mx-auto" />
+                      <div className={`text-sm font-bold ${isDarkMode ? "text-white" : "text-gray-900"}`}>
+                        ¡Integridad Referencial Verificada al 100%!
+                      </div>
+                      <p className="text-xs text-gray-400 max-w-md mx-auto">
+                        No se encontraron registros huérfanos, enlaces rotos entre clientes y pedidos ni discrepancias en los IDs de seguimiento para esta categoría.
+                      </p>
+                    </div>
+                  );
+                }
+
+                return (
+                  <div className="space-y-3 max-h-[540px] overflow-y-auto pr-1">
+                    {filteredIssues.map((issue) => (
+                      <div
+                        key={issue.id}
+                        className={`p-4 rounded-xl border text-xs space-y-1.5 ${
+                          issue.severity === "high"
+                            ? isDarkMode
+                              ? "bg-rose-950/30 border-rose-800/60"
+                              : "bg-rose-50/50 border-rose-200"
+                            : issue.severity === "medium"
+                            ? isDarkMode
+                              ? "bg-amber-950/30 border-amber-800/60"
+                              : "bg-amber-50/50 border-amber-200"
+                            : isDarkMode
+                            ? "bg-slate-950 border-slate-800"
+                            : "bg-gray-50 border-gray-200"
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <div className="flex items-center gap-2">
+                            <span
+                              className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                                issue.severity === "high"
+                                  ? "bg-rose-600 text-white"
+                                  : issue.severity === "medium"
+                                  ? "bg-amber-500 text-white"
+                                  : "bg-slate-500 text-white"
+                              }`}
+                            >
+                              {issue.severity === "high" ? "Alta" : issue.severity === "medium" ? "Media" : "Baja"}
+                            </span>
+                            <span className={`font-bold ${isDarkMode ? "text-white" : "text-gray-900"}`}>
+                              {issue.title}
+                            </span>
+                          </div>
+                          <span className="font-mono text-[11px] text-indigo-500 font-semibold">
+                            {issue.entityLabel}
+                          </span>
+                        </div>
+                        <p className={isDarkMode ? "text-slate-300" : "text-gray-700"}>
+                          {issue.description}
+                        </p>
+                        <div className="text-[11px] text-indigo-600 dark:text-indigo-400 font-medium pt-0.5">
+                          🔧 Acción correctiva: {issue.suggestedFix}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
             </div>
           </div>
         )}

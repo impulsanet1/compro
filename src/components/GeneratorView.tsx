@@ -9,11 +9,9 @@ import {
   Plus,
   Trash2,
   FileText,
-  DollarSign,
   Eye,
   EyeOff,
   User,
-  Phone,
   AlertCircle,
   PlusCircle,
   Search,
@@ -36,8 +34,6 @@ import {
   ReceiptStatus,
   Client,
   Service,
-  ServiceCombo,
-  ServiceComboItem,
   getServiceBaseCosts,
   calculateServicePrices,
   getClientCode,
@@ -45,7 +41,6 @@ import {
   calculateSupplierCostCOP,
   getItemOrderIds,
   generateCustomServiceCode,
-  isCustomServiceCode,
   getOrderIdTypeLabel,
   getCustomServicePrefix,
   normalizeContact,
@@ -67,7 +62,7 @@ interface GeneratorViewProps {
 }
 
 export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated, initialItems }) => {
-  const { socialNetworks, services, combos, createReceipt, businessConfig, clients, trmState, fetchTRM, isDarkMode } = useApp();
+  const { socialNetworks, services, combos, createReceipt, businessConfig, clients, trmState, isDarkMode } = useApp();
   const formatCOP = (val: number) => "$" + Math.round(val).toLocaleString("es-CO");
 
   // Client info state
@@ -78,20 +73,20 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
 
   // Client search results with strict deduplication
   const matchingClients = useMemo(() => {
-    if (!clientSearchQuery.trim()) return [];
-    const query = clientSearchQuery.trim().toLowerCase();
+    if (!(clientSearchQuery || "").trim()) return [];
+    const query = (clientSearchQuery || "").trim().toLowerCase();
     const queryClean = query.replace(/^@+/, "");
 
     // Find all matching clients with defensive null checks
     const matched = clients
       .map((c, idx) => ({ ...c, code: getClientCode(c, idx) }))
       .filter((c) => {
-        const codeStr = (c.code || "").toLowerCase();
-        const clientCodeStr = (c.clientCode || "").toLowerCase();
-        const nameStr = (c.name || "").toLowerCase();
-        const phoneStr = (c.phone || "").toLowerCase();
+        const codeStr = String(c.code || "").toLowerCase();
+        const clientCodeStr = String(c.clientCode || "").toLowerCase();
+        const nameStr = String(c.name || "").toLowerCase();
+        const phoneStr = String(c.phone || "").toLowerCase();
         const phoneClean = phoneStr.replace(/^@+/, "");
-        const idStr = (c.id || "").toLowerCase();
+        const idStr = String(c.id || "").toLowerCase();
 
         return (
           codeStr.includes(query) ||
@@ -111,7 +106,7 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
       const isDuplicate = uniqueList.some((existing) => {
         // 1. Same client code or consecutive
         if (c.code && existing.code && c.code !== "0000" && c.code === existing.code) return true;
-        if (c.clientCode && existing.clientCode && c.clientCode.trim() === existing.clientCode.trim()) return true;
+        if (c.clientCode && existing.clientCode && String(c.clientCode).trim() === String(existing.clientCode).trim()) return true;
 
         // 2. Same contact (handle or phone)
         if (matchContacts(c.phone, existing.phone)) return true;
@@ -124,8 +119,8 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
         }
 
         // 4. Same exact client name and phone
-        const cName = (c.name || "").trim().toLowerCase();
-        const exName = (existing.name || "").trim().toLowerCase();
+        const cName = String(c.name || "").trim().toLowerCase();
+        const exName = String(existing.name || "").trim().toLowerCase();
         if (cName && exName && cName === exName) {
           if (!cDigits || !exDigits || cDigits === exDigits || matchPhones(c.phone, existing.phone)) {
             return true;
@@ -145,8 +140,8 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
   }, [clients, clientSearchQuery]);
 
   const handleSelectClient = (client: Client & { code: string }) => {
-    setClientName(client.name);
-    setClientPhone(client.phone);
+    setClientName(client.name || "");
+    setClientPhone(client.phone || "");
     setSelectedClientObj(client);
     setForceNewClient(false);
     setClientSearchQuery("");
@@ -203,7 +198,7 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
   }, [clientPhone, itemTargetAccount]);
 
   const handleVerifyInstagramInitialCount = async () => {
-    if (!itemTargetAccount.trim()) return;
+    if (!(itemTargetAccount || "").trim()) return;
     setIsCheckingIg(true);
     setIgProfileFeedback(null);
     try {
@@ -360,15 +355,17 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
   // Real-time client matching indicator
   const detectedClient = useMemo(() => {
     if (selectedClientObj) return selectedClientObj;
-    if (!clientName.trim() && !clientPhone.trim()) return null;
-    const normInput = normalizeContact(clientPhone);
+    const safeName = (clientName || "").trim();
+    const safePhone = (clientPhone || "").trim();
+    if (!safeName && !safePhone) return null;
+    const normInput = normalizeContact(safePhone);
     return clients.find((c) => {
       const normC = normalizeContact(c.phone);
       if (normInput.type !== "none" && normC.type === normInput.type) {
         if (normInput.type === "handle") return normC.key === normInput.key;
-        if (normInput.type === "phone" && matchPhones(c.phone, clientPhone)) {
-          const cClean = (c.name || "").trim().toLowerCase();
-          const rClean = clientName.trim().toLowerCase();
+        if (normInput.type === "phone" && matchPhones(c.phone, safePhone)) {
+          const cClean = String(c.name || "").trim().toLowerCase();
+          const rClean = safeName.toLowerCase();
           if (cClean && rClean && cClean !== "cliente" && rClean !== "cliente") {
             const cWords = cClean.split(/\s+/).filter((w) => w.length >= 3);
             const rWords = rClean.split(/\s+/).filter((w) => w.length >= 3);
@@ -583,7 +580,7 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
 
     // Custom Service Flow (e.g. Tarjetas Digitales, Diseño, Desarrollo, etc.)
     if (serviceEntryMode === "custom") {
-      if (!customItemName.trim()) {
+      if (!(customItemName || "").trim()) {
         setError("Por favor ingrese el nombre del servicio o producto (ej. Tarjeta Digital NFC).");
         return;
       }
@@ -609,7 +606,7 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
         finalOrderIds = [autoCode];
       } else {
         // Manual mode: if user provided something, use it; otherwise fallback to autoCode
-        const raw = customOrderId.trim();
+        const raw = (customOrderId || "").trim();
         if (raw) {
           const split = raw.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
           finalOrderIds = split.length > 0 ? split : [raw];
@@ -618,14 +615,14 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
         }
       }
       const primaryOrderId = finalOrderIds.join(", ");
-      const categoryName = customItemCategory.trim() || "Servicio Digital";
+      const categoryName = (customItemCategory || "").trim() || "Servicio Digital";
 
       const newItem: ReceiptItem = {
         id: `${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
         socialNetworkId: "custom",
         socialNetworkName: categoryName,
         serviceId: `custom_${Date.now()}`,
-        serviceName: customItemName.trim(),
+        serviceName: (customItemName || "").trim(),
         quantity: Math.round(qtyNum),
         suggestedPrice: chargedPrice,
         chargedPrice: chargedPrice,
@@ -692,11 +689,11 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
 
     let finalOrderIds: string[] = [];
     if (idCountType === "dos") {
-      const o1 = customOrderId.trim() || `PED-${Math.floor(100000 + Math.random() * 900000)}`;
-      const o2 = customOrderId2.trim() || `PED-${Math.floor(100000 + Math.random() * 900000)}`;
+      const o1 = (customOrderId || "").trim() || `PED-${Math.floor(100000 + Math.random() * 900000)}`;
+      const o2 = (customOrderId2 || "").trim() || `PED-${Math.floor(100000 + Math.random() * 900000)}`;
       finalOrderIds = [o1, o2];
     } else {
-      const raw = customOrderId.trim();
+      const raw = (customOrderId || "").trim();
       if (raw) {
         const split = raw.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
         finalOrderIds = split.length > 0 ? split : [raw];
@@ -722,7 +719,7 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
       trmDate: trmState.fecha || undefined,
       orderId: primaryOrderId,
       orderIds: finalOrderIds,
-      targetAccount: itemTargetAccount.trim() || undefined,
+      targetAccount: (itemTargetAccount || "").trim() || undefined,
       startCount: itemStartCount ? Number(itemStartCount) : undefined,
     };
 
@@ -870,14 +867,15 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
   };
 
   const handleUpdateItemOrderId = (id: string, orderIdInput: string) => {
-    const split = orderIdInput.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
-    const cleanOrderIds = split.length > 0 ? split : (orderIdInput.trim() ? [orderIdInput.trim()] : []);
+    const safeInput = String(orderIdInput || "");
+    const split = safeInput.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+    const cleanOrderIds = split.length > 0 ? split : (safeInput.trim() ? [safeInput.trim()] : []);
     setAddedItems((prev) =>
       prev.map((item) =>
         item.id === id
           ? {
               ...item,
-              orderId: orderIdInput,
+              orderId: safeInput,
               orderIds: cleanOrderIds
             }
           : item
@@ -888,12 +886,12 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
   const handleEmitReceipt = async () => {
     setError(null);
 
-    if (!clientName.trim()) {
+    if (!(clientName || "").trim()) {
       setError("Por favor ingrese el nombre del cliente.");
       return;
     }
 
-    if (!clientPhone.trim()) {
+    if (!(clientPhone || "").trim()) {
       setError("Por favor ingrese el teléfono de contacto del cliente.");
       return;
     }
@@ -933,8 +931,8 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
       let finalReceiptStatus: ReceiptStatus = status;
       const numericOrderIds = sanitizedServices
         .flatMap((s) => s.orderIds || [])
-        .filter((id) => !/^PED-\d+$/i.test(id.trim()))
-        .flatMap((id) => id.match(/\d{3,}/g) || []);
+        .filter((id) => !/^PED-\d+$/i.test(String(id || "").trim()))
+        .flatMap((id) => String(id || "").match(/\d{3,}/g) || []);
 
       if (numericOrderIds.length > 0) {
         try {
@@ -963,8 +961,8 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
       const receiptData = {
         clientId: targetClientId,
         forceNewClient: forceNewClient,
-        clientName: clientName.trim(),
-        clientPhone: clientPhone.trim(),
+        clientName: (clientName || "").trim(),
+        clientPhone: (clientPhone || "").trim(),
         date: new Date().toISOString(),
         services: sanitizedServices,
         subtotal: totals.subtotal,
@@ -979,8 +977,8 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
         warranty: chosenWarranty,
         thankYouMessage: "¡Gracias por confiar en ImpulsaNet para potenciar sus redes!",
         status: finalReceiptStatus,
-        internalNotes: internalNotes.trim(),
-        targetAccount: (addedItems.find(i => i.targetAccount)?.targetAccount || itemTargetAccount.trim() || undefined),
+        internalNotes: (internalNotes || "").trim(),
+        targetAccount: (addedItems.find(i => i.targetAccount)?.targetAccount || (itemTargetAccount || "").trim() || undefined),
         initialFollowers: (addedItems.find(i => i.startCount !== undefined)?.startCount || (itemStartCount ? Number(itemStartCount) : undefined)),
       };
 
@@ -1270,7 +1268,7 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
                 />
 
                 {/* Live Client Status Indicator */}
-                {(clientName.trim() || clientPhone.trim()) && (
+                {((clientName || "").trim() || (clientPhone || "").trim()) && (
                   <div className={`mt-2.5 p-3 rounded-xl border text-xs transition space-y-2.5 ${
                     detectedClient && !forceNewClient
                       ? isDarkMode
@@ -1815,7 +1813,7 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
 
                 <button
                   type="submit"
-                  disabled={!customItemName.trim() || !customItemChargedPrice || parseFloat(customItemChargedPrice) < 0}
+                  disabled={!(customItemName || "").trim() || !customItemChargedPrice || parseFloat(customItemChargedPrice) < 0}
                   className="w-full flex justify-center items-center py-2.5 px-4 border border-transparent rounded-lg shadow-sm text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-hidden disabled:opacity-40 transition mt-2 cursor-pointer active:scale-[0.99]"
                 >
                   <Plus className="w-4 h-4 mr-1.5" />
@@ -2399,7 +2397,7 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
                         {isIg && (
                           <button
                             type="button"
-                            disabled={isCheckingIg || !itemTargetAccount.trim()}
+                            disabled={isCheckingIg || !(itemTargetAccount || "").trim()}
                             onClick={handleVerifyInstagramInitialCount}
                             className="px-3 py-1.5 rounded-lg text-xs font-bold text-white bg-gradient-to-r from-pink-500 to-purple-600 hover:from-pink-600 hover:to-purple-700 disabled:opacity-50 transition cursor-pointer flex items-center gap-1.5 active:scale-95 shadow-2xs shrink-0"
                             title="Consultar número actual de seguidores en vivo"

@@ -8,14 +8,12 @@ import { useApp } from "../context/AppContext";
 import {
   TrendingUp,
   DollarSign,
-  FileText,
   Users,
   Calendar,
   Layers,
   ArrowUpRight,
   Target,
   ChevronRight,
-  Search,
   Eye,
   EyeOff,
   Filter,
@@ -130,7 +128,7 @@ const MONTH_NAMES = [
 ];
 
 export const DashboardView: React.FC<DashboardViewProps> = ({ onViewChange, onSelectReceipt }) => {
-  const { receipts, clients, services, isDarkMode, businessConfig, trmState, fetchTRM } = useApp();
+  const { receipts, clients, isDarkMode, businessConfig, trmState, fetchTRM } = useApp();
 
   const [hideAmounts, setHideAmounts] = useState<boolean>(() => {
     try {

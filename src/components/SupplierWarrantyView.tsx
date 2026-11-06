@@ -123,8 +123,8 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
   // Helper to resolve client and clientCode for any warranty record
   const resolveClientForRecord = useCallback(
     (record: SupplierWarrantyRecord): { client?: Client; clientCode?: string } => {
-      if (record.clientCode && record.clientCode.trim()) {
-        return { clientCode: record.clientCode.trim() };
+      if (record.clientCode && String(record.clientCode).trim()) {
+        return { clientCode: String(record.clientCode).trim() };
       }
       if (record.clientId && clientMap.has(record.clientId)) {
         const c = clientMap.get(record.clientId)!;
@@ -143,7 +143,9 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
       }
       const found = clients.find((c) => {
         if (record.clientPhone && matchContacts(c.phone, record.clientPhone)) return true;
-        if (c.name.trim().toLowerCase() === record.clientName.trim().toLowerCase()) return true;
+        const cName = String(c.name || "").trim().toLowerCase();
+        const rName = String(record.clientName || "").trim().toLowerCase();
+        if (cName && rName && cName === rName) return true;
         return false;
       });
       if (found) {
@@ -242,14 +244,14 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
   }, [receipts]);
 
   const filteredCancelledReceipts = useMemo(() => {
-    if (!reopenReceiptSearch.trim()) return cancelledReceipts;
-    const q = reopenReceiptSearch.toLowerCase().trim();
+    if (!(reopenReceiptSearch || "").trim()) return cancelledReceipts;
+    const q = (reopenReceiptSearch || "").toLowerCase().trim();
     return cancelledReceipts.filter((r) => {
-      const matchConsecutive = r.consecutive.toString().includes(q) || `#${r.consecutive}`.includes(q);
+      const matchConsecutive = String(r.consecutive ?? "").includes(q) || `#${r.consecutive ?? ""}`.includes(q);
       const matchClient = (r.clientName || "").toLowerCase().includes(q);
       const matchPhone = (r.clientPhone || "").includes(q);
-      const matchService = (r.services || []).some((s) => s.serviceName.toLowerCase().includes(q));
-      const matchIds = (r.services || []).some((s) => getItemOrderIds(s).some((id) => id.toLowerCase().includes(q)));
+      const matchService = (r.services || []).some((s) => (s?.serviceName || "").toLowerCase().includes(q));
+      const matchIds = (r.services || []).some((s) => getItemOrderIds(s).some((id) => (id || "").toLowerCase().includes(q)));
       return matchConsecutive || matchClient || matchPhone || matchService || matchIds;
     });
   }, [cancelledReceipts, reopenReceiptSearch]);
@@ -275,7 +277,7 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
     receipts.forEach((r) => {
       let wDays = defaultWarrantyDays;
       if (r.warranty) {
-        const match = r.warranty.match(/\d+/);
+        const match = String(r.warranty).match(/\d+/);
         if (match) wDays = parseInt(match[0], 10);
       }
 
@@ -288,22 +290,22 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
       const isInWarrantyStatus = normStatus === "garantia_en_proceso";
 
       // Extract all provider order IDs in this receipt
-      r.services.forEach((item) => {
+      (r.services || []).forEach((item) => {
         const idsToProcess = getItemOrderIds(item);
 
         idsToProcess.forEach((orderId) => {
           // Check if this ID is already in active supplier tracking
           const trackingRecord = supplierWarranties.find((w) =>
             w.status !== "resuelto" &&
-            (w.providerOrderId.includes(orderId) || (w.providerOrderIds && w.providerOrderIds.includes(orderId)))
+            ((w.providerOrderId || "").includes(orderId) || (w.providerOrderIds && w.providerOrderIds.includes(orderId)))
           );
 
           list.push({
             receipt: r,
             orderId,
-            serviceName: item.serviceName,
-            socialNetworkName: item.socialNetworkName,
-            quantity: item.quantity,
+            serviceName: item?.serviceName || "Servicio",
+            socialNetworkName: item?.socialNetworkName || "General",
+            quantity: Number(item?.quantity) || 0,
             purchaseDate: r.date,
             warrantyDays: wDays,
             daysRemaining,
@@ -335,15 +337,15 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
       if (statusFilter === "reopened" && !record.isReopenedFromCancelled) return false;
 
       // 2. Search Term
-      if (searchTerm.trim() !== "") {
-        const term = searchTerm.toLowerCase();
+      if ((searchTerm || "").trim() !== "") {
+        const term = (searchTerm || "").toLowerCase();
         const clientInfo = resolveClientForRecord(record);
         const clientCodeStr = clientInfo.clientCode || "";
-        const matchesId = record.providerOrderId.toLowerCase().includes(term);
-        const matchesClient = record.clientName.toLowerCase().includes(term);
+        const matchesId = (record.providerOrderId || "").toLowerCase().includes(term);
+        const matchesClient = (record.clientName || "").toLowerCase().includes(term);
         const matchesClientCode =
           clientCodeStr.toLowerCase().includes(term) || `id:${clientCodeStr}`.toLowerCase().includes(term);
-        const matchesService = record.serviceName.toLowerCase().includes(term);
+        const matchesService = (record.serviceName || "").toLowerCase().includes(term);
         const matchesReason = (record.reason || "").toLowerCase().includes(term);
         const matchesConsecutive = (record.receiptConsecutive?.toString() || "").includes(term);
 
@@ -359,18 +361,18 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
   // Filter active client IDs
   const filteredClientWarrantyItems = useMemo(() => {
     return activeClientWarrantyItems.filter((item) => {
-      if (searchTerm.trim() !== "") {
-        const term = searchTerm.toLowerCase();
+      if ((searchTerm || "").trim() !== "") {
+        const term = (searchTerm || "").toLowerCase();
         const client =
           receiptToClient.get(item.receipt.id) ||
           (item.receipt.clientId ? clientMap.get(item.receipt.clientId) : undefined);
         const clientCodeStr = client ? getClientCode(client) : "";
-        const matchesId = item.orderId.toLowerCase().includes(term);
-        const matchesClient = item.receipt.clientName.toLowerCase().includes(term);
+        const matchesId = (item.orderId || "").toLowerCase().includes(term);
+        const matchesClient = (item.receipt.clientName || "").toLowerCase().includes(term);
         const matchesClientCode =
           clientCodeStr.toLowerCase().includes(term) || `id:${clientCodeStr}`.toLowerCase().includes(term);
-        const matchesService = item.serviceName.toLowerCase().includes(term);
-        const matchesConsecutive = item.receipt.consecutive.toString().includes(term);
+        const matchesService = (item.serviceName || "").toLowerCase().includes(term);
+        const matchesConsecutive = String(item.receipt.consecutive ?? "").includes(term);
         return matchesId || matchesClient || matchesClientCode || matchesService || matchesConsecutive;
       }
       return true;
@@ -379,20 +381,20 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
 
   // Invoices filtered by search query in the simplified modal
   const modalInvoiceSearchResults = useMemo(() => {
-    if (!invoiceSearchQuery.trim()) {
+    if (!(invoiceSearchQuery || "").trim()) {
       return receipts.slice(0, 8); // Return 8 most recent
     }
-    const q = invoiceSearchQuery.toLowerCase().trim();
+    const q = (invoiceSearchQuery || "").toLowerCase().trim();
     return receipts.filter((r) => {
-      const matchConsecutive = r.consecutive.toString().includes(q) || `#${r.consecutive}`.includes(q);
-      const matchClient = r.clientName.toLowerCase().includes(q);
+      const matchConsecutive = String(r.consecutive ?? "").includes(q) || `#${r.consecutive ?? ""}`.includes(q);
+      const matchClient = (r.clientName || "").toLowerCase().includes(q);
       const rClient = receiptToClient.get(r.id) || (r.clientId ? clientMap.get(r.clientId) : undefined);
       const rCode = rClient ? getClientCode(rClient) : "";
       const matchClientCode = rCode.toLowerCase().includes(q) || `id:${rCode}`.toLowerCase().includes(q);
       const matchPhone = (r.clientPhone || "").includes(q);
-      const matchService = r.services.some((s) => s.serviceName.toLowerCase().includes(q));
-      const matchOrderId = r.services.some((s) =>
-        getItemOrderIds(s).some((id) => id.toLowerCase().includes(q))
+      const matchService = (r.services || []).some((s) => (s?.serviceName || "").toLowerCase().includes(q));
+      const matchOrderId = (r.services || []).some((s) =>
+        getItemOrderIds(s).some((id) => (id || "").toLowerCase().includes(q))
       );
       return matchConsecutive || matchClient || matchClientCode || matchPhone || matchService || matchOrderId;
     }).slice(0, 10);
@@ -402,8 +404,8 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
   const selectedInvoiceOrderIds = useMemo(() => {
     if (!selectedInvoice) return [];
     const items: Array<{ id: string; serviceName: string; quantity: number }> = [];
-    selectedInvoice.services.forEach((s) => {
-      const label = `${s.socialNetworkName} - ${s.serviceName}`;
+    (selectedInvoice.services || []).forEach((s) => {
+      const label = `${s?.socialNetworkName || "General"} - ${s?.serviceName || "Servicio"}`;
       const ids = getItemOrderIds(s);
       ids.forEach((id) => {
         items.push({ id, serviceName: label, quantity: s.quantity });
@@ -566,13 +568,13 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
       return;
     }
 
-    const clientName = selectedInvoice ? selectedInvoice.clientName : formClientNameManual.trim() || "Cliente";
+    const clientName = selectedInvoice ? (selectedInvoice.clientName || "Cliente") : (formClientNameManual || "").trim() || "Cliente";
     const clientPhone = selectedInvoice ? selectedInvoice.clientPhone : undefined;
 
     // Resolve client ID and 4-digit client code
     const resolvedClient = selectedInvoice
       ? (receiptToClient.get(selectedInvoice.id) || (selectedInvoice.clientId ? clientMap.get(selectedInvoice.clientId) : undefined))
-      : clients.find((c) => (clientPhone && matchContacts(c.phone, clientPhone)) || c.name.trim().toLowerCase() === clientName.trim().toLowerCase());
+      : clients.find((c) => (clientPhone && matchContacts(c.phone, clientPhone)) || String(c.name || "").trim().toLowerCase() === String(clientName || "").trim().toLowerCase());
 
     const clientId = selectedInvoice?.clientId || resolvedClient?.id || undefined;
     const clientCode = resolvedClient ? getClientCode(resolvedClient) : undefined;
@@ -1557,9 +1559,9 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
                       ) : (
                         modalInvoiceSearchResults.map((r) => {
                           const isPicked = selectedInvoice?.id === r.id;
-                          const idsCount = r.services.reduce((acc, s) => {
-                            if (s.orderIds) return acc + s.orderIds.length;
-                            return acc + (s.orderId ? 1 : 0);
+                          const idsCount = (r.services || []).reduce((acc, s) => {
+                            if (s?.orderIds) return acc + s.orderIds.length;
+                            return acc + (s?.orderId ? 1 : 0);
                           }, 0);
 
                           return (

@@ -259,14 +259,16 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
         if (res.success && res.results && res.results.length > 0) {
           const item = res.results[0];
           if (item.found) {
+            const safeMappedStatus: ReceiptStatus =
+              item.mappedStatus === "desconocido" ? "en_proceso" : item.mappedStatus;
             setProviderOrderFeedback({
               orderId: item.orderId,
               found: true,
               rawStatus: item.rawStatus,
-              mappedStatus: item.mappedStatus,
+              mappedStatus: safeMappedStatus,
             });
             // Automatically update receipt status to what the provider reports!
-            setStatus(item.mappedStatus);
+            setStatus(safeMappedStatus);
           } else {
             setProviderOrderFeedback({
               orderId: targetId,
@@ -967,13 +969,11 @@ export const GeneratorView: React.FC<GeneratorViewProps> = ({ onReceiptGenerated
         services: sanitizedServices,
         subtotal: totals.subtotal,
         totalCharged: totals.totalCharged,
+        // Campos internos que createReceipt guarda atómicamente en receipts_private/{receiptId} mediante writeBatch
         totalProviderCost: totals.totalProviderCost,
         totalProfit: totals.totalProfit,
         trmUsed: trmState.valor || undefined,
         trmDate: trmState.fecha || undefined,
-        providerCostCOP: totals.totalProviderCost,
-        salePrice: totals.totalCharged,
-        profit: totals.totalProfit,
         warranty: chosenWarranty,
         thankYouMessage: "¡Gracias por confiar en ImpulsaNet para potenciar sus redes!",
         status: finalReceiptStatus,

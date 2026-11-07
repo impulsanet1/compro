@@ -20,14 +20,50 @@ interface ReceiptModalProps {
 }
 
 export const ReceiptModal: React.FC<ReceiptModalProps> = ({
-  receipt,
+  receipt: rawReceipt,
   onClose,
   businessName,
   whatsapp,
   initialIsEditing = false,
 }) => {
-  const { businessConfig, updateBusinessConfig, updateReceipt, addSupplierWarranty, reopenOrResendWarrantyForCancelledOrder, syncReceiptWithProvider } = useApp();
+  const { businessConfig, providerCredentials, updateProviderCredentials, updateReceipt, addSupplierWarranty, reopenOrResendWarrantyForCancelledOrder, syncReceiptWithProvider, getReceiptPrivateData } = useApp();
   const receiptRef = useRef<HTMLDivElement>(null);
+
+  // Merge public receipt with private fields from receipts_private/{receiptId}
+  const privateDoc = getReceiptPrivateData(rawReceipt.id);
+  const receipt = useMemo<Receipt>(() => {
+    if (!privateDoc) return rawReceipt;
+    const privMap = new Map(
+      (privateDoc.servicesPrivate || []).map((ps) => [ps.id, ps])
+    );
+    const mergedServices = (rawReceipt.services || []).map((srv, idx) => {
+      const ps = privMap.get(srv.id) || privateDoc.servicesPrivate?.[idx];
+      if (!ps) return srv;
+      return {
+        ...srv,
+        providerCostAtPurchase: ps.providerCostAtPurchase ?? srv.providerCostAtPurchase ?? 0,
+        providerCostUSD: ps.providerCostUSD ?? srv.providerCostUSD ?? null,
+        providerCostCOP: ps.providerCostCOP ?? srv.providerCostCOP ?? null,
+        trmUsed: ps.trmUsed ?? srv.trmUsed ?? null,
+        trmDate: ps.trmDate ?? srv.trmDate ?? null,
+        suggestedPrice: ps.suggestedPrice ?? srv.suggestedPrice ?? srv.chargedPrice ?? 0,
+        previousOrderId: ps.previousOrderId ?? srv.previousOrderId,
+        resendDate: ps.resendDate ?? srv.resendDate,
+        resendNote: ps.resendNote ?? srv.resendNote,
+      };
+    });
+    return {
+      ...rawReceipt,
+      clientId: privateDoc.clientId ?? rawReceipt.clientId,
+      internalNotes: privateDoc.internalNotes ?? rawReceipt.internalNotes ?? "",
+      totalProviderCost: privateDoc.totalProviderCost ?? rawReceipt.totalProviderCost ?? 0,
+      totalProviderCostUSD: privateDoc.totalProviderCostUSD ?? rawReceipt.totalProviderCostUSD ?? null,
+      totalProfit: privateDoc.totalProfit ?? rawReceipt.totalProfit ?? 0,
+      trmUsed: privateDoc.trmUsed ?? rawReceipt.trmUsed ?? null,
+      trmDate: privateDoc.trmDate ?? rawReceipt.trmDate ?? null,
+      services: mergedServices,
+    };
+  }, [rawReceipt, privateDoc]);
   
   // Format utility
   const formatCOP = (val?: number | null) => "$" + Math.round(Number(val) || 0).toLocaleString("es-CO");
@@ -309,32 +345,25 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
       return `
         <tr style="${isResent ? 'background-color: #fffdf5;' : ''}">
           <td style="padding: 12px 16px; border-bottom: 1px solid #f1f5f9; font-weight: 600; color: #0f172a;">
-            <div style="font-size: 13.5px; font-weight: 700; color: #0f172a;">${title}</div>
-            ${isResent ? `
-              <div style="margin-top: 5px;">
-                <span style="display: inline-block; background-color: #fef3c7; color: #92400e; border: 1px solid #fde68a; font-size: 10px; font-weight: 800; padding: 2px 8px; border-radius: 6px; letter-spacing: 0.2px;">
-                  🔄 SERVICIO REENVIADO / REPOSICIÓN
+            <div style="font-size: 13.5px; font-weight: 700; color: #0f172a;">
+              ${title}
+              ${isResent ? `<span style="display: inline-block; margin-left: 6px; background-color: #fef3c7; color: #92400e; border: 1px solid #fde68a; font-size: 9.5px; font-weight: 800; padding: 1px 6px; border-radius: 5px;">🔄 REENVIADO</span>` : ''}
+            </div>
+            <div style="margin-top: 4px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+              ${orderIdsStr ? `
+                <span style="font-size: 11.5px; font-weight: 700; color: #0f172a; font-family: monospace;">
+                  ID: #${orderIdsStr}
                 </span>
-                <div style="font-size: 11.5px; color: #334155; font-family: monospace; font-weight: 600; margin-top: 3px;">
-                  Nuevo ID Proveedor: ${item.orderId || orderIdsStr}
-                  ${item.previousOrderId ? `<span style="color: #94a3b8; font-size: 10px; font-weight: 400; margin-left: 6px;">(ID anterior: ${item.previousOrderId})</span>` : ''}
-                </div>
-                ${item.resendNote ? `<div style="font-size: 10.5px; color: #b45309; font-style: italic; font-weight: 500; margin-top: 2px;">📌 ${item.resendNote}</div>` : ''}
-              </div>
-            ` : `
-              <div style="margin-top: 4px; display: flex; align-items: center; gap: 6px;">
-                ${orderIdsStr ? `
-                  <span style="font-size: 11.5px; font-weight: 500; color: #64748b; font-family: monospace;">
-                    ${getOrderIdTypeLabel(orderIdsStr, item.socialNetworkId === 'custom')}: ${orderIdsStr}
-                  </span>
-                ` : ''}
-                ${hasResentServices ? `
-                  <span style="font-size: 9.5px; font-weight: 700; color: #047857; background-color: #ecfdf5; border: 1px solid #a7f3d0; padding: 1px 6px; border-radius: 4px;">
-                    Orden original
-                  </span>
-                ` : ''}
-              </div>
-            `}
+              ` : ''}
+              ${isResent && item.previousOrderId && item.previousOrderId !== orderIdsStr ? `
+                <span style="font-size: 10.5px; color: #94a3b8; font-family: monospace;">
+                  Antiguo: <s>#${item.previousOrderId}</s>
+                </span>
+              ` : ''}
+              ${isResent && item.resendNote ? `
+                <span style="font-size: 10.5px; color: #b45309; font-style: italic;">📌 ${item.resendNote}</span>
+              ` : ''}
+            </div>
           </td>
           <td style="padding: 12px 16px; border-bottom: 1px solid #f1f5f9; text-align: center; color: #334155; font-weight: 600;">
             ${(item.quantity || 0).toLocaleString()}
@@ -438,18 +467,6 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
               ${itemsHtml}
             </tbody>
           </table>
-
-          ${hasResentServices ? `
-            <div style="background-color: #fffbeb; border: 1.5px dashed #f59e0b; border-radius: 12px; padding: 12px 16px; margin-bottom: 20px;">
-              <div style="display: flex; align-items: center; gap: 8px; font-weight: 800; font-size: 12px; color: #92400e;">
-                <span style="font-size: 14px;">🔄</span>
-                <span>ACLARACIÓN DE SERVICIOS EN ESTE COMPROBANTE</span>
-              </div>
-              <div style="font-size: 11px; color: #78350f; margin-top: 5px; line-height: 1.5;">
-                El servicio identificado con la etiqueta <span style="background-color: #fef3c7; color: #92400e; font-weight: 700; padding: 1px 5px; border-radius: 4px; border: 1px solid #fde68a;">🔄 SERVICIO REENVIADO / REPOSICIÓN</span> fue reordenado con un nuevo ID de orden ante el proveedor para garantizar su entrega completa. Los demás servicios facturados en este mismo documento corresponden a sus órdenes originales y continúan su curso sin alteración.
-              </div>
-            </div>
-          ` : ''}
 
           <div class="totals-box">
             <div class="total-row">
@@ -637,21 +654,32 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
     setIsSubmittingReorder(true);
     setError(null);
     try {
-      const cleanNewId = newProviderIdInput.trim();
+      const cleanIdsList = newProviderIdInput
+        .trim()
+        .split(/[\s,]+/)
+        .map((s) => s.replace(/^#/, "").trim())
+        .filter(Boolean);
+      const cleanNewId = cleanIdsList.join(", ");
       const currentServices = receipt.services || [];
       
       const updatedServices: ReceiptItem[] = currentServices.map((item) => {
-        const existingIds = getItemOrderIds(item);
-        const combined = Array.from(new Set([cleanNewId, ...existingIds]));
+        const prevRealIds = getItemOrderIds(item).filter(
+          (id) => !/^PED-\d+$/i.test(id.trim()) && !cleanIdsList.includes(id.trim())
+        );
+        const prevIdStr = prevRealIds.length > 0 ? prevRealIds.join(", ") : item.previousOrderId;
         return {
           ...item,
           orderId: cleanNewId,
-          orderIds: combined,
+          orderIds: cleanIdsList,
+          isResent: true,
+          previousOrderId: prevIdStr || undefined,
+          resendDate: new Date().toISOString(),
+          resendNote: claimReasonInput.trim() || undefined,
         };
       });
 
       const nowFormatted = new Date().toLocaleString("es-CO", { dateStyle: "short", timeStyle: "short" });
-      const noteEntry = `[${nowFormatted}] 🔄 Reordenado con nuevo ID Proveedor: ${cleanNewId}${claimReasonInput.trim() ? ` (${claimReasonInput.trim()})` : ""}`;
+      const noteEntry = `[${nowFormatted}] 🔄 Nuevo ID Proveedor: ${cleanNewId}${claimReasonInput.trim() ? ` (${claimReasonInput.trim()})` : ""}`;
       const updatedNotes = editedInternalNotes ? `${editedInternalNotes}\n${noteEntry}` : noteEntry;
 
       const patch: Partial<Receipt> = {
@@ -667,10 +695,11 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
       
       const waUrl = getWhatsAppLink("reordered");
       setLastActionWhatsAppUrl(waUrl);
-      setResendSuccess(`¡Pedido reordenado con ID ${cleanNewId} y reactivado a 'En proceso'!`);
+      setResendSuccess(`¡ID actualizado a #${cleanNewId}!`);
       setNewProviderIdInput("");
       setClaimReasonInput("");
-      setTimeout(() => setResendSuccess(null), 6000);
+      setShowReorderPanel(false);
+      setTimeout(() => setResendSuccess(null), 5000);
     } catch (err: any) {
       console.error("Error al reordenar pedido:", err);
       setError("Error al reordenar: " + (err.message || String(err)));
@@ -749,14 +778,12 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
     if (!service) return;
     setQuickEditServiceIndex(index);
     const currentRealIds = getItemOrderIds(service).filter((id) => !/^PED-\d+$/i.test(id.trim()));
-    setQuickNewOrderId(currentRealIds.length > 0 ? currentRealIds.join(", ") : "");
+    // Leave input empty so the user enters the new ID directly without mixing with the old ID
+    setQuickNewOrderId("");
     const curStatus = getNormalizedStatus(receipt.status);
     setQuickReactivateStatus(curStatus === "cancelado" ? "en_proceso" : curStatus);
-    // Default to false for new/active orders unless the item was already explicitly marked as resent
-    setQuickIsResent(Boolean(service.isResent));
-    setQuickResendNote(
-      service.resendNote || (curStatus === "cancelado" ? "Reposición por cancelación de proveedor" : "Servicio reenviado con nuevo ID")
-    );
+    setQuickIsResent(currentRealIds.length > 0 ? true : Boolean(service.isResent));
+    setQuickResendNote(service.resendNote || "");
     setError(null);
   };
 
@@ -767,15 +794,20 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
 
     const cleanId = quickNewOrderId.trim();
     if (!cleanId) {
-      setError("Por favor ingresa un ID válido para el proveedor.");
+      setError("Por favor ingresa el nuevo ID del proveedor.");
       return;
     }
 
     setIsSavingQuickId(true);
     setError(null);
     try {
-      const cleanIdsList = cleanId.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
-      const prevRealIds = getItemOrderIds(targetService).filter((id) => !/^PED-\d+$/i.test(id.trim()));
+      const cleanIdsList = cleanId
+        .split(/[\s,]+/)
+        .map((s) => s.replace(/^#/, "").trim())
+        .filter(Boolean);
+      const prevRealIds = getItemOrderIds(targetService).filter(
+        (id) => !/^PED-\d+$/i.test(id.trim()) && !cleanIdsList.includes(id.trim())
+      );
       const prevId = prevRealIds.length > 0 ? prevRealIds.join(", ") : "sin ID previo";
 
       const updatedServices = (receipt.services || []).map((s, idx) => {
@@ -791,14 +823,15 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
               resendNote: undefined,
             };
           }
-          const existingRealIds = getItemOrderIds(s).filter((id) => !/^PED-\d+$/i.test(id.trim()));
-          const combined = Array.from(new Set([...cleanIdsList, ...existingRealIds]));
           return {
             ...s,
             orderId: cleanIdsList.join(", "),
-            orderIds: combined,
+            orderIds: cleanIdsList,
             isResent: true,
-            previousOrderId: prevId !== "sin ID previo" && prevId !== cleanIdsList.join(", ") ? prevId : (s.previousOrderId || undefined),
+            previousOrderId:
+              prevId !== "sin ID previo" && prevId !== cleanIdsList.join(", ")
+                ? prevId
+                : s.previousOrderId || undefined,
             resendDate: new Date().toISOString(),
             resendNote: quickResendNote.trim() ? quickResendNote.trim() : undefined,
           };
@@ -808,7 +841,7 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
 
       const nowFormatted = new Date().toLocaleString("es-CO", { dateStyle: "short", timeStyle: "short" });
       const resentLabel = quickIsResent ? " [REENVIADO]" : "";
-      const noteEntry = `[${nowFormatted}] ${quickIsResent ? "🔄" : "🔢"} Servicio "${targetService.serviceName}"${resentLabel} actualizado con ID Proveedor: ${cleanIdsList.join(", ")}${prevId !== "sin ID previo" ? ` (anterior: ${prevId})` : ""}${quickIsResent && quickResendNote.trim() ? ` - Nota: ${quickResendNote.trim()}` : ""}`;
+      const noteEntry = `[${nowFormatted}] ${quickIsResent ? "🔄" : "🔢"} Servicio "${targetService.serviceName}"${resentLabel} -> Nuevo ID: ${cleanIdsList.join(", ")}${prevId !== "sin ID previo" ? ` (antiguo: ${prevId})` : ""}${quickIsResent && quickResendNote.trim() ? ` - Nota: ${quickResendNote.trim()}` : ""}`;
       const updatedNotes = receipt.internalNotes ? `${receipt.internalNotes}\n${noteEntry}` : noteEntry;
 
       const patch: Partial<Receipt> = {
@@ -928,7 +961,7 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
     setIsSavingInlineKey(true);
     setSyncError(null);
     try {
-      const targetUrl = businessConfig.providerApiUrl || "https://mazsocialmarket.com/api/v2";
+      const targetUrl = providerCredentials.providerApiUrl || "https://mazsocialmarket.com/api/v2";
       const targetKey = inlineApiKeyInput.trim();
       const saveRes = await saveProviderConfig(targetUrl, targetKey);
       if (!saveRes.success) {
@@ -936,7 +969,7 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
         setIsSavingInlineKey(false);
         return;
       }
-      await updateBusinessConfig({
+      await updateProviderCredentials({
         providerApiUrl: targetUrl,
         providerApiKey: targetKey,
       });
@@ -1107,7 +1140,8 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                     onClick={() => {
                       setShowReorderPanel((prev) => !prev);
                       if (!showReorderPanel) {
-                        setReorderActionType(getNormalizedStatus(receipt.status) === "cancelado" ? "reorder" : "warranty");
+                        setReorderActionType("reorder");
+                        setNewProviderIdInput("");
                       }
                     }}
                     className={`flex-1 sm:flex-none flex items-center justify-center gap-1 text-xs font-bold transition px-2.5 py-2 rounded-xl cursor-pointer border touch-manipulation ${
@@ -1115,10 +1149,10 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                         ? "bg-purple-600 text-white border-purple-700 shadow-2xs"
                         : "bg-purple-50 text-purple-700 hover:bg-purple-100 border-purple-200"
                     }`}
-                    title="Reordenar con nuevo proveedor o tramitar garantía"
+                    title="Reenviar pedido con nuevo ID o radicar garantía"
                   >
                     <RotateCcw className="w-3.5 h-3.5" />
-                    <span>Reenviar / Garantía</span>
+                    <span>Reenviar</span>
                   </button>
                   <button
                     id="btn-sync-all-provider-api"
@@ -1436,251 +1470,166 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                 </div>
               )}
 
-              {/* Centro Interactivo de Reenvío de Garantías y Reorden con Nuevo Proveedor */}
+              {/* Panel Simplificado de Reenvío y Garantía */}
               {!isEditing && (showReorderPanel || getNormalizedStatus(receipt.status) === "cancelado") && (
-                <div className={`no-print p-4 sm:p-5 rounded-2xl border transition-all duration-200 shadow-sm ${
+                <div className={`no-print p-3.5 rounded-2xl border transition-all duration-200 shadow-2xs space-y-3 ${
                   getNormalizedStatus(receipt.status) === "cancelado"
                     ? "bg-rose-50/70 border-rose-200"
                     : "bg-purple-50/60 border-purple-200"
                 }`}>
-                  {/* Panel Header */}
-                  <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 pb-3 border-b border-gray-200/70">
-                    <div className="flex items-center gap-2.5">
-                      <div className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${
-                        getNormalizedStatus(receipt.status) === "cancelado"
-                          ? "bg-rose-100 text-rose-700"
-                          : "bg-purple-100 text-purple-700"
-                      }`}>
-                        {getNormalizedStatus(receipt.status) === "cancelado" ? (
-                          <ShieldAlert className="w-4.5 h-4.5" />
-                        ) : (
-                          <RotateCcw className="w-4.5 h-4.5" />
-                        )}
-                      </div>
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <h4 className="font-extrabold text-xs sm:text-sm text-gray-900">
-                            Centro de Reenvíos y Garantías de Proveedor
-                          </h4>
-                          <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider ${
-                            getNormalizedStatus(receipt.status) === "cancelado"
-                              ? "bg-rose-200 text-rose-900"
-                              : getNormalizedStatus(receipt.status) === "garantia_en_proceso"
-                              ? "bg-amber-200 text-amber-900"
-                              : "bg-purple-200 text-purple-900"
-                          }`}>
-                            {getNormalizedStatus(receipt.status) === "cancelado" ? "Cancelado" : receipt.status}
-                          </span>
-                        </div>
-                        <p className="text-[11px] text-gray-600 mt-0.5">
-                          {getNormalizedStatus(receipt.status) === "cancelado"
-                            ? "El proveedor canceló esta orden. Reordénala con un servidor de respaldo o tramita la garantía."
-                            : "Gestiona reposiciones (Refill) o cambios de proveedor para este comprobante."}
-                        </p>
-                      </div>
+                  {/* Compact Top Bar: Tabs + Close */}
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setReorderActionType("reorder");
+                          setNewProviderIdInput("");
+                        }}
+                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl font-bold text-xs transition cursor-pointer ${
+                          reorderActionType === "reorder"
+                            ? "bg-purple-700 text-white shadow-2xs"
+                            : "bg-white text-gray-700 hover:bg-gray-50 border border-gray-200"
+                        }`}
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        <span>Cambiar ID / Reenviar</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setReorderActionType("warranty")}
+                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl font-bold text-xs transition cursor-pointer ${
+                          reorderActionType === "warranty"
+                            ? "bg-indigo-700 text-white shadow-2xs"
+                            : "bg-white text-gray-700 hover:bg-gray-50 border border-gray-200"
+                        }`}
+                      >
+                        <ShieldCheck className="w-3.5 h-3.5" />
+                        <span>Garantía / Refill</span>
+                      </button>
                     </div>
 
-                    <div className="flex items-center gap-2 self-end sm:self-center">
-                      {getNormalizedStatus(receipt.status) !== "cancelado" && (
-                        <button
-                          type="button"
-                          onClick={() => setShowReorderPanel(false)}
-                          className="text-gray-400 hover:text-gray-700 p-1 rounded-lg hover:bg-gray-100 transition cursor-pointer"
-                          title="Cerrar panel"
-                        >
-                          <X className="w-4 h-4" />
-                        </button>
-                      )}
-                    </div>
+                    {getNormalizedStatus(receipt.status) !== "cancelado" && (
+                      <button
+                        type="button"
+                        onClick={() => setShowReorderPanel(false)}
+                        className="text-gray-400 hover:text-gray-700 p-1 rounded-lg hover:bg-gray-100 transition cursor-pointer"
+                        title="Cerrar"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    )}
                   </div>
 
-                  {/* Mode Selector Tabs */}
-                  <div className="flex items-center gap-1.5 pt-3 pb-3">
-                    <button
-                      type="button"
-                      onClick={() => setReorderActionType("reorder")}
-                      className={`flex-1 sm:flex-none flex items-center justify-center gap-1.5 px-3.5 py-1.5 rounded-xl font-bold text-xs transition cursor-pointer ${
-                        reorderActionType === "reorder"
-                          ? "bg-purple-700 text-white shadow-xs"
-                          : "bg-white/80 text-gray-700 hover:bg-white border border-gray-200"
-                      }`}
-                    >
-                      <RotateCcw className="w-3.5 h-3.5" />
-                      <span>1. Reordenar con Nuevo Proveedor</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setReorderActionType("warranty")}
-                      className={`flex-1 sm:flex-none flex items-center justify-center gap-1.5 px-3.5 py-1.5 rounded-xl font-bold text-xs transition cursor-pointer ${
-                        reorderActionType === "warranty"
-                          ? "bg-indigo-700 text-white shadow-xs"
-                          : "bg-white/80 text-gray-700 hover:bg-white border border-gray-200"
-                      }`}
-                    >
-                      <ShieldCheck className="w-3.5 h-3.5" />
-                      <span>2. Reclamar Garantía / Refill (Proveedor)</span>
-                    </button>
-                  </div>
-
-                  {/* Tab 1 Content: Reorder with New Provider */}
+                  {/* Tab 1: Cambiar ID / Reenviar (Direct & Compact) */}
                   {reorderActionType === "reorder" && (
-                    <div className="space-y-3 bg-white/90 p-3.5 rounded-xl border border-purple-100">
-                      <div className="text-[11px] text-gray-700">
-                        <strong>¿Para qué sirve?</strong> Si tu proveedor canceló por problemas con el enlace, cuenta privada o saturación, ingresa el <strong>nuevo ID de orden</strong> generado en tu proveedor o servidor de respaldo. Al reactivar, se actualizarán los servicios y el pedido pasará a <strong>'En proceso'</strong>.
-                      </div>
-
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                        <div>
-                          <label className="block text-[10px] font-bold text-gray-600 uppercase tracking-wider mb-1">
-                            Nuevo ID de Orden del Proveedor *
-                          </label>
-                          <input
-                            type="text"
-                            value={newProviderIdInput}
-                            onChange={(e) => setNewProviderIdInput(e.target.value)}
-                            placeholder="Ej: 1048291 ó 1048291, 1048292"
-                            className="w-full px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-xs font-mono font-bold text-gray-900 focus:outline-hidden focus:ring-2 focus:ring-purple-500/20 focus:border-purple-600"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-[10px] font-bold text-gray-600 uppercase tracking-wider mb-1">
-                            Detalle / Proveedor Alternativo (Opcional)
-                          </label>
-                          <input
-                            type="text"
-                            value={claimReasonInput}
-                            onChange={(e) => setClaimReasonInput(e.target.value)}
-                            placeholder="Ej: Reenviado por servidor de respaldo B"
-                            className="w-full px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-xs text-gray-800 focus:outline-hidden focus:ring-2 focus:ring-purple-500/20 focus:border-purple-600"
-                          />
-                        </div>
-                      </div>
-
-                      <div className="flex flex-col sm:flex-row items-center justify-between gap-2 pt-1">
-                        <span className="text-[11px] text-gray-500">
-                          IDs anteriores guardados: {receipt.services?.map(s => getItemOrderIdDisplay(s)).filter(Boolean).join(", ") || "Ninguno"}
+                    <div className="bg-white p-3 rounded-xl border border-purple-100 space-y-2.5">
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="text-gray-500 font-medium">
+                          ID actual (se reemplazará):
                         </span>
+                        <span className="font-mono font-bold text-gray-700 bg-gray-100 px-2 py-0.5 rounded">
+                          #{receipt.services?.map(s => getItemOrderIdDisplay(s)).filter(Boolean).join(", ") || "Sin ID"}
+                        </span>
+                      </div>
+
+                      <div className="flex flex-col sm:flex-row gap-2">
+                        <input
+                          type="text"
+                          value={newProviderIdInput}
+                          onChange={(e) => setNewProviderIdInput(e.target.value)}
+                          placeholder="Nuevo ID de orden (ej: 1548293)"
+                          className="flex-1 px-3 py-2 bg-white border-2 border-purple-200 rounded-xl text-xs font-mono font-bold text-gray-900 focus:outline-hidden focus:border-purple-600"
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" && newProviderIdInput.trim()) {
+                              e.preventDefault();
+                              handleExecuteReorder();
+                            }
+                          }}
+                        />
+                        <input
+                          type="text"
+                          value={claimReasonInput}
+                          onChange={(e) => setClaimReasonInput(e.target.value)}
+                          placeholder="Nota opcional..."
+                          className="sm:w-44 px-3 py-2 bg-white border border-gray-200 rounded-xl text-xs text-gray-800 focus:outline-hidden focus:border-purple-600"
+                        />
                         <button
                           type="button"
                           disabled={isSubmittingReorder || !newProviderIdInput.trim()}
                           onClick={handleExecuteReorder}
-                          className="w-full sm:w-auto flex items-center justify-center gap-1.5 px-4 py-2 bg-purple-700 hover:bg-purple-800 disabled:bg-purple-300 text-white font-bold text-xs rounded-xl shadow-xs transition cursor-pointer active:scale-95"
+                          className="px-4 py-2 bg-purple-700 hover:bg-purple-800 disabled:bg-purple-300 text-white font-bold text-xs rounded-xl shadow-2xs transition cursor-pointer active:scale-95 shrink-0 flex items-center justify-center gap-1.5"
                         >
-                          {isSubmittingReorder ? (
-                            <>
-                              <span className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
-                              <span>Reactivando...</span>
-                            </>
-                          ) : (
-                            <>
-                              <RotateCcw className="w-3.5 h-3.5" />
-                              <span>⚡ Reactivar Pedido con Nuevo ID</span>
-                            </>
-                          )}
+                          <Save className="w-3.5 h-3.5" />
+                          <span>{isSubmittingReorder ? "Guardando..." : "Guardar Nuevo ID"}</span>
                         </button>
                       </div>
                     </div>
                   )}
 
-                  {/* Tab 2 Content: Supplier Warranty / Refill */}
+                  {/* Tab 2: Garantía / Refill (Direct & Compact) */}
                   {reorderActionType === "warranty" && (
-                    <div className="space-y-3 bg-white/90 p-3.5 rounded-xl border border-indigo-100">
-                      <div className="text-[11px] text-gray-700">
-                        <strong>¿Para qué sirve?</strong> Si el cliente reporta que hubo caída de seguidores/likes dentro de sus días de garantía, radica aquí el reclamo para su seguimiento con cuenta regresiva. El pedido pasará a <strong>'Garantía en proceso'</strong>.
+                    <div className="bg-white p-3 rounded-xl border border-indigo-100 space-y-2.5">
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                        <input
+                          type="text"
+                          value={newProviderIdInput || (receipt.services || []).flatMap(s => getItemOrderIds(s)).join(", ")}
+                          onChange={(e) => setNewProviderIdInput(e.target.value)}
+                          placeholder="ID a reclamar"
+                          className="px-3 py-2 bg-white border border-gray-200 rounded-xl text-xs font-mono font-bold text-gray-900 focus:outline-hidden focus:border-indigo-600"
+                        />
+
+                        <div className="flex items-center gap-1">
+                          {[24, 48, 72].map((hrs) => (
+                            <button
+                              key={hrs}
+                              type="button"
+                              onClick={() => setWarrantyResponseHours(hrs)}
+                              className={`flex-1 py-2 rounded-xl text-xs font-bold transition cursor-pointer border ${
+                                warrantyResponseHours === hrs
+                                  ? "bg-indigo-600 text-white border-indigo-600"
+                                  : "bg-gray-50 text-gray-700 border-gray-200 hover:bg-gray-100"
+                              }`}
+                            >
+                              {hrs}h
+                            </button>
+                          ))}
+                        </div>
+
+                        <input
+                          type="text"
+                          value={claimReasonInput}
+                          onChange={(e) => setClaimReasonInput(e.target.value)}
+                          placeholder="Motivo (ej: Caída / Refill)"
+                          className="px-3 py-2 bg-white border border-gray-200 rounded-xl text-xs text-gray-800 focus:outline-hidden focus:border-indigo-600"
+                        />
                       </div>
 
-                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-                        <div className="sm:col-span-1">
-                          <label className="block text-[10px] font-bold text-gray-600 uppercase tracking-wider mb-1">
-                            ID(s) de Orden a Reclamar
-                          </label>
-                          <input
-                            type="text"
-                            value={newProviderIdInput || (receipt.services || []).flatMap(s => getItemOrderIds(s)).join(", ")}
-                            onChange={(e) => setNewProviderIdInput(e.target.value)}
-                            placeholder="Ej: 1048291"
-                            className="w-full px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-xs font-mono font-bold text-gray-900 focus:outline-hidden focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600"
-                          />
-                        </div>
-
-                        <div className="sm:col-span-1">
-                          <label className="block text-[10px] font-bold text-gray-600 uppercase tracking-wider mb-1">
-                            Plazo Límite de Respuesta
-                          </label>
-                          <div className="flex items-center gap-1">
-                            {[24, 48, 72].map((hrs) => (
-                              <button
-                                key={hrs}
-                                type="button"
-                                onClick={() => setWarrantyResponseHours(hrs)}
-                                className={`flex-1 py-1 rounded-lg text-xs font-bold transition cursor-pointer border ${
-                                  warrantyResponseHours === hrs
-                                    ? "bg-indigo-600 text-white border-indigo-600 shadow-2xs"
-                                    : "bg-gray-50 text-gray-700 border-gray-200 hover:bg-gray-100"
-                                }`}
-                              >
-                                {hrs}h
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-
-                        <div className="sm:col-span-1">
-                          <label className="block text-[10px] font-bold text-gray-600 uppercase tracking-wider mb-1">
-                            Motivo / Detalle Caída
-                          </label>
-                          <input
-                            type="text"
-                            value={claimReasonInput}
-                            onChange={(e) => setClaimReasonInput(e.target.value)}
-                            placeholder="Ej: Caída de 400 seguidores / Refill"
-                            className="w-full px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-xs text-gray-800 focus:outline-hidden focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600"
-                          />
-                        </div>
-                      </div>
-
-                      <div className="flex flex-col sm:flex-row items-center justify-between gap-2 pt-1">
-                        <span className="text-[11px] text-gray-500 flex items-center gap-1">
-                          <Clock className="w-3.5 h-3.5 text-indigo-500" />
-                          <span>Se creará un registro con alerta regresiva en el panel de Garantías.</span>
-                        </span>
+                      <div className="flex justify-end">
                         <button
                           type="button"
                           disabled={isSubmittingReorder}
                           onClick={handleExecuteSupplierWarranty}
-                          className="w-full sm:w-auto flex items-center justify-center gap-1.5 px-4 py-2 bg-indigo-700 hover:bg-indigo-800 disabled:bg-indigo-300 text-white font-bold text-xs rounded-xl shadow-xs transition cursor-pointer active:scale-95"
+                          className="w-full sm:w-auto flex items-center justify-center gap-1.5 px-4 py-2 bg-indigo-700 hover:bg-indigo-800 disabled:bg-indigo-300 text-white font-bold text-xs rounded-xl shadow-2xs transition cursor-pointer active:scale-95"
                         >
-                          {isSubmittingReorder ? (
-                            <>
-                              <span className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
-                              <span>Radicando...</span>
-                            </>
-                          ) : (
-                            <>
-                              <ShieldCheck className="w-3.5 h-3.5" />
-                              <span>🛡️ Radicar Garantía ante Proveedor ({warrantyResponseHours}h)</span>
-                            </>
-                          )}
+                          <ShieldCheck className="w-3.5 h-3.5" />
+                          <span>{isSubmittingReorder ? "Radicando..." : `Radicar Garantía (${warrantyResponseHours}h)`}</span>
                         </button>
                       </div>
                     </div>
                   )}
 
-                  {/* Immediate Action WhatsApp Notice Banner */}
                   {lastActionWhatsAppUrl && (
-                    <div className="mt-3 bg-emerald-50 border border-emerald-200 p-3 rounded-xl flex flex-col sm:flex-row items-center justify-between gap-2.5 animate-fade-in">
-                      <div className="flex items-center gap-2 text-xs text-emerald-900 font-medium">
-                        <MessageSquare className="w-4 h-4 text-emerald-600 shrink-0" />
-                        <span>¿Deseas enviar el aviso automático del estado al cliente?</span>
-                      </div>
+                    <div className="bg-emerald-50 border border-emerald-200 p-2.5 rounded-xl flex items-center justify-between gap-2 animate-fade-in">
+                      <span className="text-xs text-emerald-900 font-medium">Notificar al cliente:</span>
                       <a
                         href={lastActionWhatsAppUrl}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="w-full sm:w-auto px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-bold text-xs flex items-center justify-center gap-1.5 shadow-2xs transition active:scale-95 cursor-pointer"
+                        className="px-3 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-bold text-xs flex items-center gap-1.5 transition cursor-pointer"
                       >
-                        <Send className="w-3.5 h-3.5" />
-                        <span>Enviar Notificación por WhatsApp</span>
+                        <Send className="w-3 h-3" />
+                        <span>Enviar WhatsApp</span>
                       </a>
                     </div>
                   )}
@@ -1897,22 +1846,7 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                   )}
                 </div>
 
-                {!isEditing && (receipt?.services || []).some((s) => getIsItemResent(s, receipt)) && (
-                  <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl flex items-start gap-2.5 text-xs text-amber-900 shadow-2xs">
-                    <span className="text-base leading-none mt-0.5">🔄</span>
-                    <div className="space-y-0.5">
-                      <div className="font-bold flex items-center gap-2">
-                        <span>Aclaración de Reenvío en esta Factura</span>
-                        <span className="text-[10px] bg-amber-200/80 text-amber-950 font-bold px-2 py-0.5 rounded-full">
-                          Reposición de servicio
-                        </span>
-                      </div>
-                      <p className="text-[11px] text-amber-800 leading-relaxed">
-                        El servicio señalado con <strong className="text-amber-950 font-bold">«Reenviado / Reposición»</strong> fue procesado nuevamente con un nuevo ID de orden ante el proveedor. Los demás servicios de esta factura corresponden a sus órdenes originales y continúan sin cambios.
-                      </p>
-                    </div>
-                  </div>
-                )}
+
 
                 <div className="border border-gray-100 rounded-xl overflow-hidden shadow-2xs bg-white">
                   <table className="w-full text-left border-collapse">
@@ -2058,45 +1992,39 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                                         ? `${item.socialNetworkName} - ${item.serviceName}`
                                         : (item?.serviceName || item?.socialNetworkName || 'Servicio')}
                                     </span>
-                                    {isResent ? (
+                                    {isResent && (
                                       <span className="inline-flex items-center gap-1 text-[10px] font-extrabold text-amber-900 bg-amber-100 border border-amber-300 px-2 py-0.5 rounded-md">
-                                        🔄 REENVIADO / REPOSICIÓN
+                                        🔄 REENVIADO
                                       </span>
-                                    ) : hasResentServices ? (
-                                      <span className="inline-flex items-center text-[9.5px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded-md">
-                                        Orden original
-                                      </span>
-                                    ) : null}
+                                    )}
                                   </span>
                                   <span className="opacity-0 group-hover:opacity-100 text-[10px] font-bold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-md transition border border-indigo-200">
-                                    ✏️ Tocar para cambiar ID
+                                    ✏️ Cambiar ID
                                   </span>
                                 </div>
                                 <div className="mt-1 flex flex-wrap items-center gap-1.5">
-                                  <span className={`inline-flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded-md border font-medium transition ${
+                                  <span className={`inline-flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded-md border font-bold transition ${
                                     isResent
-                                      ? "bg-amber-100/70 text-amber-900 border-amber-300"
+                                      ? "bg-amber-100/80 text-amber-950 border-amber-300"
                                       : getItemOrderIds(item).length > 0
-                                      ? "bg-slate-50 text-slate-700 border-slate-200 group-hover:bg-indigo-50 group-hover:border-indigo-300 group-hover:text-indigo-800"
+                                      ? "bg-slate-50 text-slate-800 border-slate-200 group-hover:bg-indigo-50 group-hover:border-indigo-300 group-hover:text-indigo-800"
                                       : "bg-amber-50 text-amber-800 border-amber-200"
                                   }`}>
                                     <Hash className="w-3 h-3 text-indigo-500" />
                                     <span>
-                                      {isResent ? `Nuevo ID: ${item.orderId || orderIdsStr}` : (
-                                        getItemOrderIds(item).length > 0
-                                          ? `${getOrderIdTypeLabel(orderIdsStr, item?.socialNetworkId === "custom")}: ${orderIdsStr}`
-                                          : "Sin ID de proveedor"
-                                      )}
+                                      {orderIdsStr ? `ID: ${orderIdsStr}` : "Sin ID"}
                                     </span>
-                                    {isResent && item.previousOrderId && (
-                                      <span className="text-[10px] text-gray-500 font-sans ml-1">
-                                        (anterior: #{item.previousOrderId})
-                                      </span>
-                                    )}
                                     <span className="text-[10px] text-indigo-600 underline ml-1 font-sans font-bold">
                                       (cambiar)
                                     </span>
                                   </span>
+
+                                  {isResent && item.previousOrderId && item.previousOrderId !== orderIdsStr && (
+                                    <span className="inline-flex items-center gap-1 text-[10px] font-mono text-gray-400 bg-gray-50 border border-gray-200 px-1.5 py-0.5 rounded-md">
+                                      <span>Antiguo:</span>
+                                      <span className="line-through">#{item.previousOrderId}</span>
+                                    </span>
+                                  )}
 
                                   {getItemOrderIds(item).length > 0 && (
                                     <button
@@ -2575,50 +2503,44 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
           </div>
         )}
 
-        {/* Modal Rápido: Tocar Servicio para Cambiar ID y Reenviar Factura */}
+        {/* Modal Rápido Simplificado: Cambiar ID / Reenviar */}
         {quickEditServiceIndex !== null && receipt?.services?.[quickEditServiceIndex] && (
           <div 
             className="fixed inset-0 bg-black/60 backdrop-blur-xs z-60 flex items-center justify-center p-3 sm:p-4 animate-fade-in"
             onClick={() => setQuickEditServiceIndex(null)}
           >
             <div 
-              className="bg-white rounded-2xl shadow-2xl border border-gray-200 max-w-md w-full p-5 sm:p-6 space-y-4 relative"
+              className="bg-white rounded-2xl shadow-2xl border border-gray-200 max-w-sm w-full p-4 sm:p-5 space-y-3.5 relative"
               onClick={(e) => e.stopPropagation()}
             >
-              <div className="flex items-start justify-between pb-3 border-b border-gray-100">
-                <div className="flex items-center gap-2.5">
-                  <div className="w-9 h-9 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center font-bold text-base shadow-2xs">
-                    🔄
-                  </div>
-                  <div>
-                    <h3 className="text-sm font-bold text-gray-900">Cambiar ID y Reenviar Pedido</h3>
-                    <p className="text-[11px] text-gray-500">Actualiza el ID de este servicio específico</p>
-                  </div>
+              <div className="flex items-center justify-between pb-2.5 border-b border-gray-100">
+                <div className="flex items-center gap-2">
+                  <RotateCcw className="w-4 h-4 text-indigo-600" />
+                  <h3 className="text-sm font-bold text-gray-900">Cambiar ID / Reenviar</h3>
                 </div>
                 <button
                   type="button"
                   onClick={() => setQuickEditServiceIndex(null)}
-                  className="text-gray-400 hover:text-gray-600 p-1.5 rounded-lg hover:bg-gray-100 transition cursor-pointer"
+                  className="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100 transition cursor-pointer"
                 >
                   <X className="w-4 h-4" />
                 </button>
               </div>
 
-              {/* Servicio Info */}
-              <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs space-y-1.5">
-                <div className="font-bold text-slate-800 text-sm">
+              {/* Servicio & ID Actual */}
+              <div className="bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs flex items-center justify-between gap-2">
+                <span className="font-bold text-slate-800 truncate">
                   {receipt.services[quickEditServiceIndex].socialNetworkName} - {receipt.services[quickEditServiceIndex].serviceName}
-                </div>
-                <div className="flex items-center justify-between text-slate-600 text-[11px]">
-                  <span>Cantidad: <strong className="text-slate-800 font-mono">{Number(receipt.services[quickEditServiceIndex].quantity || 0).toLocaleString()}</strong></span>
-                  <span>ID Actual: <strong className="text-slate-800 font-mono">{getItemOrderIdDisplay(receipt.services[quickEditServiceIndex]) || "Sin ID"}</strong></span>
-                </div>
+                </span>
+                <span className="text-slate-500 shrink-0 font-mono text-[11px]">
+                  Actual: <strong className="text-slate-700">#{getItemOrderIdDisplay(receipt.services[quickEditServiceIndex]) || "Sin ID"}</strong>
+                </span>
               </div>
 
               {/* Nuevo ID Input */}
-              <div className="space-y-1.5">
+              <div className="space-y-1">
                 <label className="block text-xs font-bold text-gray-700">
-                  Nuevo ID de Orden del Proveedor *
+                  Nuevo ID (reemplazará al anterior) *
                 </label>
                 <div className="relative">
                   <Hash className="w-4 h-4 text-indigo-500 absolute left-3 top-1/2 -translate-y-1/2" />
@@ -2628,8 +2550,8 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                     required
                     value={quickNewOrderId}
                     onChange={(e) => setQuickNewOrderId(e.target.value)}
-                    placeholder="Ej: 1548293"
-                    className="w-full pl-9 pr-3 py-2.5 border-2 border-indigo-200 rounded-xl text-sm font-mono font-bold text-gray-900 placeholder-gray-400 focus:outline-hidden focus:border-indigo-500 transition shadow-2xs"
+                    placeholder="Pega el nuevo ID aquí..."
+                    className="w-full pl-9 pr-3 py-2 border-2 border-indigo-200 rounded-xl text-sm font-mono font-bold text-gray-900 placeholder-gray-400 focus:outline-hidden focus:border-indigo-500 transition"
                     onKeyDown={(e) => {
                       if (e.key === "Enter") {
                         e.preventDefault();
@@ -2638,83 +2560,65 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                     }}
                   />
                 </div>
-                <p className="text-[10px] text-gray-500">
-                  Ingresa el número de orden generado por el nuevo proveedor al reordenar.
-                </p>
               </div>
 
-              {/* Estado del pedido */}
-              <div className="space-y-1.5">
-                <label className="block text-xs font-bold text-gray-700">
-                  Estado del Pedido en la Factura
-                </label>
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setQuickReactivateStatus("en_proceso")}
-                    className={`py-2 px-3 rounded-xl border text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer ${
-                      quickReactivateStatus === "en_proceso"
-                        ? "bg-amber-500 text-white border-amber-600 shadow-2xs"
-                        : "bg-gray-50 text-gray-700 border-gray-200 hover:bg-gray-100"
-                    }`}
-                  >
-                    <span>⏳ En proceso</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setQuickReactivateStatus("completado")}
-                    className={`py-2 px-3 rounded-xl border text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer ${
-                      quickReactivateStatus === "completado"
-                        ? "bg-emerald-600 text-white border-emerald-700 shadow-2xs"
-                        : "bg-gray-50 text-gray-700 border-gray-200 hover:bg-gray-100"
-                    }`}
-                  >
-                    <span>✅ Completado</span>
-                  </button>
-                </div>
+              {/* Estado */}
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setQuickReactivateStatus("en_proceso")}
+                  className={`py-2 px-3 rounded-xl border text-xs font-bold transition cursor-pointer ${
+                    quickReactivateStatus === "en_proceso"
+                      ? "bg-amber-500 text-white border-amber-600"
+                      : "bg-gray-50 text-gray-700 border-gray-200 hover:bg-gray-100"
+                  }`}
+                >
+                  ⏳ En proceso
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setQuickReactivateStatus("completado")}
+                  className={`py-2 px-3 rounded-xl border text-xs font-bold transition cursor-pointer ${
+                    quickReactivateStatus === "completado"
+                      ? "bg-emerald-600 text-white border-emerald-700"
+                      : "bg-gray-50 text-gray-700 border-gray-200 hover:bg-gray-100"
+                  }`}
+                >
+                  ✅ Completado
+                </button>
               </div>
 
-              {/* Aclaratoria de reenvío en la factura */}
-              <div className="bg-amber-50/80 border border-amber-200 rounded-xl p-3 space-y-2">
-                <label className="flex items-start gap-2.5 cursor-pointer">
+              {/* Checkbox simple */}
+              <div className="bg-amber-50/70 border border-amber-200 rounded-xl p-2.5 space-y-2">
+                <label className="flex items-center gap-2 cursor-pointer">
                   <input
                     type="checkbox"
                     checked={quickIsResent}
                     onChange={(e) => setQuickIsResent(e.target.checked)}
-                    className="mt-0.5 rounded text-amber-600 focus:ring-amber-500 w-4 h-4 cursor-pointer"
+                    className="rounded text-amber-600 focus:ring-amber-500 w-4 h-4 cursor-pointer"
                   />
-                  <div>
-                    <div className="text-xs font-bold text-amber-950">
-                      Aclarar en la factura que este servicio fue reenviado
-                    </div>
-                    <div className="text-[10px] text-amber-800 leading-snug">
-                      Muestra la etiqueta de reenvío en este servicio y aclara que los demás servicios de la factura conservan su orden original.
-                    </div>
-                  </div>
+                  <span className="text-xs font-bold text-amber-950">
+                    Marcar como reenviado
+                  </span>
                 </label>
 
                 {quickIsResent && (
-                  <div className="pt-2 border-t border-amber-200/70">
-                    <label className="block text-[10px] font-bold text-amber-900 uppercase mb-1">
-                      Nota o motivo visible en el comprobante:
-                    </label>
-                    <input
-                      type="text"
-                      value={quickResendNote}
-                      onChange={(e) => setQuickResendNote(e.target.value)}
-                      placeholder="Ej: Reposición por cancelación de proveedor"
-                      className="w-full px-2.5 py-1.5 bg-white border border-amber-300 rounded-lg text-xs text-gray-800 placeholder-gray-400 focus:outline-hidden focus:ring-1 focus:ring-amber-500"
-                    />
-                  </div>
+                  <input
+                    type="text"
+                    value={quickResendNote}
+                    onChange={(e) => setQuickResendNote(e.target.value)}
+                    placeholder="Nota opcional..."
+                    className="w-full px-2.5 py-1.5 bg-white border border-amber-300 rounded-lg text-xs text-gray-800 placeholder-gray-400 focus:outline-hidden"
+                  />
                 )}
               </div>
 
               {/* Acciones */}
-              <div className="flex items-center gap-2 pt-2">
+              <div className="flex items-center gap-2 pt-1">
                 <button
                   type="button"
                   onClick={() => setQuickEditServiceIndex(null)}
-                  className="flex-1 py-2.5 px-3 border border-gray-200 rounded-xl text-xs font-bold text-gray-600 hover:bg-gray-50 transition cursor-pointer"
+                  className="flex-1 py-2 px-3 border border-gray-200 rounded-xl text-xs font-bold text-gray-600 hover:bg-gray-50 transition cursor-pointer"
                 >
                   Cancelar
                 </button>
@@ -2722,19 +2626,10 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                   type="button"
                   disabled={isSavingQuickId || !quickNewOrderId.trim()}
                   onClick={handleSaveQuickOrderId}
-                  className="flex-1 py-2.5 px-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition cursor-pointer shadow-md disabled:opacity-50 flex items-center justify-center gap-1.5"
+                  className="flex-1 py-2 px-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition cursor-pointer shadow-xs disabled:opacity-50 flex items-center justify-center gap-1.5"
                 >
-                  {isSavingQuickId ? (
-                    <>
-                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                      <span>Guardando...</span>
-                    </>
-                  ) : (
-                    <>
-                      <Save className="w-3.5 h-3.5" />
-                      <span>Guardar y Entregar Factura</span>
-                    </>
-                  )}
+                  <Save className="w-3.5 h-3.5" />
+                  <span>{isSavingQuickId ? "Guardando..." : "Guardar"}</span>
                 </button>
               </div>
             </div>

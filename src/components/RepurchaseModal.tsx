@@ -29,7 +29,7 @@ interface RepurchaseModalProps {
 }
 
 export const RepurchaseModal: React.FC<RepurchaseModalProps> = ({ initialClient, onClose }) => {
-  const { clients, receipts, supplierWarranties, businessConfig, isDarkMode } = useApp();
+  const { clients, receipts, getReceiptPrivateData, supplierWarranties, businessConfig, isDarkMode } = useApp();
 
   const businessName = businessConfig?.businessName || "ImpulsaNet";
 
@@ -45,8 +45,18 @@ export const RepurchaseModal: React.FC<RepurchaseModalProps> = ({ initialClient,
       );
 
       const lastReceipt = sortedReceipts[0] || null;
+      const lastPrivateDoc = lastReceipt ? getReceiptPrivateData(lastReceipt.id) : undefined;
       const lastReceiptServices: ReceiptItem[] = lastReceipt && lastReceipt.services && lastReceipt.services.length > 0
-        ? lastReceipt.services
+        ? lastReceipt.services.map((srv, idx) => {
+            const ps = lastPrivateDoc?.servicesPrivate?.find((p) => p.id === srv.id) || lastPrivateDoc?.servicesPrivate?.[idx];
+            if (!ps) return srv;
+            return {
+              ...srv,
+              providerCostAtPurchase: ps.providerCostAtPurchase ?? srv.providerCostAtPurchase ?? 0,
+              providerCostCOP: ps.providerCostCOP ?? srv.providerCostCOP ?? null,
+              providerCostUSD: ps.providerCostUSD ?? srv.providerCostUSD ?? null,
+            };
+          })
         : [];
 
       let lastItem: ReceiptItem | null = null;
@@ -55,6 +65,8 @@ export const RepurchaseModal: React.FC<RepurchaseModalProps> = ({ initialClient,
       let lastQuantity = 1000;
       let lastCharged = 15000;
       let lastCost = 0;
+
+      const resolvedTotalProviderCost = lastPrivateDoc?.totalProviderCost ?? lastReceipt?.totalProviderCost ?? 0;
 
       if (lastReceiptServices.length > 0) {
         lastItem = lastReceiptServices[0];
@@ -65,10 +77,10 @@ export const RepurchaseModal: React.FC<RepurchaseModalProps> = ({ initialClient,
         lastCost =
           lastItem.providerCostCOP ||
           lastItem.providerCostAtPurchase ||
-          (lastReceipt?.totalProviderCost ? Math.round(lastReceipt.totalProviderCost / lastReceiptServices.length) : Math.round(lastCharged * 0.4));
+          (resolvedTotalProviderCost ? Math.round(resolvedTotalProviderCost / lastReceiptServices.length) : Math.round(lastCharged * 0.4));
       } else if (lastReceipt) {
         lastCharged = lastReceipt.totalCharged || 15000;
-        lastCost = lastReceipt.totalProviderCost || Math.round(lastCharged * 0.4);
+        lastCost = resolvedTotalProviderCost || Math.round(lastCharged * 0.4);
       }
 
       const totalSpent = clientReceipts.reduce((sum, r) => sum + (r.totalCharged || 0), 0);

@@ -99,6 +99,7 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
   const {
     supplierWarranties,
     receipts,
+    getReceiptPrivateData,
     clients,
     businessConfig,
     addSupplierWarranty,
@@ -130,14 +131,22 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
         const c = clientMap.get(record.clientId)!;
         return { client: c, clientCode: getClientCode(c) };
       }
-      if (record.receiptId && receiptToClient.has(record.receiptId)) {
-        const c = receiptToClient.get(record.receiptId)!;
-        return { client: c, clientCode: getClientCode(c) };
+      if (record.receiptId) {
+        if (receiptToClient.has(record.receiptId)) {
+          const c = receiptToClient.get(record.receiptId)!;
+          return { client: c, clientCode: getClientCode(c) };
+        }
+        const priv = getReceiptPrivateData(record.receiptId);
+        if (priv?.clientId && clientMap.has(priv.clientId)) {
+          const c = clientMap.get(priv.clientId)!;
+          return { client: c, clientCode: getClientCode(c) };
+        }
       }
       if (record.receiptConsecutive) {
         const matchingReceipt = receipts.find((r) => r.consecutive === record.receiptConsecutive);
         if (matchingReceipt) {
-          const c = receiptToClient.get(matchingReceipt.id) || (matchingReceipt.clientId ? clientMap.get(matchingReceipt.clientId) : undefined);
+          const privClientId = getReceiptPrivateData(matchingReceipt.id)?.clientId || matchingReceipt.clientId;
+          const c = receiptToClient.get(matchingReceipt.id) || (privClientId ? clientMap.get(privClientId) : undefined);
           if (c) return { client: c, clientCode: getClientCode(c) };
         }
       }
@@ -153,7 +162,7 @@ export const SupplierWarrantyView: React.FC<SupplierWarrantyViewProps> = ({ onSe
       }
       return {};
     },
-    [clientMap, receiptToClient, receipts, clients]
+    [clientMap, receiptToClient, receipts, clients, getReceiptPrivateData]
   );
 
   // Navigation & View state

@@ -28,7 +28,7 @@ interface HistoryViewProps {
 }
 
 export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => {
-  const { receipts, deleteReceipt, updateReceipt, markAllInProcessAsCompleted, syncAllInProcessOrdersWithProvider, clients, isDarkMode, businessConfig } = useApp();
+  const { receipts, getReceiptPrivateData, receiptsMigrationStatus, runReceiptsPrivateMigration, deleteReceipt, updateReceipt, markAllInProcessAsCompleted, syncAllInProcessOrdersWithProvider, clients, isDarkMode, businessConfig } = useApp();
   const formatCOP = (val: number) => "$" + Math.round(val).toLocaleString("es-CO");
 
   const [searchText, setSearchText] = useState("");
@@ -354,18 +354,22 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => 
     }
   }, [receipts.length, hasAutoSyncedOnMount]);
 
-  // Total charged, cost, and profit of filtered receipts
+  // Total charged, cost, and profit of filtered receipts (reading private fields from receipts_private)
   const filteredMetrics = useMemo(() => {
     let totalCharged = 0;
     let totalCost = 0;
     let totalProfit = 0;
     filteredReceipts.forEach((r) => {
-      totalCharged += r.totalCharged || 0;
-      totalCost += r.totalProviderCost || 0;
-      totalProfit += r.totalProfit || 0;
+      const priv = getReceiptPrivateData(r.id);
+      const charged = r.totalCharged || 0;
+      const cost = priv?.totalProviderCost ?? r.totalProviderCost ?? 0;
+      const profit = priv?.totalProfit ?? r.totalProfit ?? (charged - cost);
+      totalCharged += charged;
+      totalCost += cost;
+      totalProfit += profit;
     });
     return { totalCharged, totalCost, totalProfit };
-  }, [filteredReceipts]);
+  }, [filteredReceipts, getReceiptPrivateData]);
 
   // Format Date for table
   const formatDateSimple = (isoString?: string | null) => {
@@ -467,6 +471,32 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => 
           </div>
         </div>
       </div>
+
+      {(receiptsMigrationStatus.running || receiptsMigrationStatus.pendingCount > 0) && (
+        <div className={`px-4 py-3 rounded-xl text-xs font-semibold flex flex-wrap items-center justify-between gap-3 shadow-xs border ${
+          isDarkMode
+            ? "bg-indigo-950/60 border-indigo-800 text-indigo-200"
+            : "bg-indigo-50 border-indigo-200 text-indigo-900"
+        }`}>
+          <div className="flex items-center gap-2">
+            <ShieldCheck className={`w-4 h-4 text-indigo-500 shrink-0 ${receiptsMigrationStatus.running ? "animate-pulse" : ""}`} />
+            <span>
+              {receiptsMigrationStatus.running
+                ? `Migrando notas y costos internos a receipts_private (${receiptsMigrationStatus.processed} / ${receiptsMigrationStatus.total})...`
+                : `Hay ${receiptsMigrationStatus.pendingCount} comprobante(s) con datos internos pendientes de mover a receipts_private.`}
+            </span>
+          </div>
+          {!receiptsMigrationStatus.running && receiptsMigrationStatus.pendingCount > 0 && (
+            <button
+              type="button"
+              onClick={() => runReceiptsPrivateMigration()}
+              className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-[11px] cursor-pointer transition"
+            >
+              Ejecutar migración a receipts_private
+            </button>
+          )}
+        </div>
+      )}
 
       {bulkSuccessMessage && (
         <div className={`px-4 py-3 rounded-xl text-xs font-semibold flex items-center gap-2 shadow-xs border ${

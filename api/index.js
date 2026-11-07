@@ -6,14 +6,285 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DEFAULT_URL = 'https://mazsocialmarket.com/api/v2';
-const FIRESTORE_CONFIG_URL =
-  'https://firestore.googleapis.com/v1/projects/gen-lang-client-0776513868/databases/ai-studio-5149ce93-aa35-4b1d-9194-63cd1e9b621e/documents/config/business';
+const AUTHORIZED_ADMIN_EMAIL = 'estebanruiz.12vrgassergio@gmail.com';
 
+function loadFirebaseAppletConfig() {
+  try {
+    const configPath = path.resolve(__dirname, '..', 'firebase-applet-config.json');
+    if (fs.existsSync(configPath)) {
+      const raw = fs.readFileSync(configPath, 'utf8');
+      const parsed = JSON.parse(raw);
+      if (parsed && parsed.apiKey && parsed.projectId) {
+        return parsed;
+      }
+    }
+  } catch {
+    // Fallback to embedded public config values
+  }
+  return {
+    projectId: 'gen-lang-client-0776513868',
+    apiKey: 'AIzaSyDYFU81fKMGKI6seMQI13GvKeeNwz_k8HU',
+    firestoreDatabaseId: 'ai-studio-5149ce93-aa35-4b1d-9194-63cd1e9b621e',
+  };
+}
+
+const FIREBASE_CONFIG = loadFirebaseAppletConfig();
+const FIREBASE_WEB_API_KEY = FIREBASE_CONFIG.apiKey;
+const FIRESTORE_PROJECT_ID = FIREBASE_CONFIG.projectId;
+const FIRESTORE_DB_ID = FIREBASE_CONFIG.firestoreDatabaseId || '(default)';
+
+const FIRESTORE_PROVIDER_CONFIG_URL = `https://firestore.googleapis.com/v1/projects/${FIRESTORE_PROJECT_ID}/databases/${FIRESTORE_DB_ID}/documents/config/provider`;
+const IDENTITY_TOOLKIT_LOOKUP_URL = `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${FIREBASE_WEB_API_KEY}`;
+
+// Short-lived in-memory cache for provider credentials (60 seconds TTL)
+const CREDENTIALS_CACHE_TTL_MS = 60 * 1000;
 let cachedFirestoreCreds = {
   apiUrl: '',
   apiKey: '',
+  rapidApiKey: '',
   expiresAt: 0,
 };
+
+// Short-lived in-memory cache for verified admin ID tokens (60 seconds TTL)
+const verifiedAdminTokensCache = new Map();
+const TOKEN_CACHE_TTL_MS = 60 * 1000;
+
+// Nota: En entornos serverless (como Vercel), este límite en memoria por instancia es aproximado.
+const PUBLIC_TRACKING_RATE_LIMIT_WINDOW_MS = 60 * 1000;
+const PUBLIC_TRACKING_MAX_REQUESTS_PER_MINUTE = 30;
+const publicTrackingRateLimitMap = new Map();
+
+function checkPublicTrackingRateLimit(req) {
+  const forwarded = req?.headers?.['x-forwarded-for'];
+  const rawForwarded = Array.isArray(forwarded) ? forwarded[0] : typeof forwarded === 'string' ? forwarded : '';
+  const clientIp =
+    rawForwarded.split(',')[0].trim() ||
+    req?.socket?.remoteAddress ||
+    req?.connection?.remoteAddress ||
+    'unknown';
+
+  const now = Date.now();
+  let entry = publicTrackingRateLimitMap.get(clientIp);
+
+  if (!entry || now >= entry.resetAt) {
+    entry = {
+      count: 1,
+      resetAt: now + PUBLIC_TRACKING_RATE_LIMIT_WINDOW_MS,
+    };
+    publicTrackingRateLimitMap.set(clientIp, entry);
+  } else {
+    entry.count += 1;
+  }
+
+  // Cleanup expired entries when map grows
+  if (publicTrackingRateLimitMap.size > 500) {
+    for (const [ip, data] of publicTrackingRateLimitMap.entries()) {
+      if (now >= data.resetAt) {
+        publicTrackingRateLimitMap.delete(ip);
+      }
+    }
+  }
+
+  if (entry.count > PUBLIC_TRACKING_MAX_REQUESTS_PER_MINUTE) {
+    return {
+      allowed: false,
+      retryAfterSeconds: Math.max(1, Math.ceil((entry.resetAt - now) / 1000)),
+    };
+  }
+
+  return { allowed: true, retryAfterSeconds: 0 };
+}
+
+/**
+ * Resolves provider credentials strictly for the public tracking endpoint:
+ * uses environment variables PROVIDER_API_URL and PROVIDER_API_KEY first,
+ * with the in-memory cache (cachedFirestoreCreds) as backup.
+ * NEVER reads config/provider from Firestore without an admin token.
+ */
+function resolvePublicTrackingCredentials() {
+  const envUrl = process.env.PROVIDER_API_URL?.trim() || '';
+  const envKey = process.env.PROVIDER_API_KEY?.trim() || '';
+  if (envKey) {
+    return {
+      apiUrl: envUrl || cachedFirestoreCreds.apiUrl || DEFAULT_URL,
+      apiKey: envKey,
+    };
+  }
+
+  if (cachedFirestoreCreds.apiKey) {
+    return {
+      apiUrl: cachedFirestoreCreds.apiUrl || envUrl || DEFAULT_URL,
+      apiKey: cachedFirestoreCreds.apiKey,
+    };
+  }
+
+  return {
+    apiUrl: envUrl || DEFAULT_URL,
+    apiKey: null,
+  };
+}
+
+/**
+ * Verifies the Firebase ID token from Authorization: Bearer <token>
+ * using Google Identity Toolkit accounts:lookup and checks that the user
+ * is the verified administrator.
+ */
+async function verifyAdminToken(req) {
+  const authHeader = typeof req?.headers?.authorization === 'string' ? req.headers.authorization.trim() : '';
+  if (!authHeader || !authHeader.toLowerCase().startsWith('bearer ')) {
+    return {
+      ok: false,
+      status: 401,
+      error: 'No autenticado: se requiere cabecera Authorization: Bearer <ID token>.',
+    };
+  }
+
+  const idToken = authHeader.slice(7).trim();
+  if (!idToken) {
+    return {
+      ok: false,
+      status: 401,
+      error: 'No autenticado: el ID token está vacío.',
+    };
+  }
+
+  const now = Date.now();
+  const cached = verifiedAdminTokensCache.get(idToken);
+  if (cached && cached.expiresAt > now) {
+    return {
+      ok: true,
+      idToken,
+      email: cached.email,
+      uid: cached.uid,
+    };
+  }
+
+  try {
+    const res = await fetch(IDENTITY_TOOLKIT_LOOKUP_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ idToken }),
+      signal: AbortSignal.timeout(8000),
+    });
+
+    if (!res.ok) {
+      return {
+        ok: false,
+        status: 401,
+        error: 'Token de Firebase inválido o expirado.',
+      };
+    }
+
+    const data = await res.json();
+    const account = Array.isArray(data?.users) ? data.users[0] : null;
+    if (!account) {
+      return {
+        ok: false,
+        status: 401,
+        error: 'No se encontró la cuenta asociada al token proporcionado.',
+      };
+    }
+
+    const email = String(account.email || '').toLowerCase().trim();
+    const emailVerified = Boolean(account.emailVerified);
+
+    if (email !== AUTHORIZED_ADMIN_EMAIL.toLowerCase() || !emailVerified) {
+      return {
+        ok: false,
+        status: 403,
+        error: 'Acceso denegado: se requiere la cuenta de administrador verificada.',
+      };
+    }
+
+    verifiedAdminTokensCache.set(idToken, {
+      email,
+      uid: account.localId,
+      expiresAt: now + TOKEN_CACHE_TTL_MS,
+    });
+
+    // Keep cache bounded
+    if (verifiedAdminTokensCache.size > 50) {
+      const oldestKey = verifiedAdminTokensCache.keys().next().value;
+      if (oldestKey) verifiedAdminTokensCache.delete(oldestKey);
+    }
+
+    return {
+      ok: true,
+      idToken,
+      email,
+      uid: account.localId,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      status: 401,
+      error: `Error al verificar el token de autenticación: ${err?.message || 'Error de red'}`,
+    };
+  }
+}
+
+/**
+ * Reads provider credentials from private `config/provider` in Firestore using the admin's ID token
+ * (so Firestore security rules apply), with a short in-memory cache.
+ * Falls back to PROVIDER_API_URL and PROVIDER_API_KEY environment variables if available.
+ */
+async function resolveProviderCredentials(adminIdToken) {
+  const now = Date.now();
+  if (cachedFirestoreCreds.apiKey && cachedFirestoreCreds.expiresAt > now) {
+    return {
+      apiUrl: cachedFirestoreCreds.apiUrl || DEFAULT_URL,
+      apiKey: cachedFirestoreCreds.apiKey,
+      rapidApiKey: cachedFirestoreCreds.rapidApiKey || process.env.RAPIDAPI_KEY?.trim() || '',
+    };
+  }
+
+  if (adminIdToken) {
+    try {
+      const res = await fetch(FIRESTORE_PROVIDER_CONFIG_URL, {
+        headers: {
+          Authorization: `Bearer ${adminIdToken}`,
+        },
+        signal: AbortSignal.timeout(6000),
+      });
+
+      if (res.ok) {
+        const doc = await res.json();
+        const fields = doc?.fields || {};
+        const urlVal = fields?.providerApiUrl?.stringValue?.trim() || DEFAULT_URL;
+        const keyVal = fields?.providerApiKey?.stringValue?.trim() || '';
+        const rapidVal = fields?.rapidApiKey?.stringValue?.trim() || '';
+
+        if (keyVal) {
+          cachedFirestoreCreds = {
+            apiUrl: urlVal,
+            apiKey: keyVal,
+            rapidApiKey: rapidVal,
+            expiresAt: now + CREDENTIALS_CACHE_TTL_MS,
+          };
+          return {
+            apiUrl: urlVal,
+            apiKey: keyVal,
+            rapidApiKey: rapidVal || process.env.RAPIDAPI_KEY?.trim() || '',
+          };
+        }
+      }
+    } catch {
+      // Fall back to environment variables if Firestore REST is unreachable
+    }
+  }
+
+  const envUrl = process.env.PROVIDER_API_URL?.trim() || DEFAULT_URL;
+  const envKey = process.env.PROVIDER_API_KEY?.trim() || null;
+  const envRapid = process.env.RAPIDAPI_KEY?.trim() || '';
+
+  return {
+    apiUrl: envUrl,
+    apiKey: envKey,
+    rapidApiKey: envRapid,
+  };
+}
 
 function mapSmmStatusToAppStatus(rawStatus) {
   if (!rawStatus) return 'en_proceso';
@@ -57,7 +328,7 @@ function formatProviderStatusLabel(rawStatus) {
   }
   if (s.includes('complet') || s === 'completed' || s === 'completado') return 'Completado';
   if (s.includes('cancel') || s === 'canceled' || s === 'cancelled' || s === 'cancelado') return 'Cancelado';
-  return String(rawStatus).charAt(0).toUpperCase() + String(rawStatus).slice(1);
+  return 'En curso';
 }
 
 const instagramProfileCache = new Map();
@@ -84,7 +355,7 @@ function extractInstagramUsername(input) {
   return null;
 }
 
-async function fetchLiveInstagramProfile(rawUsername, customRapidApiKey) {
+async function fetchLiveInstagramProfile(rawUsername, rapidApiKeyFromConfig) {
   const username = extractInstagramUsername(rawUsername);
   if (!username) {
     return {
@@ -103,7 +374,9 @@ async function fetchLiveInstagramProfile(rawUsername, customRapidApiKey) {
     return { ...cached.data, source: 'cache' };
   }
 
-  const rapidApiKey = (customRapidApiKey && String(customRapidApiKey).trim()) || (process.env.RAPIDAPI_KEY && process.env.RAPIDAPI_KEY.trim());
+  const rapidApiKey =
+    (rapidApiKeyFromConfig && String(rapidApiKeyFromConfig).trim()) ||
+    (process.env.RAPIDAPI_KEY && process.env.RAPIDAPI_KEY.trim());
 
   if (rapidApiKey) {
     try {
@@ -184,100 +457,8 @@ async function fetchLiveInstagramProfile(rawUsername, customRapidApiKey) {
     username,
     followersCount: null,
     source: 'not_found',
-    error: rapidApiKey
-      ? 'No se pudo consultar el perfil en este momento.'
-      : 'Puedes configurar tu clave de RapidAPI en Configuración > API para consultas ilimitadas con proxies.',
+    error: 'No se pudo consultar el perfil en este momento.',
     updatedAt: new Date().toISOString(),
-  };
-}
-
-function persistProviderCredentialsToEnv(apiUrl, apiKey) {
-  process.env.PROVIDER_API_URL = apiUrl;
-  process.env.PROVIDER_API_KEY = apiKey;
-  cachedFirestoreCreds = {
-    apiUrl,
-    apiKey,
-    expiresAt: Date.now() + 600000,
-  };
-  try {
-    const envPath = path.resolve(__dirname, '..', '.env');
-    let envContent = '';
-    if (fs.existsSync(envPath)) {
-      envContent = fs.readFileSync(envPath, 'utf8');
-    }
-    const lines = envContent
-      .split('\n')
-      .filter((l) => !l.startsWith('PROVIDER_API_URL=') && !l.startsWith('PROVIDER_API_KEY='));
-    lines.push(`PROVIDER_API_URL="${apiUrl}"`);
-    lines.push(`PROVIDER_API_KEY="${apiKey}"`);
-    fs.writeFileSync(envPath, lines.filter(Boolean).join('\n') + '\n', 'utf8');
-  } catch {
-    // Read-only filesystem in Vercel serverless environment
-  }
-}
-
-async function fetchCredentialsFromFirestore() {
-  const now = Date.now();
-  if (cachedFirestoreCreds.apiKey && cachedFirestoreCreds.expiresAt > now) {
-    return cachedFirestoreCreds;
-  }
-  try {
-    const res = await fetch(FIRESTORE_CONFIG_URL, {
-      signal: AbortSignal.timeout(5000),
-    });
-    if (res.ok) {
-      const doc = await res.json();
-      const fields = doc?.fields || {};
-      const urlVal = fields?.providerApiUrl?.stringValue?.trim() || DEFAULT_URL;
-      const keyVal = fields?.providerApiKey?.stringValue?.trim() || '';
-      if (keyVal) {
-        cachedFirestoreCreds = {
-          apiUrl: urlVal,
-          apiKey: keyVal,
-          expiresAt: now + 300000,
-        };
-        process.env.PROVIDER_API_URL = urlVal;
-        process.env.PROVIDER_API_KEY = keyVal;
-        return cachedFirestoreCreds;
-      }
-    }
-  } catch {
-    // Ignore network error
-  }
-  return { apiUrl: DEFAULT_URL, apiKey: '' };
-}
-
-async function resolveProviderCredentials(req, bodyObj = {}, persistIfProvided = true) {
-  const headerUrl = typeof req?.headers?.['x-provider-api-url'] === 'string' ? req.headers['x-provider-api-url'].trim() : '';
-  const headerKey = typeof req?.headers?.['x-provider-api-key'] === 'string' ? req.headers['x-provider-api-key'].trim() : '';
-  const bodyUrl = typeof bodyObj?.providerUrl === 'string' ? bodyObj.providerUrl.trim() : '';
-  const bodyKey = typeof bodyObj?.apiKey === 'string' ? bodyObj.apiKey.trim() : '';
-
-  const providedUrl = bodyUrl || headerUrl;
-  const providedKey = bodyKey || headerKey;
-
-  if (persistIfProvided && headerKey) {
-    const targetUrl = headerUrl || process.env.PROVIDER_API_URL?.trim() || DEFAULT_URL;
-    if (process.env.PROVIDER_API_KEY !== headerKey || process.env.PROVIDER_API_URL !== targetUrl) {
-      persistProviderCredentialsToEnv(targetUrl, headerKey);
-    }
-  }
-
-  let apiUrl = providedUrl || process.env.PROVIDER_API_URL?.trim() || '';
-  let apiKey = providedKey || process.env.PROVIDER_API_KEY?.trim() || '';
-
-  // Automatic Firestore fallback for stateless serverless instances (Vercel cold starts)
-  if (!apiKey) {
-    const fsCreds = await fetchCredentialsFromFirestore();
-    if (fsCreds.apiKey) {
-      apiKey = fsCreds.apiKey;
-      if (!apiUrl) apiUrl = fsCreds.apiUrl;
-    }
-  }
-
-  return {
-    apiUrl: apiUrl || DEFAULT_URL,
-    apiKey: apiKey || null,
   };
 }
 
@@ -315,7 +496,7 @@ async function fetchOrdersFromProvider(apiUrl, apiKey, uniqueIds) {
       return {
         success: false,
         results: [],
-        error: `El proveedor devolvió una respuesta no válida (${resp.status}): ${rawText.slice(0, 150)}`,
+        error: `El proveedor devolvió una respuesta no válida (${resp.status}).`,
       };
     }
 
@@ -421,59 +602,6 @@ function findMatchingItemForOrderId(items, targetId) {
   );
 }
 
-function isItemForInstagram(item) {
-  if (!item) return false;
-  const snId = String(item.socialNetworkId || '').toLowerCase();
-  const snName = String(item.socialNetworkName || '').toLowerCase();
-  const srvName = String(item.serviceName || '').toLowerCase();
-  const desc = String(item.description || '').toLowerCase();
-  const target = String(item.targetAccount || '').toLowerCase();
-
-  if (
-    target.includes('facebook.com') ||
-    target.includes('fb.com') ||
-    target.includes('fb.watch') ||
-    snId.includes('facebook') ||
-    snName.includes('facebook') ||
-    srvName.includes('facebook') ||
-    desc.includes('facebook')
-  ) {
-    return false;
-  }
-  if (
-    target.includes('tiktok.com') ||
-    snId.includes('tiktok') ||
-    snName.includes('tiktok') ||
-    srvName.includes('tiktok') ||
-    desc.includes('tiktok')
-  ) {
-    return false;
-  }
-  if (
-    target.includes('youtube.com') ||
-    target.includes('youtu.be') ||
-    snId.includes('youtube') ||
-    snName.includes('youtube') ||
-    srvName.includes('youtube') ||
-    desc.includes('youtube')
-  ) {
-    return false;
-  }
-
-  if (
-    target.includes('instagram.com') ||
-    snId.includes('instagram') ||
-    snName.includes('instagram') ||
-    srvName.includes('instagram') ||
-    desc.includes('instagram') ||
-    desc.includes('insta')
-  ) {
-    return true;
-  }
-
-  return false;
-}
-
 async function parseRequestBody(req) {
   if (req.body !== undefined && req.body !== null) {
     if (typeof req.body === 'object' && !Buffer.isBuffer(req.body)) {
@@ -537,13 +665,39 @@ function extractRoutePath(req, urlObj) {
 }
 
 /**
- * Universal Serverless & Node HTTP API Handler (Zero external dependencies)
+ * Configures strict CORS allowing only APP_URL (and localhost in development),
+ * without x-provider-* headers.
+ */
+function configureCors(req, res) {
+  const requestOrigin = typeof req?.headers?.origin === 'string' ? req.headers.origin.trim().replace(/\/+$/, '') : '';
+  const configuredAppUrl = typeof process.env.APP_URL === 'string' ? process.env.APP_URL.trim().replace(/\/+$/, '') : '';
+  const isDev = process.env.NODE_ENV !== 'production';
+
+  const allowedOrigins = new Set();
+  if (configuredAppUrl) {
+    allowedOrigins.add(configuredAppUrl);
+  }
+
+  const isLocalhostOrigin = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(requestOrigin);
+
+  if (requestOrigin && (allowedOrigins.has(requestOrigin) || (isDev && isLocalhostOrigin))) {
+    res.setHeader('Access-Control-Allow-Origin', requestOrigin);
+    res.setHeader('Vary', 'Origin');
+  } else if (configuredAppUrl) {
+    res.setHeader('Access-Control-Allow-Origin', configuredAppUrl);
+    res.setHeader('Vary', 'Origin');
+  }
+
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+}
+
+/**
+ * Universal Serverless & Node HTTP API Handler
  */
 export default async function handler(req, res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-provider-api-url, x-provider-api-key');
-  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  configureCors(req, res);
 
   if (req.method === 'OPTIONS') {
     res.statusCode = 204;
@@ -556,22 +710,178 @@ export default async function handler(req, res) {
   const body = await parseRequestBody(req);
 
   try {
-    // 0. Health Check
+    // Public Endpoint: Customer Tracking Status (returns strictly minimal fields, no credentials or internal data)
+    if (route === '/tracking/customer-status') {
+      const rateLimit = checkPublicTrackingRateLimit(req);
+      if (!rateLimit.allowed) {
+        res.setHeader('Retry-After', String(rateLimit.retryAfterSeconds));
+        return sendJson(res, 429, {
+          success: false,
+          error: 'Has realizado demasiadas consultas en poco tiempo. Por favor espera un minuto antes de volver a intentar.',
+        });
+      }
+
+      const { orderIds, items } = body || {};
+
+      const targetIds = [];
+      if (Array.isArray(orderIds)) {
+        orderIds.forEach((id) => {
+          if (typeof id === 'string' || typeof id === 'number') {
+            const cleanId = String(id).replace(/^#/, '').trim();
+            // Validate strictly digits only and max 15 characters; discard others
+            if (/^\d{1,15}$/.test(cleanId)) {
+              targetIds.push(cleanId);
+            }
+          }
+        });
+      }
+      const uniqueIds = Array.from(new Set(targetIds)).slice(0, 10);
+
+      if (uniqueIds.length === 0) {
+        return sendJson(res, 200, { success: true, tracking: [] });
+      }
+
+      const buildUnknownOrderTracking = (id) => {
+        const itemInfo = findMatchingItemForOrderId(items, id);
+        const start =
+          itemInfo?.startCount !== undefined && itemInfo?.startCount !== null
+            ? Number(itemInfo.startCount)
+            : null;
+        return {
+          orderId: id,
+          found: false,
+          status: 'Consultando',
+          mappedStatus: 'desconocido',
+          progressPercent: null,
+          delivered: null,
+          remains: null,
+          startCount: start,
+          estimatedDelivery: 'Estamos consultando el estado de tu pedido. Vuelve a intentar en unos minutos.',
+        };
+      };
+
+      const { apiUrl, apiKey } = resolvePublicTrackingCredentials();
+
+      if (!apiUrl || !apiKey) {
+        return sendJson(res, 200, {
+          success: true,
+          tracking: uniqueIds.map((id) => buildUnknownOrderTracking(id)),
+        });
+      }
+
+      let providerRes = null;
+      try {
+        providerRes = await fetchOrdersFromProvider(apiUrl, apiKey, uniqueIds);
+      } catch {
+        providerRes = { success: false, results: [] };
+      }
+
+      if (!providerRes || !providerRes.success || !Array.isArray(providerRes.results)) {
+        return sendJson(res, 200, {
+          success: true,
+          tracking: uniqueIds.map((id) => buildUnknownOrderTracking(id)),
+        });
+      }
+
+      const orderMap = new Map();
+      providerRes.results.forEach((r) => orderMap.set(String(r.orderId), r));
+
+      const trackingList = uniqueIds.map((id) => {
+        const orderInfo = orderMap.get(id);
+        if (!orderInfo || !orderInfo.found) {
+          return buildUnknownOrderTracking(id);
+        }
+
+        const raw = orderInfo.rawStatus;
+        const mapped = orderInfo.mappedStatus || mapSmmStatusToAppStatus(raw);
+        const itemInfo = findMatchingItemForOrderId(items, id);
+        const qty = itemInfo?.quantity ? Number(itemInfo.quantity) : 0;
+
+        const hasRemains =
+          orderInfo.remains !== undefined &&
+          orderInfo.remains !== null &&
+          String(orderInfo.remains).trim() !== '' &&
+          !isNaN(Number(orderInfo.remains));
+
+        const remains = hasRemains ? Number(orderInfo.remains) : mapped === 'completado' ? 0 : null;
+        const start =
+          itemInfo?.startCount !== undefined && itemInfo?.startCount !== null
+            ? Number(itemInfo.startCount)
+            : orderInfo.startCount !== undefined && orderInfo.startCount !== null && !isNaN(Number(orderInfo.startCount))
+            ? Number(orderInfo.startCount)
+            : null;
+
+        let delivered = null;
+        let progress = null;
+
+        if (mapped === 'completado') {
+          progress = 100;
+          delivered = qty > 0 ? qty : null;
+        } else if (hasRemains && remains !== null) {
+          if (qty > 0) {
+            delivered = Math.max(0, qty - remains);
+            progress = Math.min(100, Math.max(0, Math.round(((qty - remains) / qty) * 100)));
+          }
+        }
+
+        const estimated =
+          mapped === 'completado'
+            ? 'Pedido completado con éxito'
+            : mapped === 'cancelado'
+            ? 'Cancelado / En garantía'
+            : null;
+
+        return {
+          orderId: id,
+          found: true,
+          status:
+            mapped === 'completado'
+              ? 'Completado'
+              : mapped === 'cancelado'
+              ? 'Cancelado'
+              : formatProviderStatusLabel(raw),
+          mappedStatus: mapped,
+          startCount: start,
+          remains,
+          delivered,
+          progressPercent: progress,
+          estimatedDelivery: estimated,
+        };
+      });
+
+      return sendJson(res, 200, {
+        success: true,
+        tracking: trackingList,
+      });
+    }
+
+    // --- ALL OTHER /api ENDPOINTS REQUIRE VERIFIED ADMIN AUTHENTICATION ---
+    const authResult = await verifyAdminToken(req);
+    if (!authResult.ok) {
+      return sendJson(res, authResult.status, {
+        success: false,
+        error: authResult.error,
+      });
+    }
+
+    const adminIdToken = authResult.idToken;
+
+    // 0. Health Check (Admin only)
     if (route === '/health' || route === '/') {
-      const { apiUrl, apiKey } = await resolveProviderCredentials(req, body, true);
+      const { apiUrl, apiKey, rapidApiKey } = await resolveProviderCredentials(adminIdToken);
       return sendJson(res, 200, {
         success: true,
         server: 'online',
         providerConfigured: Boolean(apiUrl && apiKey),
         providerUrl: apiUrl,
-        rapidApiConfigured: Boolean(process.env.RAPIDAPI_KEY?.trim()),
+        rapidApiConfigured: Boolean(rapidApiKey),
         timestamp: new Date().toISOString(),
       });
     }
 
-    // 1. Provider Config Status
+    // 1. Provider Config Status (Admin only)
     if (route === '/provider/config') {
-      const { apiUrl, apiKey } = await resolveProviderCredentials(req, body, true);
+      const { apiUrl, apiKey } = await resolveProviderCredentials(adminIdToken);
       const isConfigured = Boolean(apiUrl && apiKey);
       return sendJson(res, 200, {
         configured: isConfigured,
@@ -584,11 +894,11 @@ export default async function handler(req, res) {
       });
     }
 
-    // 2. Test Connection
+    // 2. Test Connection (Admin only - accepts new key in body for testing)
     if (route === '/provider/test-connection') {
-      const resolved = await resolveProviderCredentials(req, body, false);
-      const targetUrl = body?.providerUrl?.trim() || resolved.apiUrl;
-      const targetKey = body?.apiKey?.trim() || resolved.apiKey;
+      const resolved = await resolveProviderCredentials(adminIdToken);
+      const targetUrl = (typeof body?.providerUrl === 'string' && body.providerUrl.trim()) || resolved.apiUrl;
+      const targetKey = (typeof body?.apiKey === 'string' && body.apiKey.trim()) || resolved.apiKey;
 
       if (!targetUrl || !targetKey) {
         return sendJson(res, 200, {
@@ -641,7 +951,7 @@ export default async function handler(req, res) {
 
         return sendJson(res, 200, {
           success: false,
-          error: `Respuesta inesperada del proveedor: ${text.slice(0, 150)}`,
+          error: 'Respuesta inesperada del proveedor.',
         });
       } catch (err) {
         return sendJson(res, 200, {
@@ -651,7 +961,7 @@ export default async function handler(req, res) {
       }
     }
 
-    // 3. Save Provider Config
+    // 3. Validate & Cache Provider Config in Memory (Admin only - no .env writes)
     if (route === '/provider/save-config') {
       const { providerUrl, apiKey } = body || {};
       if (!providerUrl?.trim() || !apiKey?.trim()) {
@@ -697,7 +1007,13 @@ export default async function handler(req, res) {
           });
         }
 
-        persistProviderCredentialsToEnv(cleanUrl, cleanKey);
+        // Update short-lived in-memory cache (no .env file write)
+        cachedFirestoreCreds = {
+          apiUrl: cleanUrl,
+          apiKey: cleanKey,
+          rapidApiKey: cachedFirestoreCreds.rapidApiKey || '',
+          expiresAt: Date.now() + CREDENTIALS_CACHE_TTL_MS,
+        };
 
         return sendJson(res, 200, {
           success: true,
@@ -705,7 +1021,7 @@ export default async function handler(req, res) {
           maskedKey: `••••••••${cleanKey.slice(-4)}`,
           balance: testData.balance ?? null,
           currency: testData.currency ?? 'USD',
-          message: '¡Credenciales verificadas y guardadas exitosamente!',
+          message: '¡Credenciales verificadas exitosamente!',
         });
       } catch (err) {
         return sendJson(res, 200, {
@@ -715,14 +1031,14 @@ export default async function handler(req, res) {
       }
     }
 
-    // 4. Provider Balance
+    // 4. Provider Balance (Admin only)
     if (route === '/provider/balance') {
-      const { apiUrl, apiKey } = await resolveProviderCredentials(req, body, true);
+      const { apiUrl, apiKey } = await resolveProviderCredentials(adminIdToken);
       if (!apiUrl || !apiKey) {
         return sendJson(res, 200, {
           success: false,
           configured: false,
-          error: 'Clave API de MazSocialMarket no configurada. Agrégala en Configuración > Integración API.',
+          error: 'Clave API de MazSocialMarket no configurada en config/provider.',
         });
       }
 
@@ -748,7 +1064,7 @@ export default async function handler(req, res) {
         } catch {
           return sendJson(res, 200, {
             success: false,
-            error: `Respuesta no válida del proveedor (${response.status}): ${text.slice(0, 150)}`,
+            error: `Respuesta no válida del proveedor (${response.status}).`,
           });
         }
 
@@ -772,10 +1088,10 @@ export default async function handler(req, res) {
       }
     }
 
-    // 5. Sync Order Status
+    // 5. Sync Order Status (Admin only)
     if (route === '/provider/order-status') {
       const { orderId, orderIds } = body || {};
-      const { apiUrl, apiKey } = await resolveProviderCredentials(req, body, true);
+      const { apiUrl, apiKey } = await resolveProviderCredentials(adminIdToken);
 
       const targetIds = [];
       if (orderId && typeof orderId === 'string') {
@@ -803,7 +1119,7 @@ export default async function handler(req, res) {
         return sendJson(res, 200, {
           success: false,
           configured: false,
-          error: 'La clave API del proveedor (MazSocialMarket) no está configurada. Ingresa tu API Key abajo o en Configuración > Integración API.',
+          error: 'La clave API del proveedor (MazSocialMarket) no está configurada en config/provider.',
         });
       }
 
@@ -828,15 +1144,11 @@ export default async function handler(req, res) {
       }
     }
 
-    // 6. Live Instagram Profile Lookup
+    // 6. Live Instagram Profile Lookup (Admin only)
     if (route === '/instagram/profile') {
       const rawUsername =
         (typeof req?.query?.username === 'string' && req.query.username) ||
         urlObj.searchParams.get('username') ||
-        '';
-      const customKey =
-        (typeof req?.query?.rapidApiKey === 'string' && req.query.rapidApiKey) ||
-        urlObj.searchParams.get('rapidApiKey') ||
         '';
       if (!rawUsername.trim()) {
         return sendJson(res, 400, {
@@ -845,170 +1157,11 @@ export default async function handler(req, res) {
         });
       }
 
-      const profile = await fetchLiveInstagramProfile(rawUsername, customKey);
+      const { rapidApiKey } = await resolveProviderCredentials(adminIdToken);
+      const profile = await fetchLiveInstagramProfile(rawUsername, rapidApiKey);
       return sendJson(res, 200, {
         success: profile.followersCount !== null,
         profile,
-      });
-    }
-
-    // 7. Customer Public Tracking Status
-    if (route === '/tracking/customer-status') {
-      const { orderIds, items, receiptTargetAccount, rapidApiKey } = body || {};
-      const { apiUrl, apiKey } = await resolveProviderCredentials(req, body, true);
-
-      const targetIds = [];
-      if (Array.isArray(orderIds)) {
-        orderIds.forEach((id) => {
-          if (typeof id === 'string' && id.trim()) {
-            targetIds.push(id.replace(/^#/, '').trim());
-          }
-        });
-      }
-      const uniqueIds = Array.from(new Set(targetIds));
-
-      let igProfilePromise = null;
-      const igItem = Array.isArray(items) ? items.find((i) => isItemForInstagram(i) && i.targetAccount) : null;
-      const targetIg = igItem?.targetAccount || (items?.length === 1 && isItemForInstagram(items[0]) ? receiptTargetAccount : null);
-      if (targetIg && typeof targetIg === 'string') {
-        const u = extractInstagramUsername(targetIg);
-        if (u) {
-          igProfilePromise = fetchLiveInstagramProfile(u, rapidApiKey);
-        }
-      }
-
-      const liveIgResult = igProfilePromise ? await igProfilePromise.catch(() => null) : null;
-
-      if (uniqueIds.length === 0) {
-        return sendJson(res, 200, { success: true, tracking: [] });
-      }
-
-      if (!apiUrl || !apiKey) {
-        const mockTracking = uniqueIds.map((id) => {
-          const itemInfo = findMatchingItemForOrderId(items, id);
-          const qty = itemInfo?.quantity ? Number(itemInfo.quantity) : 1000;
-          const isIg = isItemForInstagram(itemInfo);
-
-          return {
-            orderId: id,
-            found: true,
-            status: 'En curso',
-            rawStatus: 'In progress',
-            mappedStatus: 'en_proceso',
-            startCount: itemInfo?.startCount ?? 1200,
-            remains: Math.round(qty * 0.15),
-            progressPercent: 85,
-            delivered: Math.round(qty * 0.85),
-            estimatedDelivery: 'Aprox. 1 a 4 horas',
-            liveInstagram:
-              isIg && liveIgResult?.followersCount !== null && liveIgResult?.followersCount !== undefined
-                ? {
-                    username: liveIgResult.username,
-                    currentFollowers: liveIgResult.followersCount,
-                    verified: true,
-                    source: liveIgResult.source,
-                  }
-                : null,
-          };
-        });
-        return sendJson(res, 200, { success: true, tracking: mockTracking });
-      }
-
-      const providerRes = await fetchOrdersFromProvider(apiUrl, apiKey, uniqueIds);
-      const orderMap = new Map();
-      providerRes.results.forEach((r) => orderMap.set(r.orderId, r));
-
-      const trackingList = uniqueIds.map((id) => {
-        const orderInfo = orderMap.get(id);
-        const raw = orderInfo?.found ? orderInfo.rawStatus : 'Processing';
-        let mapped = orderInfo?.found ? orderInfo.mappedStatus : mapSmmStatusToAppStatus(raw);
-        const itemInfo = findMatchingItemForOrderId(items, id);
-        const qty = itemInfo?.quantity ? Number(itemInfo.quantity) : 1000;
-
-        let remains =
-          orderInfo?.remains !== undefined && orderInfo?.remains !== null
-            ? Number(orderInfo.remains)
-            : null;
-        const start =
-          itemInfo?.startCount !== undefined && itemInfo?.startCount !== null
-            ? Number(itemInfo.startCount)
-            : orderInfo?.startCount !== undefined && orderInfo?.startCount !== null
-            ? Number(orderInfo.startCount)
-            : null;
-
-        let delivered = null;
-        let progress = mapped === 'completado' ? 100 : 20;
-
-        if (remains !== null && !isNaN(remains)) {
-          delivered = Math.max(0, qty - remains);
-          if (qty > 0) {
-            progress = Math.min(100, Math.max(5, Math.round(((qty - remains) / qty) * 100)));
-          }
-        }
-
-        let igDetails = null;
-        const isIg = isItemForInstagram(itemInfo);
-        if (isIg && liveIgResult && liveIgResult.followersCount !== null && liveIgResult.followersCount !== undefined) {
-          const currentIg = Number(liveIgResult.followersCount);
-          const initialFollowers = start ?? (currentIg > qty ? currentIg - Math.round(qty * 0.2) : currentIg);
-          const deliveredFromIg = Math.max(0, currentIg - initialFollowers);
-
-          igDetails = {
-            username: liveIgResult.username,
-            currentFollowers: currentIg,
-            startFollowers: initialFollowers,
-            delivered: deliveredFromIg,
-            verified: true,
-            source: liveIgResult.source,
-            error: liveIgResult.error,
-          };
-
-          if (deliveredFromIg > (delivered ?? 0)) {
-            delivered = Math.min(qty, deliveredFromIg);
-            remains = Math.max(0, qty - delivered);
-            progress = Math.min(100, Math.max(progress, Math.round((delivered / qty) * 100)));
-            if (delivered >= qty) {
-              mapped = 'completado';
-              progress = 100;
-            }
-          }
-        }
-
-        if (mapped === 'completado') progress = 100;
-        if (mapped === 'cancelado') progress = 0;
-
-        let estimated = 'Aprox. 2 a 8 horas';
-        if (mapped === 'completado') {
-          estimated = 'Pedido completado con éxito';
-        } else if (mapped === 'cancelado') {
-          estimated = 'Cancelado / En garantía';
-        } else if (progress > 75) {
-          estimated = 'Finalizando entrega (Menos de 1 hora)';
-        }
-
-        return {
-          orderId: id,
-          found: Boolean(orderInfo?.found),
-          status:
-            mapped === 'completado'
-              ? 'Completado'
-              : mapped === 'cancelado'
-              ? 'Cancelado'
-              : formatProviderStatusLabel(raw),
-          rawStatus: raw,
-          mappedStatus: mapped,
-          startCount: start,
-          remains,
-          delivered,
-          progressPercent: progress,
-          estimatedDelivery: estimated,
-          liveInstagram: igDetails,
-        };
-      });
-
-      return sendJson(res, 200, {
-        success: true,
-        tracking: trackingList,
       });
     }
 

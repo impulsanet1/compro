@@ -1,21 +1,70 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Public customer order tracking: Allow read of a single receipt by direct ID (via QR/URL)
-    // Listing, querying, and all write operations remain strictly restricted to authenticated users.
+    // Regla base: denegar todo por defecto (sin comodín de "cualquier autenticado")
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Verificación estricta de administrador con correo verificado
+    function isAdmin() {
+      return request.auth != null &&
+        request.auth.token.email == "estebanruiz.12vrgassergio@gmail.com" &&
+        request.auth.token.email_verified == true;
+    }
+
+    // Comprobantes: lectura pública únicamente por get (nunca list). Escritura y list solo para admin.
     match /receipts/{receiptId} {
       allow get: if true;
-      allow list, create, update, delete: if request.auth != null;
+      allow list, create, update, delete: if isAdmin();
     }
 
-    // Allow public read of business info (name, whatsapp support) for customer tracking view
+    // Datos internos privados de los comprobantes (notas internas, costos de proveedor, ganancias, etc.): solo isAdmin()
+    match /receipts_private/{receiptId} {
+      allow get, list, create, update, delete: if isAdmin();
+    }
+
+    // Configuración pública del negocio: lectura pública únicamente por get (nunca list). Todo lo demás solo para admin.
     match /config/business {
       allow get: if true;
-      allow write: if request.auth != null;
+      allow list, create, update, delete: if isAdmin();
     }
 
-    match /{document=**} {
-      allow read, write: if request.auth != null;
+    // Documento privado de credenciales del proveedor: legible y escribible solo por isAdmin()
+    match /config/provider {
+      allow get, list, create, update, delete: if isAdmin();
+    }
+
+    // Cualquier otro documento en config: solo isAdmin()
+    match /config/{docId} {
+      allow get, list, create, update, delete: if isAdmin();
+    }
+
+    // Colecciones administrativas del sistema: solo isAdmin()
+    match /social_networks/{networkId} {
+      allow get, list, create, update, delete: if isAdmin();
+    }
+
+    match /services/{serviceId} {
+      allow get, list, create, update, delete: if isAdmin();
+    }
+
+    match /combos/{comboId} {
+      allow get, list, create, update, delete: if isAdmin();
+    }
+
+    match /clients/{clientId} {
+      allow get, list, create, update, delete: if isAdmin();
+    }
+
+    match /supplier_warranties/{warrantyId} {
+      allow get, list, create, update, delete: if isAdmin();
+    }
+
+    // Clientes registrados en la web: cada usuario lee y edita únicamente su propio documento (request.auth.uid == userId)
+    match /users/{userId} {
+      allow get, create, update: if (request.auth != null && request.auth.uid == userId) || isAdmin();
+      allow list, delete: if isAdmin();
     }
   }
 }

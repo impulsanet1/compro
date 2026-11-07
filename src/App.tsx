@@ -278,7 +278,7 @@ const MainLayout: React.FC = () => {
 };
 
 const AppContent: React.FC = () => {
-  const { user, loadingAuth, isDarkMode } = useApp();
+  const { user, isAdmin, accessDeniedReason, logout, loadingAuth, isDarkMode } = useApp();
   const [trackingId] = useState<string | null>(() => {
     if (typeof window !== "undefined") {
       const params = new URLSearchParams(window.location.search);
@@ -313,6 +313,45 @@ const AppContent: React.FC = () => {
 
   if (!user) {
     return <LoginView />;
+  }
+
+  if (!isAdmin) {
+    return (
+      <div
+        className={`min-h-screen flex flex-col items-center justify-center px-4 py-12 transition-colors ${
+          isDarkMode ? "bg-[#0b0f19] text-slate-100" : "bg-gray-50 text-gray-900"
+        }`}
+      >
+        <div
+          className={`max-w-md w-full rounded-2xl border p-6 sm:p-8 shadow-xl space-y-5 text-center ${
+            isDarkMode
+              ? "bg-slate-900 border-rose-900/60 text-slate-100"
+              : "bg-white border-rose-200 text-gray-900"
+          }`}
+        >
+          <div className="mx-auto w-14 h-14 rounded-2xl bg-rose-500/15 border border-rose-500/30 flex items-center justify-center text-rose-500">
+            <ShieldAlert className="w-7 h-7" />
+          </div>
+          <div className="space-y-2">
+            <h1 className="text-xl font-black tracking-tight text-rose-500">
+              Acceso Denegado
+            </h1>
+            <p className={`text-xs leading-relaxed ${isDarkMode ? "text-slate-300" : "text-gray-600"}`}>
+              {accessDeniedReason ||
+                `La cuenta "${user.email || "actual"}" no tiene permisos de administrador verificado. Por seguridad, no se ha cargado ningún dato del sistema.`}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={logout}
+            className="w-full py-2.5 px-4 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs flex items-center justify-center gap-2 transition cursor-pointer"
+          >
+            <LogOut className="w-4 h-4" />
+            <span>Cerrar sesión y cambiar de cuenta</span>
+          </button>
+        </div>
+      </div>
+    );
   }
 
   return (

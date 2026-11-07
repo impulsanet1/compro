@@ -11,6 +11,8 @@ import {
   getDoc,
   getDocs,
   setDoc,
+  updateDoc,
+  deleteField,
   addDoc,
   deleteDoc,
   onSnapshot,
@@ -19,10 +21,17 @@ import {
 import { auth, db } from "../firebase";
 import {
   BusinessConfig,
+  ProviderCredentialsConfig,
   SocialNetwork,
   Service,
   ServiceCombo,
   Receipt,
+  ReceiptPrivateData,
+  ReceiptsPrivateMigrationStatus,
+  RECEIPT_PRIVATE_ROOT_FIELDS,
+  splitReceiptIntoPublicAndPrivate,
+  splitReceiptPatchIntoPublicAndPrivate,
+  hasUnmigratedPrivateFieldsInPublicReceipt,
   Client,
   TrmState,
   getNormalizedStatus,
@@ -39,19 +48,32 @@ import {
   ReopenWarrantyParams,
   ProviderOrderSyncResult
 } from "../types";
-import { DEFAULT_BUSINESS_CONFIG, DEFAULT_SOCIAL_NETWORKS, DEFAULT_SERVICES, DEFAULT_COMBOS } from "../defaultData";
-import { syncOrderWithProvider, setCachedProviderCredentials, getCachedProviderCredentials } from "../services/providerApi";
+import {
+  DEFAULT_BUSINESS_CONFIG,
+  DEFAULT_PROVIDER_CREDENTIALS,
+  DEFAULT_SOCIAL_NETWORKS,
+  DEFAULT_SERVICES,
+  DEFAULT_COMBOS
+} from "../defaultData";
+import { syncOrderWithProvider, setCachedProviderCredentials, getCachedProviderCredentials, clearCachedProviderCredentials } from "../services/providerApi";
 import { runReferentialIntegrityAudit, IntegrityAuditReport } from "../utils/referentialIntegrityAudit";
 
 interface AppContextType {
   user: User | null;
+  isAdmin: boolean;
+  accessDeniedReason: string | null;
   loadingAuth: boolean;
   loadingData: boolean;
   businessConfig: BusinessConfig;
+  providerCredentials: ProviderCredentialsConfig;
   socialNetworks: SocialNetwork[];
   services: Service[];
   combos: ServiceCombo[];
   receipts: Receipt[];
+  receiptsPrivate: Record<string, ReceiptPrivateData>;
+  getReceiptPrivateData: (receiptId: string) => ReceiptPrivateData | undefined;
+  receiptsMigrationStatus: ReceiptsPrivateMigrationStatus;
+  runReceiptsPrivateMigration: () => Promise<{ migratedCount: number; totalChecked: number }>;
   clients: Client[];
   supplierWarranties: SupplierWarrantyRecord[];
 
@@ -79,6 +101,7 @@ interface AppContextType {
   
   // Settings actions
   updateBusinessConfig: (config: Partial<BusinessConfig>) => Promise<void>;
+  updateProviderCredentials: (creds: Partial<ProviderCredentialsConfig>) => Promise<void>;
   
   // Social Networks actions
   addSocialNetwork: (sn: SocialNetwork) => Promise<void>;
@@ -117,6 +140,15 @@ interface AppContextType {
 
 export const AUTHORIZED_ADMIN_EMAIL = "estebanruiz.12vrgassergio@gmail.com";
 
+export function isUserAuthorizedAdmin(u: User | null): boolean {
+  return Boolean(
+    u &&
+      u.email &&
+      u.email.toLowerCase().trim() === AUTHORIZED_ADMIN_EMAIL.toLowerCase() &&
+      u.emailVerified === true
+  );
+}
+
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
 function cleanForFirestore<T>(data: T): T {
@@ -138,66 +170,150 @@ function cleanForFirestore<T>(data: T): T {
   return data;
 }
 
-function normalizeReceiptFromDb(id: string, raw: Record<string, any>): Receipt {
-  const safeServices = Array.isArray(raw.services)
-    ? raw.services.filter(Boolean).map((s: any, idx: number) => {
-        const rawOrderId = s.orderId !== undefined && s.orderId !== null ? String(s.orderId).trim() : "";
+/**
+ * Helper to apply a partial Receipt patch atomically across both
+ * `receipts/{id}` (public fields) and `receipts_private/{id}` (internal fields)
+ * on a Firestore WriteBatch.
+ */
+function applyReceiptPatchToBatch(
+  batch: ReturnType<typeof writeBatch>,
+  receiptId: string,
+  patch: Partial<Receipt>
+): number {
+  const { publicPatch, privatePatch } = splitReceiptPatchIntoPublicAndPrivate(patch, receiptId);
+  let ops = 0;
+  if (Object.keys(publicPatch).length > 0) {
+    batch.set(doc(db, "receipts", receiptId), cleanForFirestore(publicPatch), { merge: true });
+    ops++;
+  }
+  if (Object.keys(privatePatch).length > 0) {
+    batch.set(doc(db, "receipts_private", receiptId), cleanForFirestore(privatePatch), { merge: true });
+    ops++;
+  }
+  return ops;
+}
+
+/**
+ * Helper to write a partial Receipt patch atomically across both
+ * `receipts/{id}` and `receipts_private/{id}` using a dedicated writeBatch.
+ */
+async function commitReceiptPatchAtomically(receiptId: string, patch: Partial<Receipt>): Promise<void> {
+  const batch = writeBatch(db);
+  const ops = applyReceiptPatchToBatch(batch, receiptId, patch);
+  if (ops > 0) {
+    await batch.commit();
+  }
+}
+
+function normalizeReceiptFromDb(
+  id: string,
+  rawPublic: Record<string, any>,
+  rawPrivate?: Record<string, any> | null
+): Receipt {
+  const privServicesList = Array.isArray(rawPrivate?.servicesPrivate) ? rawPrivate!.servicesPrivate : [];
+  const privById = new Map<string, Record<string, any>>();
+  privServicesList.forEach((ps: any) => {
+    if (ps && ps.id) privById.set(String(ps.id), ps);
+  });
+
+  const safeServices = Array.isArray(rawPublic.services)
+    ? rawPublic.services.filter(Boolean).map((s: any, idx: number) => {
+        const itemId = String(s.id || `${id}_srv_${idx}`);
+        const privItem = privById.get(itemId) || privServicesList[idx] || {};
+
+        const mergedOrderIdSource =
+          privItem.orderId !== undefined && privItem.orderId !== null && String(privItem.orderId).trim() !== ""
+            ? privItem.orderId
+            : s.orderId;
+        const mergedOrderIdsSource =
+          Array.isArray(privItem.orderIds) && privItem.orderIds.length > 0
+            ? privItem.orderIds
+            : s.orderIds;
+
+        const rawOrderId =
+          mergedOrderIdSource !== undefined && mergedOrderIdSource !== null
+            ? String(mergedOrderIdSource).trim()
+            : "";
         const splitFromOrderId = rawOrderId
           ? rawOrderId.split(/[\s,]+/).map((oid: string) => oid.trim()).filter(Boolean)
           : [];
-        const rawOrderIds = Array.isArray(s.orderIds)
-          ? s.orderIds.map((oid: any) => String(oid ?? "").trim()).filter(Boolean)
+        const rawOrderIds = Array.isArray(mergedOrderIdsSource)
+          ? mergedOrderIdsSource.map((oid: any) => String(oid ?? "").trim()).filter(Boolean)
           : [];
 
-        const combined = Array.from(new Set([...splitFromOrderId, ...rawOrderIds]));
-        const realIds = combined.filter((oid) => !/^PED-\d+$/i.test(oid));
-        const finalIds = realIds.length > 0 ? realIds : combined;
+        const realFromOrderId = splitFromOrderId.filter((oid) => !/^PED-\d+$/i.test(oid));
+        const realFromOrderIds = rawOrderIds.filter((oid) => !/^PED-\d+$/i.test(oid));
 
-        const isValidReorderHistory =
-          (Boolean(s.isResent) || Boolean(s.previousOrderId)) &&
-          splitFromOrderId.length > 0 &&
-          splitFromOrderId.every((oid) => finalIds.includes(oid));
+        // Active IDs come strictly from orderId when real IDs exist there (so old replaced IDs in orderIds don't linger)
+        const activeIds =
+          realFromOrderId.length > 0
+            ? realFromOrderId
+            : realFromOrderIds.length > 0
+            ? realFromOrderIds
+            : splitFromOrderId.length > 0
+            ? splitFromOrderId
+            : rawOrderIds;
 
-        const normalizedOrderId = isValidReorderHistory
-          ? splitFromOrderId.join(", ")
-          : finalIds.length > 0
-          ? finalIds.join(", ")
-          : rawOrderId || undefined;
+        const leftoverOldIds = realFromOrderIds.filter((oid) => !activeIds.includes(oid));
+        const resolvedPrevOrderId =
+          privItem.previousOrderId ??
+          s.previousOrderId ??
+          (leftoverOldIds.length > 0 ? leftoverOldIds.join(", ") : undefined);
 
-        const normalizedOrderIds = finalIds.length > 0 ? finalIds : undefined;
+        const normalizedOrderId = activeIds.length > 0 ? activeIds.join(", ") : rawOrderId || undefined;
+        const normalizedOrderIds = activeIds.length > 0 ? activeIds : undefined;
 
         return {
           ...s,
-          id: String(s.id || `${id}_srv_${idx}`),
+          ...privItem,
+          id: itemId,
           socialNetworkId: String(s.socialNetworkId || "general"),
           socialNetworkName: String(s.socialNetworkName || "General"),
-          serviceId: String(s.serviceId || "custom"),
+          serviceId: String(s.serviceId || privItem.serviceId || "custom"),
           serviceName: String(s.serviceName || "Servicio"),
           quantity: Number(s.quantity) || 0,
-          suggestedPrice: Number(s.suggestedPrice) || 0,
+          suggestedPrice: Number(privItem.suggestedPrice ?? s.suggestedPrice) || 0,
           chargedPrice: Number(s.chargedPrice) || 0,
-          providerCostAtPurchase: Number(s.providerCostAtPurchase) || 0,
+          providerCostAtPurchase: Number(privItem.providerCostAtPurchase ?? s.providerCostAtPurchase) || 0,
+          providerCostUSD: privItem.providerCostUSD !== undefined ? privItem.providerCostUSD : s.providerCostUSD,
+          providerCostCOP: privItem.providerCostCOP !== undefined ? privItem.providerCostCOP : s.providerCostCOP,
+          trmUsed: privItem.trmUsed !== undefined ? privItem.trmUsed : s.trmUsed,
+          trmDate: privItem.trmDate !== undefined ? privItem.trmDate : s.trmDate,
           orderId: normalizedOrderId,
           orderIds: normalizedOrderIds,
+          previousOrderId: resolvedPrevOrderId,
+          resendDate: privItem.resendDate !== undefined ? privItem.resendDate : s.resendDate,
+          resendNote: privItem.resendNote !== undefined ? privItem.resendNote : s.resendNote,
         };
       })
     : [];
 
   return {
-    ...(raw as Receipt),
+    ...(rawPublic as Receipt),
     id,
-    consecutive: Number(raw.consecutive) || 0,
-    clientName: String(raw.clientName ?? ""),
-    clientPhone: String(raw.clientPhone ?? ""),
-    date: String(raw.date || new Date().toISOString()),
+    clientId: rawPrivate?.clientId !== undefined ? rawPrivate.clientId : rawPublic.clientId,
+    consecutive: Number(rawPublic.consecutive) || 0,
+    clientName: String(rawPublic.clientName ?? ""),
+    clientPhone: String(rawPublic.clientPhone ?? ""),
+    date: String(rawPublic.date || new Date().toISOString()),
     services: safeServices,
-    subtotal: Number(raw.subtotal) || 0,
-    totalCharged: Number(raw.totalCharged) || 0,
-    totalProviderCost: Number(raw.totalProviderCost) || 0,
-    totalProfit: Number(raw.totalProfit) || 0,
-    warranty: String(raw.warranty ?? "30 días"),
-    thankYouMessage: String(raw.thankYouMessage ?? ""),
-    status: raw.status || "en_proceso",
+    subtotal: Number(rawPublic.subtotal) || 0,
+    totalCharged: Number(rawPublic.totalCharged) || 0,
+    totalProviderCost: Number(rawPrivate?.totalProviderCost ?? rawPublic.totalProviderCost) || 0,
+    totalProviderCostUSD:
+      rawPrivate?.totalProviderCostUSD !== undefined
+        ? rawPrivate.totalProviderCostUSD
+        : rawPublic.totalProviderCostUSD,
+    totalProfit: Number(rawPrivate?.totalProfit ?? rawPublic.totalProfit) || 0,
+    trmUsed: rawPrivate?.trmUsed !== undefined ? rawPrivate.trmUsed : rawPublic.trmUsed,
+    trmDate: rawPrivate?.trmDate !== undefined ? rawPrivate.trmDate : rawPublic.trmDate,
+    internalNotes:
+      rawPrivate?.internalNotes !== undefined
+        ? String(rawPrivate.internalNotes ?? "")
+        : rawPublic.internalNotes,
+    warranty: String(rawPublic.warranty ?? "30 días"),
+    thankYouMessage: String(rawPublic.thankYouMessage ?? ""),
+    status: rawPublic.status || "en_proceso",
   };
 }
 
@@ -234,21 +350,178 @@ function normalizeWarrantyFromDb(id: string, raw: Record<string, any>): Supplier
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
+  const [isAdmin, setIsAdmin] = useState<boolean>(false);
+  const [accessDeniedReason, setAccessDeniedReason] = useState<string | null>(null);
   const [loadingAuth, setLoadingAuth] = useState(true);
   const [loadingData, setLoadingData] = useState(true);
 
   const [businessConfig, setBusinessConfig] = useState<BusinessConfig>(DEFAULT_BUSINESS_CONFIG);
+  const [providerCredentials, setProviderCredentials] = useState<ProviderCredentialsConfig>(DEFAULT_PROVIDER_CREDENTIALS);
   const [socialNetworks, setSocialNetworks] = useState<SocialNetwork[]>([]);
   const [services, setServices] = useState<Service[]>([]);
   const [combos, setCombos] = useState<ServiceCombo[]>(DEFAULT_COMBOS);
   const [receipts, setReceipts] = useState<Receipt[]>([]);
+  const [receiptsPrivate, setReceiptsPrivate] = useState<Record<string, ReceiptPrivateData>>({});
+  const [receiptsMigrationStatus, setReceiptsMigrationStatus] = useState<ReceiptsPrivateMigrationStatus>({
+    running: false,
+    total: 0,
+    processed: 0,
+    migrated: 0,
+    pendingCount: 0,
+    completed: false,
+    lastRunAt: null,
+    error: null,
+  });
   const [clients, setClients] = useState<Client[]>([]);
   const [supplierWarranties, setSupplierWarranties] = useState<SupplierWarrantyRecord[]>([]);
+
+  const rawPublicReceiptsRef = useRef<Map<string, Record<string, any>>>(new Map());
+  const rawPrivateReceiptsRef = useRef<Map<string, ReceiptPrivateData>>(new Map());
+  const hasLoadedPublicReceiptsRef = useRef(false);
+  const hasLoadedPrivateReceiptsRef = useRef(false);
 
   // Guards to prevent runaway loops under large client/receipt volume
   const isSyncingRef = useRef(false);
   const lastSyncFingerprintRef = useRef("");
   const hasRunOneTimeRepairsRef = useRef(false);
+  const hasRunProviderMigrationRef = useRef(false);
+  const hasRunReceiptsPrivateMigrationRef = useRef(false);
+  const isMigratingReceiptsPrivateRef = useRef(false);
+
+  const getReceiptPrivateData = (receiptId: string): ReceiptPrivateData | undefined => {
+    return receiptsPrivate[receiptId] || rawPrivateReceiptsRef.current.get(receiptId);
+  };
+
+  /**
+   * Idempotent one-time admin migration that moves all internal fields from `receipts/{id}`
+   * to `receipts_private/{id}` and deletes them from `receipts/{id}` using `deleteField()`,
+   * reporting live progress via `receiptsMigrationStatus`.
+   */
+  const runReceiptsPrivateMigration = async (): Promise<{ migratedCount: number; totalChecked: number }> => {
+    if (!user || !isAdmin) {
+      throw new Error("Solo el administrador autorizado puede ejecutar la migración.");
+    }
+    if (isMigratingReceiptsPrivateRef.current) {
+      return {
+        migratedCount: receiptsMigrationStatus.migrated,
+        totalChecked: receiptsMigrationStatus.total,
+      };
+    }
+
+    isMigratingReceiptsPrivateRef.current = true;
+    try {
+      const [publicSnap, privateSnap] = await Promise.all([
+        getDocs(collection(db, "receipts")),
+        getDocs(collection(db, "receipts_private")),
+      ]);
+
+      const privMap = new Map<string, Record<string, any>>();
+      privateSnap.forEach((docSnap) => {
+        privMap.set(docSnap.id, docSnap.data());
+      });
+
+      const allPublicDocs: Array<{ id: string; data: Record<string, any> }> = [];
+      publicSnap.forEach((docSnap) => {
+        allPublicDocs.push({ id: docSnap.id, data: docSnap.data() });
+      });
+
+      const docsNeedingMigration = allPublicDocs.filter(({ id, data }) => {
+        return hasUnmigratedPrivateFieldsInPublicReceipt(data) || !privMap.has(id);
+      });
+
+      const totalToProcess = docsNeedingMigration.length;
+      if (totalToProcess === 0) {
+        setReceiptsMigrationStatus({
+          running: false,
+          total: allPublicDocs.length,
+          processed: allPublicDocs.length,
+          migrated: 0,
+          pendingCount: 0,
+          completed: true,
+          lastRunAt: new Date().toISOString(),
+          error: null,
+        });
+        return { migratedCount: 0, totalChecked: allPublicDocs.length };
+      }
+
+      setReceiptsMigrationStatus({
+        running: true,
+        total: totalToProcess,
+        processed: 0,
+        migrated: 0,
+        pendingCount: totalToProcess,
+        completed: false,
+        lastRunAt: null,
+        error: null,
+      });
+
+      let processed = 0;
+      let migrated = 0;
+      const CHUNK_SIZE = 20;
+      const nowIso = new Date().toISOString();
+
+      for (let i = 0; i < docsNeedingMigration.length; i += CHUNK_SIZE) {
+        const chunk = docsNeedingMigration.slice(i, i + CHUNK_SIZE);
+        const batch = writeBatch(db);
+
+        for (const { id, data: rawPublic } of chunk) {
+          const existingPrivate = privMap.get(id) || null;
+          const mergedReceipt = normalizeReceiptFromDb(id, rawPublic, existingPrivate);
+          const { publicData, privateData } = splitReceiptIntoPublicAndPrivate(mergedReceipt, id);
+
+          const finalPrivatePayload: ReceiptPrivateData = {
+            ...privateData,
+            migratedAt: existingPrivate?.migratedAt || nowIso,
+            updatedAt: nowIso,
+          };
+
+          // 1. Save internal fields to receipts_private/{id}
+          batch.set(
+            doc(db, "receipts_private", id),
+            cleanForFirestore(finalPrivatePayload),
+            { merge: true }
+          );
+
+          // 2. Strip internal fields from receipts/{id} using deleteField() and sanitized services[]
+          const publicCleanupUpdate: Record<string, any> = {
+            services: cleanForFirestore(publicData.services),
+          };
+          for (const field of RECEIPT_PRIVATE_ROOT_FIELDS) {
+            publicCleanupUpdate[field] = deleteField();
+          }
+
+          batch.update(doc(db, "receipts", id), publicCleanupUpdate);
+        }
+
+        await batch.commit();
+        processed += chunk.length;
+        migrated += chunk.length;
+
+        setReceiptsMigrationStatus({
+          running: processed < totalToProcess,
+          total: totalToProcess,
+          processed,
+          migrated,
+          pendingCount: Math.max(0, totalToProcess - processed),
+          completed: processed >= totalToProcess,
+          lastRunAt: processed >= totalToProcess ? new Date().toISOString() : null,
+          error: null,
+        });
+      }
+
+      return { migratedCount: migrated, totalChecked: allPublicDocs.length };
+    } catch (err: any) {
+      console.warn("Error in runReceiptsPrivateMigration:", err);
+      setReceiptsMigrationStatus((prev) => ({
+        ...prev,
+        running: false,
+        error: err?.message || "Error al migrar campos internos a receipts_private.",
+      }));
+      throw err;
+    } finally {
+      isMigratingReceiptsPrivateRef.current = false;
+    }
+  };
 
   // TRM Colombia State
   const [trmState, setTrmState] = useState<TrmState>({
@@ -323,21 +596,37 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   useEffect(() => {
-    fetchTRM();
-  }, []);
+    if (user && isAdmin) {
+      fetchTRM();
+    }
+  }, [user, isAdmin]);
 
   // 1. Listen to Auth State with strict single-admin authorization
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
       if (currentUser) {
         const userEmail = (currentUser.email || "").toLowerCase().trim();
         if (userEmail !== AUTHORIZED_ADMIN_EMAIL.toLowerCase()) {
-          console.warn("Unauthorized Google account attempted access:", currentUser.email);
-          await signOut(auth);
-          setUser(null);
-          setLoadingAuth(false);
-          return;
+          console.warn("Unauthorized account attempted access:", currentUser.email);
+          setIsAdmin(false);
+          setAccessDeniedReason(
+            `Acceso denegado: la cuenta "${currentUser.email || "sin correo"}" no tiene permisos de administrador. Solo el administrador autorizado puede acceder a este sistema.`
+          );
+          clearCachedProviderCredentials();
+        } else if (!currentUser.emailVerified) {
+          console.warn("Unverified admin email attempted access:", currentUser.email);
+          setIsAdmin(false);
+          setAccessDeniedReason(
+            `Acceso denegado: el correo "${currentUser.email}" debe estar verificado para acceder como administrador.`
+          );
+          clearCachedProviderCredentials();
+        } else {
+          setIsAdmin(true);
+          setAccessDeniedReason(null);
         }
+      } else {
+        setIsAdmin(false);
+        clearCachedProviderCredentials();
       }
       setUser(currentUser);
       setLoadingAuth(false);
@@ -345,43 +634,138 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return unsubscribe;
   }, []);
 
-  // 2. Listen & Sync Firestore Data when Logged In
+  // 2. Listen & Sync Firestore Data ONLY when Logged In as Verified Admin
   useEffect(() => {
-    if (!user) {
+    if (!user || !isAdmin) {
+      setReceipts([]);
+      setReceiptsPrivate({});
+      rawPublicReceiptsRef.current.clear();
+      rawPrivateReceiptsRef.current.clear();
+      hasLoadedPublicReceiptsRef.current = false;
+      hasLoadedPrivateReceiptsRef.current = false;
+      setClients([]);
+      setSupplierWarranties([]);
+      setServices([]);
+      setSocialNetworks([]);
+      setCombos([]);
+      setProviderCredentials(DEFAULT_PROVIDER_CREDENTIALS);
+      clearCachedProviderCredentials();
       setLoadingData(false);
       return;
     }
 
     setLoadingData(true);
 
-    // Sync business config
+    // Sync public business config (config/business)
     const configRef = doc(db, "config", "business");
     const unsubConfig = onSnapshot(
       configRef,
       (docSnap) => {
         if (docSnap.exists()) {
-          const data = docSnap.data() as BusinessConfig;
-          setBusinessConfig(data);
-          if (data.providerApiUrl || data.providerApiKey) {
-            setCachedProviderCredentials(data.providerApiUrl, data.providerApiKey);
-          } else {
-            const localCreds = getCachedProviderCredentials();
-            if (localCreds.apiKey) {
-              setDoc(
-                configRef,
-                { providerApiUrl: localCreds.providerUrl, providerApiKey: localCreds.apiKey },
-                { merge: true }
-              ).catch(() => {});
-            }
-          }
+          const raw = docSnap.data() as Record<string, any>;
+          const { providerApiUrl: _u, providerApiKey: _k, rapidApiKey: _r, ...publicData } = raw;
+          setBusinessConfig({
+            ...DEFAULT_BUSINESS_CONFIG,
+            ...(publicData as BusinessConfig),
+          });
         } else {
           setBusinessConfig(DEFAULT_BUSINESS_CONFIG);
         }
       },
       (error) => {
-        console.warn("Firestore config error:", error);
+        console.warn("Firestore config/business error:", error);
       }
     );
+
+    // Sync private provider credentials (config/provider - admin only)
+    const providerConfigRef = doc(db, "config", "provider");
+    const unsubProviderConfig = onSnapshot(
+      providerConfigRef,
+      (docSnap) => {
+        if (docSnap.exists()) {
+          const data = docSnap.data() as ProviderCredentialsConfig;
+          const urlVal = (data.providerApiUrl || DEFAULT_PROVIDER_CREDENTIALS.providerApiUrl).trim();
+          const keyVal = (data.providerApiKey || "").trim();
+          setProviderCredentials({
+            providerApiUrl: urlVal,
+            providerApiKey: keyVal,
+            rapidApiKey: data.rapidApiKey,
+            updatedAt: data.updatedAt,
+            migratedAt: data.migratedAt,
+          });
+          setCachedProviderCredentials(urlVal, keyVal);
+        }
+      },
+      (error) => {
+        console.warn("Firestore config/provider error:", error);
+      }
+    );
+
+    // One-time admin migration: move providerApiUrl & providerApiKey from config/business to config/provider and delete from config/business
+    if (
+      !hasRunProviderMigrationRef.current &&
+      user.email &&
+      user.email.toLowerCase().trim() === AUTHORIZED_ADMIN_EMAIL.toLowerCase()
+    ) {
+      hasRunProviderMigrationRef.current = true;
+      (async () => {
+        try {
+          const [busSnap, provSnap] = await Promise.all([
+            getDoc(configRef),
+            getDoc(providerConfigRef),
+          ]);
+
+          const busData = busSnap.exists() ? (busSnap.data() as Record<string, any>) : {};
+          const provData = provSnap.exists() ? (provSnap.data() as Record<string, any>) : {};
+
+          const legacyUrl = typeof busData.providerApiUrl === "string" ? busData.providerApiUrl.trim() : "";
+          const legacyKey = typeof busData.providerApiKey === "string" ? busData.providerApiKey.trim() : "";
+          const legacyRapid = typeof busData.rapidApiKey === "string" ? busData.rapidApiKey.trim() : "";
+
+          const hasLegacyFieldsInBusiness =
+            "providerApiUrl" in busData || "providerApiKey" in busData || "rapidApiKey" in busData;
+
+          const localCreds = getCachedProviderCredentials();
+          const targetUrl =
+            (typeof provData.providerApiUrl === "string" && provData.providerApiUrl.trim()) ||
+            legacyUrl ||
+            localCreds.providerUrl ||
+            DEFAULT_PROVIDER_CREDENTIALS.providerApiUrl;
+          const targetKey =
+            (typeof provData.providerApiKey === "string" && provData.providerApiKey.trim()) ||
+            legacyKey ||
+            localCreds.apiKey ||
+            "";
+          const targetRapid =
+            (typeof provData.rapidApiKey === "string" && provData.rapidApiKey.trim()) || legacyRapid || undefined;
+
+          if ((!provSnap.exists() || !provData.providerApiKey) && targetKey) {
+            await setDoc(
+              providerConfigRef,
+              cleanForFirestore({
+                providerApiUrl: targetUrl,
+                providerApiKey: targetKey,
+                rapidApiKey: targetRapid,
+                updatedAt: new Date().toISOString(),
+                migratedAt: new Date().toISOString(),
+              }),
+              { merge: true }
+            );
+            setCachedProviderCredentials(targetUrl, targetKey);
+          }
+
+          if (hasLegacyFieldsInBusiness && busSnap.exists()) {
+            await updateDoc(configRef, {
+              providerApiUrl: deleteField(),
+              providerApiKey: deleteField(),
+              rapidApiKey: deleteField(),
+            });
+          }
+        } catch (err) {
+          console.warn("Provider credentials migration check:", err);
+        }
+      })();
+    }
 
     // Sync social networks
     const socialNetworksRef = collection(db, "social_networks");
@@ -506,24 +890,93 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     );
 
-    // Sync receipts
+    const recomputeMergedReceipts = () => {
+      const recs: Receipt[] = [];
+      let pendingUnmigrated = 0;
+
+      rawPublicReceiptsRef.current.forEach((rawPub, id) => {
+        const rawPriv = rawPrivateReceiptsRef.current.get(id) || null;
+        if (hasUnmigratedPrivateFieldsInPublicReceipt(rawPub) || !rawPriv) {
+          pendingUnmigrated++;
+        }
+        recs.push(normalizeReceiptFromDb(id, rawPub, rawPriv));
+      });
+
+      recs.sort((a, b) => {
+        const dateA = a.date ? new Date(a.date).getTime() : 0;
+        const dateB = b.date ? new Date(b.date).getTime() : 0;
+        return dateB - dateA;
+      });
+
+      setReceipts(recs);
+      setReceiptsMigrationStatus((prev) =>
+        prev.running
+          ? prev
+          : {
+              ...prev,
+              total: rawPublicReceiptsRef.current.size,
+              pendingCount: pendingUnmigrated,
+              completed: pendingUnmigrated === 0 && rawPublicReceiptsRef.current.size > 0,
+            }
+      );
+
+      // Automatically trigger idempotent one-time migration for admin if unmigrated fields exist
+      if (
+        hasLoadedPublicReceiptsRef.current &&
+        hasLoadedPrivateReceiptsRef.current &&
+        pendingUnmigrated > 0 &&
+        !hasRunReceiptsPrivateMigrationRef.current &&
+        !isMigratingReceiptsPrivateRef.current
+      ) {
+        hasRunReceiptsPrivateMigrationRef.current = true;
+        runReceiptsPrivateMigration().catch((err) => {
+          console.warn("Automatic receipts_private migration deferred:", err);
+        });
+      }
+    };
+
+    // Sync public receipts (`receipts`)
     const receiptsRef = collection(db, "receipts");
     const unsubReceipts = onSnapshot(
       receiptsRef,
       (querySnap) => {
-        const recs: Receipt[] = [];
+        const nextMap = new Map<string, Record<string, any>>();
         querySnap.forEach((docSnap) => {
-          recs.push(normalizeReceiptFromDb(docSnap.id, docSnap.data()));
+          nextMap.set(docSnap.id, docSnap.data());
         });
-        recs.sort((a, b) => {
-          const dateA = a.date ? new Date(a.date).getTime() : 0;
-          const dateB = b.date ? new Date(b.date).getTime() : 0;
-          return dateB - dateA;
-        });
-        setReceipts(recs);
+        rawPublicReceiptsRef.current = nextMap;
+        hasLoadedPublicReceiptsRef.current = true;
+        recomputeMergedReceipts();
       },
       (error) => {
         console.warn("Firestore receipts error:", error);
+      }
+    );
+
+    // Sync private receipts (`receipts_private` - admin only)
+    const receiptsPrivateRef = collection(db, "receipts_private");
+    const unsubReceiptsPrivate = onSnapshot(
+      receiptsPrivateRef,
+      (querySnap) => {
+        const nextPrivMap = new Map<string, ReceiptPrivateData>();
+        const nextPrivObj: Record<string, ReceiptPrivateData> = {};
+        querySnap.forEach((docSnap) => {
+          const data = {
+            receiptId: docSnap.id,
+            ...(docSnap.data() as Omit<ReceiptPrivateData, "receiptId">),
+          };
+          nextPrivMap.set(docSnap.id, data);
+          nextPrivObj[docSnap.id] = data;
+        });
+        rawPrivateReceiptsRef.current = nextPrivMap;
+        hasLoadedPrivateReceiptsRef.current = true;
+        setReceiptsPrivate(nextPrivObj);
+        recomputeMergedReceipts();
+      },
+      (error) => {
+        console.warn("Firestore receipts_private error:", error);
+        hasLoadedPrivateReceiptsRef.current = true;
+        recomputeMergedReceipts();
       }
     );
 
@@ -562,18 +1015,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     return () => {
       unsubConfig();
+      unsubProviderConfig();
       unsubSocial();
       unsubServices();
       unsubCombos();
       unsubReceipts();
+      unsubReceiptsPrivate();
       unsubClients();
       unsubSupplierWarranties();
     };
-  }, [user]);
+  }, [user, isAdmin]);
 
   // 3. Keep client stats, unique 4-digit client IDs, and auto-sync clients from receipts
   useEffect(() => {
-    if (!user || loadingData || clients.length === 0) return;
+    if (!user || !isAdmin || loadingData || clients.length === 0) return;
 
     // Count duplicate codes to ensure fingerprint triggers sync if collisions exist
     const codeCounts = new Map<string, number>();
@@ -806,7 +1261,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             console.log("Recreating Client #0107 from orphan receipts:", restoredDoc);
             await setDoc(doc(db, "clients", restoredId), cleanForFirestore(restoredDoc));
             for (const r of matchingOrphans) {
-              await setDoc(doc(db, "receipts", r.id), { clientId: restoredId }, { merge: true });
+              await commitReceiptPatchAtomically(r.id, { clientId: restoredId });
             }
             return;
           }
@@ -877,7 +1332,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 await setDoc(doc(db, "clients", restoredId), cleanForFirestore(restoredDoc));
                 await setDoc(doc(db, "clients", c.id), { receiptIds: remainingIds }, { merge: true });
                 for (const r of allFor0107) {
-                  await setDoc(doc(db, "receipts", r.id), { clientId: restoredId }, { merge: true });
+                  await commitReceiptPatchAtomically(r.id, { clientId: restoredId });
                 }
                 return;
               }
@@ -948,14 +1403,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                     .join("\n")
                 : undefined;
 
-              await setDoc(
-                doc(db, "receipts", rec.id),
-                cleanForFirestore({
-                  services: cleanedServices,
-                  internalNotes: cleanedNotes ?? "",
-                }),
-                { merge: true }
-              );
+              await commitReceiptPatchAtomically(rec.id, {
+                services: cleanedServices,
+                internalNotes: cleanedNotes ?? "",
+              });
             }
           }
 
@@ -985,14 +1436,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             const note1184 = r1184.internalNotes
               ? `${r1184.internalNotes}\n[Ajuste Proveedor #1184] Estado actualizado a "procesando" según estado en proveedor.`
               : `[Ajuste Proveedor #1184] Estado actualizado a "procesando" según estado en proveedor.`;
-            await setDoc(
-              doc(db, "receipts", r1184.id),
-              {
-                status: "procesando",
-                internalNotes: note1184,
-              },
-              { merge: true }
-            );
+            await commitReceiptPatchAtomically(r1184.id, {
+              status: "procesando",
+              internalNotes: note1184,
+            });
           }
         }
 
@@ -1148,7 +1595,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 );
                 for (const r of recList) {
                   if (r.clientId !== existing.id) {
-                    await setDoc(doc(db, "receipts", r.id), { clientId: existing.id }, { merge: true });
+                    await commitReceiptPatchAtomically(r.id, { clientId: existing.id });
                   }
                 }
                 continue;
@@ -1216,17 +1663,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     provider.setCustomParameters({ prompt: "select_account" });
     const result = await signInWithPopup(auth, provider);
     const userEmail = (result.user.email || "").toLowerCase().trim();
-    if (userEmail !== AUTHORIZED_ADMIN_EMAIL.toLowerCase()) {
-      await signOut(auth);
-      setUser(null);
-      throw new Error(
-        `Acceso no autorizado: la cuenta ${result.user.email} no tiene permisos de administrador. Solo tiene acceso ${AUTHORIZED_ADMIN_EMAIL}.`
+    if (userEmail !== AUTHORIZED_ADMIN_EMAIL.toLowerCase() || !result.user.emailVerified) {
+      setIsAdmin(false);
+      setAccessDeniedReason(
+        `Acceso denegado: la cuenta "${result.user.email || "desconocida"}" no tiene permisos de administrador.`
       );
+      setUser(result.user);
+      return;
     }
+    setIsAdmin(true);
+    setAccessDeniedReason(null);
     setUser(result.user);
   };
 
   const logout = async () => {
+    clearCachedProviderCredentials();
+    setAccessDeniedReason(null);
+    setIsAdmin(false);
     await signOut(auth);
   };
 
@@ -1236,8 +1689,29 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Settings Operations
   const updateBusinessConfig = async (config: Partial<BusinessConfig>) => {
+    const raw = { ...(config as Record<string, any>) };
+    delete raw.providerApiUrl;
+    delete raw.providerApiKey;
+    delete raw.rapidApiKey;
     const configRef = doc(db, "config", "business");
-    await setDoc(configRef, config, { merge: true });
+    await setDoc(configRef, cleanForFirestore(raw), { merge: true });
+  };
+
+  const updateProviderCredentials = async (creds: Partial<ProviderCredentialsConfig>) => {
+    const nextUrl = (creds.providerApiUrl ?? providerCredentials.providerApiUrl ?? DEFAULT_PROVIDER_CREDENTIALS.providerApiUrl).trim();
+    const nextKey = (creds.providerApiKey ?? providerCredentials.providerApiKey ?? "").trim();
+    const providerRef = doc(db, "config", "provider");
+    await setDoc(
+      providerRef,
+      cleanForFirestore({
+        providerApiUrl: nextUrl,
+        providerApiKey: nextKey,
+        rapidApiKey: creds.rapidApiKey !== undefined ? creds.rapidApiKey : providerCredentials.rapidApiKey,
+        updatedAt: new Date().toISOString(),
+      }),
+      { merge: true }
+    );
+    setCachedProviderCredentials(nextUrl, nextKey);
   };
 
   // Social Networks Operations
@@ -1334,7 +1808,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     await deleteDoc(doc(db, "combos", id));
   };
 
-  // Receipt & Client Generation
+  // Receipt & Client Generation (Atomically synchronized across `receipts` and `receipts_private` via writeBatch)
   const createReceipt = async (
     receiptData: Omit<Receipt, "id" | "consecutive"> & { clientId?: string; forceNewClient?: boolean }
   ) => {
@@ -1363,7 +1837,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               if (normInput.type === "handle") return normC.key === normInput.key;
               if (normInput.type === "phone") {
                 if (matchPhones(c.phone, receiptData.clientPhone)) {
-                  // Ensure name isn't completely distinct person on shared phone
                   const cClean = (c.name || "").trim().toLowerCase();
                   const rClean = (receiptData.clientName || "").trim().toLowerCase();
                   if (cClean && rClean && cClean !== "cliente" && rClean !== "cliente") {
@@ -1383,17 +1856,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     }
 
-    // Determine final clientId:
-    // If existingClient found: reuse its verified document ID
-    // If new client: force a unique ID so it never overwrites another client
     const clientId = existingClient 
       ? existingClient.id 
       : generateClientId(receiptData.clientName, receiptData.clientPhone, true);
 
     const clientRef = doc(db, "clients", clientId);
 
-    // Create receipt document reference with auto ID and linked clientId
-    const receiptsRef = collection(db, "receipts");
+    // Create receipt document reference with auto ID
+    const newReceiptDocRef = doc(collection(db, "receipts"));
+    const receiptId = newReceiptDocRef.id;
+    const privateReceiptDocRef = doc(db, "receipts_private", receiptId);
     
     const finalReceipt: Omit<Receipt, "id"> = {
       ...receiptData,
@@ -1401,9 +1873,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       consecutive: nextConsecutive
     };
 
-    const sanitizedReceipt = cleanForFirestore(finalReceipt);
-    const docRef = await addDoc(receiptsRef, sanitizedReceipt);
-    const receiptId = docRef.id;
+    const { publicData, privateData } = splitReceiptIntoPublicAndPrivate(finalReceipt, receiptId);
+
+    const batch = writeBatch(db);
+    batch.set(newReceiptDocRef, cleanForFirestore(publicData));
+    batch.set(privateReceiptDocRef, cleanForFirestore(privateData));
 
     if (existingClient) {
       let existingCode = existingClient.clientCode;
@@ -1420,7 +1894,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const newTotal = (existingClient.totalSpent || 0) + receiptData.totalCharged;
       const targetTag = getClientTagForSpending(newTotal);
 
-      await setDoc(clientRef, cleanForFirestore({
+      batch.set(clientRef, cleanForFirestore({
         ...existingClient,
         clientCode: existingCode,
         purchaseCount: (existingClient.purchaseCount || 0) + 1,
@@ -1452,8 +1926,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         createdAt: receiptData.date,
         tag: targetTag,
       };
-      await setDoc(clientRef, cleanForFirestore(newClient));
+      batch.set(clientRef, cleanForFirestore(newClient));
     }
+
+    await batch.commit();
 
     return {
       ...finalReceipt,
@@ -1498,13 +1974,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       tag: "Nuevo",
     };
 
-    await setDoc(doc(db, "clients", newClientId), cleanForFirestore(newClientDoc));
-
-    await setDoc(doc(db, "receipts", targetReceipt.id), {
+    const batch = writeBatch(db);
+    batch.set(doc(db, "clients", newClientId), cleanForFirestore(newClientDoc));
+    applyReceiptPatchToBatch(batch, targetReceipt.id, {
       clientId: newClientId,
       clientName: clientName,
       clientPhone: clientPhone,
-    }, { merge: true });
+    });
 
     const prevClients = clients.filter(
       (c) => (fromClientId && c.id === fromClientId) || (c.receiptIds && c.receiptIds.includes(receiptId))
@@ -1521,7 +1997,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       );
       const newLastDate = sortedRecs.length > 0 ? sortedRecs[0].date : prev.lastPurchaseDate;
 
-      await setDoc(doc(db, "clients", prev.id), cleanForFirestore({
+      batch.set(doc(db, "clients", prev.id), cleanForFirestore({
         receiptIds: remainingReceiptIds,
         purchaseCount: newPurchaseCount,
         totalSpent: newTotalSpent,
@@ -1529,6 +2005,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }), { merge: true });
     }
 
+    await batch.commit();
     return newClientId;
   };
 
@@ -1552,8 +2029,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
 
       if (matchingReceipts.length > 0) {
-        const updatePromises = matchingReceipts.map(async (r) => {
-          const receiptDocRef = doc(db, "receipts", r.id);
+        const batch = writeBatch(db);
+        matchingReceipts.forEach((r) => {
           const patch: Partial<Receipt> = {
             clientId: clientId,
           };
@@ -1563,16 +2040,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           if (cleanPhone !== undefined) {
             patch.clientPhone = cleanPhone;
           }
-          await setDoc(receiptDocRef, cleanForFirestore(patch), { merge: true });
+          applyReceiptPatchToBatch(batch, r.id, patch);
         });
 
-        // Ensure all associated receipt IDs are saved in the client's receiptIds array
         const allReceiptIds = Array.from(
           new Set([...(currentClient?.receiptIds || []), ...matchingReceipts.map((r) => r.id)])
         );
-        updatePromises.push(setDoc(clientRef, { receiptIds: allReceiptIds }, { merge: true }));
+        batch.set(clientRef, { receiptIds: allReceiptIds }, { merge: true });
 
-        await Promise.all(updatePromises);
+        await batch.commit();
       }
     }
   };
@@ -1657,11 +2133,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       mergedGroupsCount++;
 
-      // Sort to determine keeper:
-      // 1. Linked by r.clientId in receipts
-      // 2. Has receiptIds in stored array
-      // 3. Lowest assigned clientCode
-      // 4. Shorter doc ID
       const sorted = [...group].sort((a, b) => {
         const recsA = (receiptsByClientId.get(a.id) || []).length;
         const recsB = (receiptsByClientId.get(b.id) || []).length;
@@ -1681,7 +2152,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const keeper = sorted[0];
       const duplicates = sorted.slice(1);
 
-      // Preserve lowest / earliest assigned clientCode
       const allCodes = [keeper, ...duplicates]
         .map((c) => parseInt(c.clientCode || "9999", 10))
         .filter((n) => !isNaN(n) && n > 0);
@@ -1712,7 +2182,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       for (const d of duplicates) {
         const referencingReceipts = receipts.filter((r) => r.clientId === d.id);
         for (const r of referencingReceipts) {
-          await setDoc(doc(db, "receipts", r.id), { clientId: keeper.id }, { merge: true });
+          await commitReceiptPatchAtomically(r.id, { clientId: keeper.id });
         }
       }
 
@@ -1742,7 +2212,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
    * Automatically resolves all duplicate client codes across the database in one pass.
    */
   const resolveDuplicateClientCodes = async (): Promise<{ resolvedCount: number; details: string[] }> => {
-    // Step 1: Merge any duplicate client records of the same person first
     const mergeRes = await mergeDuplicateClients();
     const details: string[] = [...mergeRes.details];
 
@@ -1796,39 +2265,51 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return { resolvedCount, details };
   };
 
+  // Delete Receipt atomically across both `receipts/{id}` and `receipts_private/{id}` using writeBatch
   const deleteReceipt = async (id: string) => {
-    // 1. Get receipt details
     const receiptDocRef = doc(db, "receipts", id);
-    const receiptSnap = await getDoc(receiptDocRef);
-    if (!receiptSnap.exists()) {
-      // Just in case, try deleting and return
-      await deleteDoc(receiptDocRef);
-      return;
-    }
-    const receiptData = receiptSnap.data() as Receipt;
+    const privateReceiptDocRef = doc(db, "receipts_private", id);
+    const inMemoryReceipt = receipts.find((r) => r.id === id);
 
-    // 2. Find the client document (by receipt.clientId or fallback receiptIds)
-    const matchingClient = clients.find((c) => c.id === receiptData.clientId || (c.receiptIds && c.receiptIds.includes(id)));
-    const clientId = matchingClient ? matchingClient.id : generateClientId(receiptData.clientName, receiptData.clientPhone);
+    let receiptData: Partial<Receipt> | undefined = inMemoryReceipt;
+    if (!receiptData) {
+      const [receiptSnap, privateSnap] = await Promise.all([
+        getDoc(receiptDocRef),
+        getDoc(privateReceiptDocRef),
+      ]);
+      if (!receiptSnap.exists() && !privateSnap.exists()) {
+        return;
+      }
+      receiptData = normalizeReceiptFromDb(
+        id,
+        receiptSnap.exists() ? receiptSnap.data() : {},
+        privateSnap.exists() ? privateSnap.data() : null
+      );
+    }
+
+    const batch = writeBatch(db);
+
+    const matchingClient = clients.find(
+      (c) => c.id === receiptData?.clientId || (c.receiptIds && c.receiptIds.includes(id))
+    );
+    const clientId = matchingClient
+      ? matchingClient.id
+      : generateClientId(receiptData?.clientName || "", receiptData?.clientPhone || "");
     const clientRef = doc(db, "clients", clientId);
     const clientSnap = await getDoc(clientRef);
 
     if (clientSnap.exists()) {
       const clientData = clientSnap.data() as Client;
-      
-      // Find all remaining receipts that still belong to this client
       const updatedReceiptIds = (clientData.receiptIds || []).filter((rId) => rId !== id);
       const remainingClientReceipts = receipts.filter(
         (r) =>
           r.id !== id &&
           (r.clientId === clientId || updatedReceiptIds.includes(r.id) || isReceiptForClient(clientData, r))
       );
-      
+
       if (remainingClientReceipts.length === 0 && updatedReceiptIds.length === 0) {
-        // Delete the client only if truly no receipts remain
-        await deleteDoc(clientRef);
+        batch.delete(clientRef);
       } else {
-        // Otherwise, update client purchaseCount, totalSpent, and receiptIds from remaining receipts
         const allRemainingIds = Array.from(
           new Set([...updatedReceiptIds, ...remainingClientReceipts.map((r) => r.id)])
         );
@@ -1836,42 +2317,56 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const newTotalSpent =
           remainingClientReceipts.length > 0
             ? remainingClientReceipts.reduce((sum, r) => sum + (r.totalCharged || 0), 0)
-            : Math.max(0, (clientData.totalSpent || 0) - (receiptData.totalCharged || 0));
-        
+            : Math.max(0, (clientData.totalSpent || 0) - (receiptData?.totalCharged || 0));
+
         let lastPurchaseDate = clientData.lastPurchaseDate;
         if (remainingClientReceipts.length > 0) {
           remainingClientReceipts.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
           lastPurchaseDate = remainingClientReceipts[0].date;
         }
 
-        await setDoc(clientRef, {
+        batch.set(clientRef, cleanForFirestore({
           ...clientData,
           purchaseCount: newPurchaseCount,
           totalSpent: newTotalSpent,
           receiptIds: allRemainingIds,
           lastPurchaseDate: lastPurchaseDate
-        });
+        }));
       }
     }
 
-    // 3. Delete the receipt
-    await deleteDoc(receiptDocRef);
+    batch.delete(receiptDocRef);
+    batch.delete(privateReceiptDocRef);
+    await batch.commit();
   };
 
+  // Update Receipt atomically across both `receipts/{id}` and `receipts_private/{id}` using writeBatch
   const updateReceipt = async (id: string, updatedData: Partial<Receipt>) => {
-    // 1. Get the current receipt before update
     const receiptDocRef = doc(db, "receipts", id);
-    const receiptSnap = await getDoc(receiptDocRef);
-    if (!receiptSnap.exists()) {
-      await setDoc(receiptDocRef, cleanForFirestore(updatedData), { merge: true });
-      return;
+    const privateDocRef = doc(db, "receipts_private", id);
+    const inMemoryReceipt = receipts.find((r) => r.id === id);
+
+    let oldReceipt: Receipt;
+    if (inMemoryReceipt) {
+      oldReceipt = inMemoryReceipt;
+    } else {
+      const [receiptSnap, privateSnap] = await Promise.all([
+        getDoc(receiptDocRef),
+        getDoc(privateDocRef),
+      ]);
+      if (!receiptSnap.exists()) {
+        await commitReceiptPatchAtomically(id, updatedData);
+        return;
+      }
+      oldReceipt = normalizeReceiptFromDb(
+        id,
+        receiptSnap.data(),
+        privateSnap.exists() ? privateSnap.data() : null
+      );
     }
-    const oldReceipt = receiptSnap.data() as Receipt;
 
-    // 2. Perform the update on the receipt
-    await setDoc(receiptDocRef, cleanForFirestore(updatedData), { merge: true });
+    const batch = writeBatch(db);
 
-    // 3. Find the client associated with this receipt
     const linkedClient = clients.find((c) =>
       (oldReceipt.clientId && c.id === oldReceipt.clientId) ||
       (c.receiptIds && c.receiptIds.includes(id)) ||
@@ -1900,16 +2395,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (updatedData.date || oldReceipt.date) {
         clientPatch.lastPurchaseDate = updatedData.date || oldReceipt.date;
       }
-      // Ensure this receipt ID is tracked in client's receiptIds
       const clientReceiptIds = Array.from(new Set([...(linkedClient.receiptIds || []), id]));
       clientPatch.receiptIds = clientReceiptIds;
 
-      await setDoc(clientRef, cleanForFirestore(clientPatch), { merge: true });
+      batch.set(clientRef, cleanForFirestore(clientPatch), { merge: true });
 
-      // Also ensure receipt document explicitly stores clientId foreign key
-      await setDoc(receiptDocRef, { clientId: linkedClient.id }, { merge: true });
+      applyReceiptPatchToBatch(batch, id, {
+        ...updatedData,
+        clientId: linkedClient.id,
+      });
 
-      // If name or phone changed, also propagate to any other receipts of this client
       if (cleanNewName !== undefined || cleanNewPhone !== undefined) {
         const otherReceipts = receipts.filter(
           (r) =>
@@ -1919,19 +2414,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               isReceiptForClient(linkedClient, r))
         );
 
-        if (otherReceipts.length > 0) {
-          await Promise.all(
-            otherReceipts.map(async (other) => {
-              const otherPatch: Partial<Receipt> = { clientId: linkedClient.id };
-              if (cleanNewName !== undefined) otherPatch.clientName = cleanNewName;
-              if (cleanNewPhone !== undefined) otherPatch.clientPhone = cleanNewPhone;
-              await setDoc(doc(db, "receipts", other.id), cleanForFirestore(otherPatch), { merge: true });
-            })
-          );
-        }
+        otherReceipts.forEach((other) => {
+          const otherPatch: Partial<Receipt> = { clientId: linkedClient.id };
+          if (cleanNewName !== undefined) otherPatch.clientName = cleanNewName;
+          if (cleanNewPhone !== undefined) otherPatch.clientPhone = cleanNewPhone;
+          applyReceiptPatchToBatch(batch, other.id, otherPatch);
+        });
       }
+
+      await batch.commit();
     } else {
-      // Receipt has no matching client yet; create one and link it
       const targetName = (cleanNewName !== undefined ? cleanNewName : oldReceipt.clientName || "").trim();
       const targetPhone = (cleanNewPhone !== undefined ? cleanNewPhone : oldReceipt.clientPhone || "").trim();
       const targetClientId = generateClientId(targetName, targetPhone);
@@ -1941,14 +2433,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       if (newClientSnap.exists()) {
         const existingData = newClientSnap.data() as Client;
-        await setDoc(newClientRef, {
+        batch.set(newClientRef, cleanForFirestore({
           name: targetName,
           phone: targetPhone,
           totalSpent: Math.max(0, (existingData.totalSpent || 0) + newTotalCharged),
           purchaseCount: (existingData.purchaseCount || 0) + 1,
           lastPurchaseDate: finalDate,
           receiptIds: Array.from(new Set([...(existingData.receiptIds || []), id])),
-        }, { merge: true });
+        }), { merge: true });
       } else {
         const existingCodes = clients
           .map((c) => parseInt(c.clientCode || "0", 10))
@@ -1968,9 +2460,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           createdAt: finalDate,
           tag: "Nuevo",
         };
-        await setDoc(newClientRef, cleanForFirestore(newClient));
+        batch.set(newClientRef, cleanForFirestore(newClient));
       }
-      await setDoc(receiptDocRef, { clientId: targetClientId }, { merge: true });
+
+      applyReceiptPatchToBatch(batch, id, {
+        ...updatedData,
+        clientId: targetClientId,
+      });
+
+      await batch.commit();
     }
   };
 
@@ -1983,16 +2481,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     let count = 0;
     try {
       const snap = await getDocs(collection(db, "receipts"));
-      const updates: Promise<void>[] = [];
+      const batch = writeBatch(db);
       snap.forEach((docSnap) => {
         const data = docSnap.data() as Receipt;
         const norm = getNormalizedStatus(data.status);
         if (norm === "en_proceso" || norm === "procesando" || norm === "parcial") {
           count++;
-          updates.push(setDoc(doc(db, "receipts", docSnap.id), { status: "completado" }, { merge: true }));
+          applyReceiptPatchToBatch(batch, docSnap.id, { status: "completado" });
         }
       });
-      await Promise.all(updates);
+      if (count > 0) {
+        await batch.commit();
+      }
     } catch (e) {
       console.error("Error bulk updating in-process receipts to completed:", e);
     }
@@ -2089,7 +2589,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     updatedCount: number;
     details: string[];
   }> => {
-    // Select ALL receipts having numeric provider IDs, regardless of current status
     const targetReceipts = receipts.filter((r) => {
       const ids = (r.services || [])
         .flatMap((s) => getItemOrderIds(s))
@@ -2130,7 +2629,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     try {
-      // Chunk IDs into groups of 50 to respect SMM API URL constraints
       const chunkSize = 50;
       const resultMap = new Map<string, ProviderOrderSyncResult>();
 
@@ -2197,7 +2695,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const restoreDefaults = async () => {
-    // Re-initialize default social networks
     const socialQuery = await getDocs(collection(db, "social_networks"));
     for (const sDoc of socialQuery.docs) {
       await deleteDoc(doc(db, "social_networks", sDoc.id));
@@ -2209,7 +2706,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
     }
 
-    // Re-initialize default services
     const servicesQuery = await getDocs(collection(db, "services"));
     for (const sDoc of servicesQuery.docs) {
       await deleteDoc(doc(db, "services", sDoc.id));
@@ -2225,7 +2721,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
     }
 
-    // Re-initialize default combos
     const combosQuery = await getDocs(collection(db, "combos"));
     for (const cDoc of combosQuery.docs) {
       await deleteDoc(doc(db, "combos", cDoc.id));
@@ -2234,7 +2729,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       await setDoc(doc(db, "combos", combo.id), cleanForFirestore(combo));
     }
 
-    // Reset config
     const configRef = doc(db, "config", "business");
     const initialConfig = { ...DEFAULT_BUSINESS_CONFIG, facebookSeeded: true };
     await setDoc(configRef, initialConfig);
@@ -2281,7 +2775,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const data = snap.data() as SupplierWarrantyRecord;
         if (data.receiptId) {
           try {
-            await setDoc(doc(db, "receipts", data.receiptId), { status: "completado" }, { merge: true });
+            await commitReceiptPatchAtomically(data.receiptId, { status: "completado" });
           } catch (recErr) {
             console.warn("Could not update receipt on resolve warranty:", recErr);
           }
@@ -2291,7 +2785,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       console.warn("Error getting supplier warranty record before resolve:", err);
     }
 
-    // Persist as resolved in background database history
     const updateData: Record<string, any> = {
       status: "resuelto",
       resolvedDate: new Date().toISOString()
@@ -2309,7 +2802,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     
     const updateData: Record<string, any> = {
       status: "reclamado_nuevamente",
-      sentDate: new Date().toISOString(), // Reset timer to now
+      sentDate: new Date().toISOString(),
       claimedAgainCount: prevClaimCount + 1
     };
     if (notes) {
@@ -2349,7 +2842,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       : previousIdsStr;
     const cleanIdsList = targetProviderId.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
 
-    // Resolve client
     const client = clients.find(
       (c) =>
         c.id === receipt.clientId ||
@@ -2358,7 +2850,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
     const clientCode = client ? getClientCode(client) : undefined;
 
-    // Service label and quantity
     const sLabel = receipt.services && receipt.services[0]
       ? `${receipt.services[0].socialNetworkName} - ${receipt.services[0].serviceName}`
       : "Servicio General";
@@ -2367,7 +2858,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const nowIso = new Date().toISOString();
     const nowFormatted = new Date().toLocaleString("es-CO", { dateStyle: "short", timeStyle: "short" });
 
-    // Build complete traceability timeline entry
     const traceEntry = [
       `[${nowFormatted}] 🔄 GARANTÍA REABIERTA / REENVIADA`,
       `• Pedido Original: Factura #${receipt.consecutive} (${receipt.clientName})`,
@@ -2378,7 +2868,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       `• Plazo de Respuesta: ${expectedResponseHours}h`
     ].filter(Boolean).join("\n");
 
-    // Create the new warranty record linked to the original receipt
     const colRef = collection(db, "supplier_warranties");
     const newWarrantyPayload: Record<string, any> = {
       providerOrderId: targetProviderId,
@@ -2408,11 +2897,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const docRef = await addDoc(colRef, cleanForFirestore(newWarrantyPayload));
 
-    // Update original receipt without losing data or history
     const existingNotes = receipt.internalNotes || "";
     const updatedNotes = existingNotes ? `${existingNotes}\n\n${traceEntry}` : traceEntry;
 
-    // If a new provider order ID was given, update the services items preserving full traceability
     let updatedServices = receipt.services;
     if (newProviderOrderId && newProviderOrderId.trim()) {
       const cleanNewId = newProviderOrderId.trim();
@@ -2438,7 +2925,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       receiptPatch.status = "garantia_en_proceso";
     }
 
-    await setDoc(doc(db, "receipts", receipt.id), cleanForFirestore(receiptPatch), { merge: true });
+    await commitReceiptPatchAtomically(receipt.id, receiptPatch);
 
     return {
       id: docRef.id,
@@ -2494,10 +2981,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const newlyLinkedToClient = new Map<string, string[]>();
 
     for (const r of receipts) {
-      const receiptPatch: Record<string, any> = {};
+      const receiptPatch: Partial<Receipt> = {};
       let targetClient = receiptToClient.get(r.id);
 
-      // If orphan, match by contact/name or create client
       if (!targetClient) {
         targetClient = clients.find(
           (c) =>
@@ -2549,25 +3035,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           ? srv.orderIds.map((id) => String(id || "").trim()).filter(Boolean)
           : [];
 
+        const realFromOrderId = splitFromOrderId.filter((id) => !/^PED-\d+$/i.test(id));
+        const realFromOrderIds = rawOrderIds.filter((id) => !/^PED-\d+$/i.test(id));
         const combined = Array.from(new Set([...splitFromOrderId, ...rawOrderIds]));
-        const realIds = combined.filter((id) => !/^PED-\d+$/i.test(id));
         const pedIds = combined.filter((id) => /^PED-\d+$/i.test(id));
-        const finalIds = realIds.length > 0 ? realIds : combined;
 
-        const isValidReorderHistory =
-          (Boolean(srv.isResent) || Boolean(srv.previousOrderId) || finalIds.length > splitFromOrderId.length) &&
-          splitFromOrderId.length > 0 &&
-          splitFromOrderId.every((id) => finalIds.includes(id));
+        const activeIds =
+          realFromOrderId.length > 0
+            ? realFromOrderId
+            : realFromOrderIds.length > 0
+            ? realFromOrderIds
+            : combined;
 
-        const expectedPrimary = isValidReorderHistory
-          ? splitFromOrderId.join(", ")
-          : finalIds.join(", ");
+        const leftoverOldIds = realFromOrderIds.filter((id) => !activeIds.includes(id));
+        const expectedPrimary = activeIds.join(", ");
 
-        const hasMixedPed = realIds.length > 0 && pedIds.length > 0;
+        const hasMixedPed = (realFromOrderId.length > 0 || realFromOrderIds.length > 0) && pedIds.length > 0;
         const hasDesync =
-          finalIds.length > 0 &&
-          !isValidReorderHistory &&
-          (splitFromOrderId.join(",") !== finalIds.join(",") || (rawOrderIds.length > 0 && rawOrderIds.join(",") !== finalIds.join(",")));
+          activeIds.length > 0 &&
+          (splitFromOrderId.join(",") !== activeIds.join(",") ||
+            (rawOrderIds.length > 0 && rawOrderIds.join(",") !== activeIds.join(",")));
 
         const falseResend =
           Boolean(srv.isResent) &&
@@ -2581,9 +3068,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           return {
             ...srv,
             orderId: expectedPrimary || srv.orderId,
-            orderIds: finalIds.length > 0 ? finalIds : srv.orderIds,
+            orderIds: activeIds.length > 0 ? activeIds : srv.orderIds,
             isResent: falseResend ? false : srv.isResent,
-            previousOrderId: falseResend ? undefined : srv.previousOrderId,
+            previousOrderId: falseResend
+              ? undefined
+              : srv.previousOrderId || (leftoverOldIds.length > 0 ? leftoverOldIds.join(", ") : undefined),
             resendDate: falseResend ? undefined : srv.resendDate,
             resendNote: falseResend ? undefined : srv.resendNote,
           };
@@ -2598,8 +3087,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
 
       if (Object.keys(receiptPatch).length > 0 && batchOps < 420) {
-        batch.set(doc(db, "receipts", r.id), cleanForFirestore(receiptPatch), { merge: true });
-        batchOps++;
+        batchOps += applyReceiptPatchToBatch(batch, r.id, receiptPatch);
       }
     }
 
@@ -2677,13 +3165,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     <AppContext.Provider
       value={{
         user,
+        isAdmin,
+        accessDeniedReason,
         loadingAuth,
         loadingData,
         businessConfig,
+        providerCredentials,
         socialNetworks,
         services,
         combos,
         receipts,
+        receiptsPrivate,
+        getReceiptPrivateData,
+        receiptsMigrationStatus,
+        runReceiptsPrivateMigration,
         clients,
         supplierWarranties,
         trmState,
@@ -2701,6 +3196,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         logout,
         resetPassword,
         updateBusinessConfig,
+        updateProviderCredentials,
         addSocialNetwork,
         updateSocialNetwork,
         deleteSocialNetwork,

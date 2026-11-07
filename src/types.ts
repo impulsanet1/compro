@@ -13,9 +13,14 @@ export interface BusinessConfig {
   costsUpdated2026?: boolean;
   costsUpdatedFinal2026?: boolean;
   enableLiveInstagramTracking?: boolean;
+}
+
+export interface ProviderCredentialsConfig {
+  providerApiUrl: string;
+  providerApiKey: string;
   rapidApiKey?: string;
-  providerApiUrl?: string;
-  providerApiKey?: string;
+  updatedAt?: string;
+  migratedAt?: string;
 }
 
 export interface TrmState {
@@ -214,41 +219,37 @@ export function getItemOrderIds(item?: Partial<ReceiptItem> | null): string[] {
 
   const rawOrderId = String(item.orderId || "").trim();
   const rawOrderIds = (item.orderIds || []).map((id) => String(id || "").trim()).filter(Boolean);
+  const prevIds = String(item.previousOrderId || "")
+    .split(/[\s,]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
 
   if (rawOrderId) {
     const splitFromOrderId = rawOrderId.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+    const realFromOrderId = splitFromOrderId.filter((id) => !/^PED-\d+$/i.test(id));
+
+    // When orderId has real provider ID(s), those are the active IDs (never mix in old replaced IDs from orderIds)
+    if (realFromOrderId.length > 0) {
+      return realFromOrderId;
+    }
 
     if (rawOrderIds.length === 0) {
       return splitFromOrderId;
     }
 
-    // If orderIds has auto-generated placeholders while orderId has a real user-typed ID
-    const orderIdsAreGenerated = rawOrderIds.every((id) => id.startsWith("PED-"));
-    const orderIdIsCustom = splitFromOrderId.some((id) => !id.startsWith("PED-"));
-    if (orderIdsAreGenerated && orderIdIsCustom) {
-      return splitFromOrderId;
+    const realFromOrderIds = rawOrderIds.filter(
+      (id) => !/^PED-\d+$/i.test(id) && !prevIds.includes(id)
+    );
+    if (realFromOrderIds.length > 0) {
+      return realFromOrderIds;
     }
 
-    // If user edited orderId with multiple values (comma/space separated)
-    if (splitFromOrderId.length > 1) {
-      return splitFromOrderId;
-    }
-
-    // If orderIds contains orderId or vice versa, return orderIds if it has multiple
-    if (rawOrderIds.includes(rawOrderId) && rawOrderIds.length > 1) {
-      return rawOrderIds;
-    }
-
-    // If orderId was edited to a specific single value not in orderIds
-    if (!rawOrderIds.includes(rawOrderId) && rawOrderIds.length <= 1) {
-      return splitFromOrderId;
-    }
-
-    return rawOrderIds;
+    return splitFromOrderId;
   }
 
   if (rawOrderIds.length > 0) {
-    return rawOrderIds;
+    const filtered = rawOrderIds.filter((id) => !prevIds.includes(id));
+    return filtered.length > 0 ? filtered : rawOrderIds;
   }
 
   return [];
@@ -1116,7 +1117,7 @@ export interface ProviderOrderSyncResult {
   orderId: string;
   found: boolean;
   rawStatus: string; // e.g. "Completed", "In progress", "Canceled", "Partial"
-  mappedStatus: "procesando" | "en_proceso" | "parcial" | "completado" | "cancelado";
+  mappedStatus: "procesando" | "en_proceso" | "parcial" | "completado" | "cancelado" | "desconocido";
   startCount?: string | number | null;
   remains?: string | number | null;
   charge?: string | null;
@@ -1175,5 +1176,240 @@ export function extractInstagramUsername(input?: string | null): string | null {
   return null;
 }
 
+/**
+ * Private item fields stored exclusively in `receipts_private/{receiptId}`
+ */
+export interface ReceiptItemPrivate {
+  id: string;
+  serviceId?: string;
+  suggestedPrice?: number;
+  providerCostAtPurchase?: number;
+  providerCostUSD?: number | null;
+  providerCostCOP?: number | null;
+  trmUsed?: number | null;
+  trmDate?: string | null;
+  orderId?: string;
+  orderIds?: string[];
+  previousOrderId?: string;
+  resendDate?: string;
+  resendNote?: string;
+}
 
+/**
+ * Private receipt document stored in `receipts_private/{receiptId}` (Admin-only)
+ */
+export interface ReceiptPrivateData {
+  receiptId: string;
+  clientId?: string;
+  internalNotes?: string;
+  totalProviderCost?: number;
+  totalProviderCostUSD?: number | null;
+  totalProfit?: number;
+  trmUsed?: number | null;
+  trmDate?: string | null;
+  servicesPrivate?: ReceiptItemPrivate[];
+  updatedAt?: string;
+  migratedAt?: string;
+}
 
+export interface ReceiptsPrivateMigrationStatus {
+  running: boolean;
+  total: number;
+  processed: number;
+  migrated: number;
+  pendingCount: number;
+  completed: boolean;
+  lastRunAt?: string | null;
+  error?: string | null;
+}
+
+export const RECEIPT_PRIVATE_ROOT_FIELDS = [
+  "internalNotes",
+  "totalProviderCost",
+  "totalProviderCostUSD",
+  "totalProfit",
+  "trmUsed",
+  "trmDate",
+  "clientId",
+] as const;
+
+export const RECEIPT_ITEM_PRIVATE_FIELDS = [
+  "providerCostAtPurchase",
+  "providerCostUSD",
+  "providerCostCOP",
+  "trmUsed",
+  "trmDate",
+  "suggestedPrice",
+  "previousOrderId",
+  "resendDate",
+  "resendNote",
+] as const;
+
+/**
+ * Sanitizes a single ReceiptItem so only public fields remain for `receipts/{receiptId}`.
+ */
+export function sanitizePublicReceiptItem(item: Partial<ReceiptItem>, fallbackId?: string): Record<string, any> {
+  const pub: Record<string, any> = {
+    id: String(item.id || fallbackId || ""),
+    socialNetworkId: String(item.socialNetworkId || "general"),
+    socialNetworkName: String(item.socialNetworkName || "General"),
+    serviceId: String(item.serviceId || "custom"),
+    serviceName: String(item.serviceName || "Servicio"),
+    quantity: Number(item.quantity) || 0,
+    chargedPrice: Number(item.chargedPrice) || 0,
+  };
+
+  if (item.orderId !== undefined) pub.orderId = item.orderId;
+  if (item.orderIds !== undefined) pub.orderIds = item.orderIds;
+  if (item.serviceCode !== undefined) pub.serviceCode = item.serviceCode;
+  if (item.customCategory !== undefined) pub.customCategory = item.customCategory;
+  if (item.isResent !== undefined) pub.isResent = item.isResent;
+  if (item.targetAccount !== undefined) pub.targetAccount = item.targetAccount;
+  if (item.startCount !== undefined) pub.startCount = item.startCount;
+  if (item.currentCount !== undefined) pub.currentCount = item.currentCount;
+
+  return pub;
+}
+
+/**
+ * Extracts private fields from a single ReceiptItem for `receipts_private/{receiptId}`.
+ */
+export function extractPrivateReceiptItem(item: Partial<ReceiptItem>, fallbackId?: string): ReceiptItemPrivate {
+  const priv: ReceiptItemPrivate = {
+    id: String(item.id || fallbackId || ""),
+    serviceId: item.serviceId ? String(item.serviceId) : undefined,
+    suggestedPrice: Number(item.suggestedPrice) || 0,
+    providerCostAtPurchase: Number(item.providerCostAtPurchase) || 0,
+  };
+
+  if (item.providerCostUSD !== undefined) priv.providerCostUSD = item.providerCostUSD;
+  if (item.providerCostCOP !== undefined) priv.providerCostCOP = item.providerCostCOP;
+  if (item.trmUsed !== undefined) priv.trmUsed = item.trmUsed;
+  if (item.trmDate !== undefined) priv.trmDate = item.trmDate;
+  if (item.orderId !== undefined) priv.orderId = item.orderId;
+  if (item.orderIds !== undefined) priv.orderIds = item.orderIds;
+  if (item.previousOrderId !== undefined) priv.previousOrderId = item.previousOrderId;
+  if (item.resendDate !== undefined) priv.resendDate = item.resendDate;
+  if (item.resendNote !== undefined) priv.resendNote = item.resendNote;
+
+  return priv;
+}
+
+/**
+ * Splits a full Receipt object into its public (`receipts/{id}`) and private (`receipts_private/{id}`) documents.
+ */
+export function splitReceiptIntoPublicAndPrivate(
+  receipt: Partial<Receipt>,
+  receiptId: string
+): {
+  publicData: Record<string, any>;
+  privateData: ReceiptPrivateData;
+} {
+  const servicesList = Array.isArray(receipt.services) ? receipt.services : [];
+  const publicServices = servicesList.map((srv, idx) =>
+    sanitizePublicReceiptItem(srv, `${receiptId}_srv_${idx}`)
+  );
+  const privateServices = servicesList.map((srv, idx) =>
+    extractPrivateReceiptItem(srv, `${receiptId}_srv_${idx}`)
+  );
+
+  const publicData: Record<string, any> = {
+    consecutive: Number(receipt.consecutive) || 0,
+    clientName: String(receipt.clientName ?? ""),
+    clientPhone: String(receipt.clientPhone ?? ""),
+    date: String(receipt.date || new Date().toISOString()),
+    services: publicServices,
+    subtotal: Number(receipt.subtotal) || 0,
+    totalCharged: Number(receipt.totalCharged) || 0,
+    warranty: String(receipt.warranty ?? "30 días"),
+    thankYouMessage: String(receipt.thankYouMessage ?? ""),
+    status: receipt.status || "en_proceso",
+  };
+
+  if (receipt.targetAccount !== undefined) publicData.targetAccount = receipt.targetAccount;
+  if (receipt.initialFollowers !== undefined) publicData.initialFollowers = receipt.initialFollowers;
+  if (receipt.currentFollowers !== undefined) publicData.currentFollowers = receipt.currentFollowers;
+
+  const privateData: ReceiptPrivateData = {
+    receiptId,
+    clientId: receipt.clientId,
+    internalNotes: receipt.internalNotes ?? "",
+    totalProviderCost: Number(receipt.totalProviderCost) || 0,
+    totalProviderCostUSD: receipt.totalProviderCostUSD ?? null,
+    totalProfit: Number(receipt.totalProfit) || 0,
+    trmUsed: receipt.trmUsed ?? null,
+    trmDate: receipt.trmDate ?? null,
+    servicesPrivate: privateServices,
+    updatedAt: new Date().toISOString(),
+  };
+
+  return { publicData, privateData };
+}
+
+/**
+ * Splits a partial Receipt update patch into `publicPatch` (for `receipts/{id}`)
+ * and `privatePatch` (for `receipts_private/{id}`).
+ */
+export function splitReceiptPatchIntoPublicAndPrivate(
+  patch: Partial<Receipt>,
+  receiptId: string
+): {
+  publicPatch: Record<string, any>;
+  privatePatch: Record<string, any>;
+} {
+  const publicPatch: Record<string, any> = {};
+  const privatePatch: Record<string, any> = {};
+
+  const privateRootSet = new Set<string>(RECEIPT_PRIVATE_ROOT_FIELDS);
+
+  for (const [key, value] of Object.entries(patch)) {
+    if (key === "id") continue;
+    if (key === "services" && Array.isArray(value)) {
+      publicPatch.services = value.map((srv, idx) =>
+        sanitizePublicReceiptItem(srv, `${receiptId}_srv_${idx}`)
+      );
+      privatePatch.servicesPrivate = value.map((srv, idx) =>
+        extractPrivateReceiptItem(srv, `${receiptId}_srv_${idx}`)
+      );
+    } else if (privateRootSet.has(key)) {
+      privatePatch[key] = value;
+    } else {
+      publicPatch[key] = value;
+    }
+  }
+
+  if (Object.keys(privatePatch).length > 0) {
+    privatePatch.receiptId = receiptId;
+    privatePatch.updatedAt = new Date().toISOString();
+  }
+
+  return { publicPatch, privatePatch };
+}
+
+/**
+ * Checks if a raw document from `receipts/{id}` still contains any unmigrated internal fields
+ * at the root level or inside `services[]`.
+ */
+export function hasUnmigratedPrivateFieldsInPublicReceipt(raw: Record<string, any> | undefined | null): boolean {
+  if (!raw || typeof raw !== "object") return false;
+
+  for (const field of RECEIPT_PRIVATE_ROOT_FIELDS) {
+    if (field in raw && raw[field] !== undefined) {
+      return true;
+    }
+  }
+
+  if (Array.isArray(raw.services)) {
+    for (const item of raw.services) {
+      if (item && typeof item === "object") {
+        for (const itemField of RECEIPT_ITEM_PRIVATE_FIELDS) {
+          if (itemField in item && item[itemField] !== undefined) {
+            return true;
+          }
+        }
+      }
+    }
+  }
+
+  return false;
+}

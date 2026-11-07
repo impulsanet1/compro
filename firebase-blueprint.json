@@ -2,14 +2,33 @@
   "entities": {
     "BusinessConfig": {
       "title": "BusinessConfig",
-      "description": "Business settings and invoice config",
+      "description": "Public business settings and invoice configuration",
       "type": "object",
       "properties": {
+        "businessName": { "type": "string" },
         "name": { "type": "string" },
+        "logoUrl": { "type": "string" },
+        "whatsapp": { "type": "string" },
         "phone": { "type": "string" },
+        "warrantyDays": { "type": "number" },
         "warranty": { "type": "string" },
-        "thankYouMessage": { "type": "string" }
+        "thankYouMessage": { "type": "string" },
+        "customTrackingUrl": { "type": "string" },
+        "enableLiveInstagramTracking": { "type": "boolean" }
       }
+    },
+    "ProviderCredentialsConfig": {
+      "title": "ProviderCredentialsConfig",
+      "description": "Private SMM provider API credentials restricted to admin",
+      "type": "object",
+      "properties": {
+        "providerApiUrl": { "type": "string" },
+        "providerApiKey": { "type": "string" },
+        "rapidApiKey": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "migratedAt": { "type": "string" }
+      },
+      "required": ["providerApiUrl", "providerApiKey"]
     },
     "SocialNetwork": {
       "title": "SocialNetwork",
@@ -28,26 +47,60 @@
         "socialNetworkId": { "type": "string" },
         "name": { "type": "string" },
         "providerCostPer1000": { "type": "number" },
+        "providerCostUSDPer1000": { "type": "number" },
         "suggestedPricePer1000": { "type": "number" }
+      }
+    },
+    "ServiceCombo": {
+      "title": "ServiceCombo",
+      "description": "Promotional service combo bundle",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "socialNetworkId": { "type": "string" },
+        "comboPrice": { "type": "number" },
+        "active": { "type": "boolean" }
       }
     },
     "Receipt": {
       "title": "Receipt",
-      "description": "Receipt issued to client",
+      "description": "Public receipt document issued to client (contains only customer-facing fields)",
       "type": "object",
       "properties": {
         "consecutive": { "type": "number" },
         "clientName": { "type": "string" },
         "clientPhone": { "type": "string" },
+        "subtotal": { "type": "number" },
         "totalCharged": { "type": "number" },
         "date": { "type": "string" },
         "status": { "type": "string" },
-        "internalNotes": { "type": "string" }
+        "warranty": { "type": "string" },
+        "thankYouMessage": { "type": "string" },
+        "targetAccount": { "type": "string" },
+        "initialFollowers": { "type": "number" }
+      }
+    },
+    "ReceiptPrivate": {
+      "title": "ReceiptPrivate",
+      "description": "Private internal receipt data restricted strictly to admin (costs, profit, margins, internal notes)",
+      "type": "object",
+      "properties": {
+        "receiptId": { "type": "string" },
+        "clientId": { "type": "string" },
+        "internalNotes": { "type": "string" },
+        "totalProviderCost": { "type": "number" },
+        "totalProviderCostUSD": { "type": "number" },
+        "totalProfit": { "type": "number" },
+        "trmUsed": { "type": "number" },
+        "trmDate": { "type": "string" },
+        "servicesPrivate": { "type": "array" },
+        "updatedAt": { "type": "string" }
       }
     },
     "Client": {
       "title": "Client",
-      "description": "Client record",
+      "description": "CRM Client record managed by admin",
       "type": "object",
       "properties": {
         "clientCode": { "type": "string" },
@@ -56,47 +109,6 @@
         "purchaseCount": { "type": "number" },
         "totalSpent": { "type": "number" },
         "lastPurchaseDate": { "type": "string" }
-      }
-    },
-    "PersonalExpense": {
-      "title": "PersonalExpense",
-      "description": "Personal expense record",
-      "type": "object",
-      "properties": {
-        "title": { "type": "string" },
-        "amount": { "type": "number" },
-        "category": { "type": "string" },
-        "date": { "type": "string" }
-      }
-    },
-    "DebtOrCard": {
-      "title": "DebtOrCard",
-      "description": "Personal debt or credit card",
-      "type": "object",
-      "properties": {
-        "title": { "type": "string" },
-        "totalAmount": { "type": "number" },
-        "pendingBalance": { "type": "number" }
-      }
-    },
-    "DebtPayment": {
-      "title": "DebtPayment",
-      "description": "Payment made towards personal debt",
-      "type": "object",
-      "properties": {
-        "debtId": { "type": "string" },
-        "amount": { "type": "number" },
-        "date": { "type": "string" }
-      }
-    },
-    "SavingsGoal": {
-      "title": "SavingsGoal",
-      "description": "Personal savings goal",
-      "type": "object",
-      "properties": {
-        "title": { "type": "string" },
-        "targetAmount": { "type": "number" },
-        "currentAmount": { "type": "number" }
       }
     },
     "SupplierWarrantyRecord": {
@@ -120,19 +132,29 @@
         "reopenDate": { "type": "string" },
         "traceabilityNotes": { "type": "string" }
       }
+    },
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Web registered user profile",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "email": { "type": "string" },
+        "phone": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      }
     }
   },
   "firestore": {
-    "config/business": { "schema": "BusinessConfig", "description": "Business configuration" },
-    "config/personal": { "schema": "BusinessConfig", "description": "Personal finance config" },
+    "config/business": { "schema": "BusinessConfig", "description": "Public business configuration" },
+    "config/provider": { "schema": "ProviderCredentialsConfig", "description": "Private provider API credentials (admin only)" },
     "social_networks/{id}": { "schema": "SocialNetwork", "description": "Social networks" },
     "services/{id}": { "schema": "Service", "description": "Services" },
-    "receipts/{id}": { "schema": "Receipt", "description": "Receipts" },
-    "clients/{id}": { "schema": "Client", "description": "Clients" },
+    "combos/{id}": { "schema": "ServiceCombo", "description": "Service combos" },
+    "receipts/{receiptId}": { "schema": "Receipt", "description": "Public receipts (customer-facing fields only)" },
+    "receipts_private/{receiptId}": { "schema": "ReceiptPrivate", "description": "Private receipt internal notes, provider costs, and profits (admin only)" },
+    "clients/{id}": { "schema": "Client", "description": "CRM Clients" },
     "supplier_warranties/{id}": { "schema": "SupplierWarrantyRecord", "description": "Supplier warranty claims tracking" },
-    "personal_expenses/{id}": { "schema": "PersonalExpense", "description": "Personal expenses" },
-    "personal_debts/{id}": { "schema": "DebtOrCard", "description": "Personal debts" },
-    "personal_debt_payments/{id}": { "schema": "DebtPayment", "description": "Personal debt payments" },
-    "personal_savings_goals/{id}": { "schema": "SavingsGoal", "description": "Personal savings goals" }
+    "users/{userId}": { "schema": "UserProfile", "description": "Registered web client profile" }
   }
 }

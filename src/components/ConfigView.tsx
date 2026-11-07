@@ -71,6 +71,7 @@ import { motion, AnimatePresence } from "motion/react";
 export const ConfigView: React.FC = () => {
   const {
     businessConfig,
+    providerCredentials,
     socialNetworks,
     services,
     combos,
@@ -79,6 +80,7 @@ export const ConfigView: React.FC = () => {
     supplierWarranties,
     trmState,
     updateBusinessConfig,
+    updateProviderCredentials,
     addSocialNetwork,
     updateSocialNetwork,
     deleteSocialNetwork,
@@ -127,9 +129,9 @@ export const ConfigView: React.FC = () => {
 
   // Editable Provider API States
   const [providerUrlInput, setProviderUrlInput] = useState(
-    businessConfig.providerApiUrl || "https://mazsocialmarket.com/api/v2"
+    providerCredentials.providerApiUrl || "https://mazsocialmarket.com/api/v2"
   );
-  const [providerKeyInput, setProviderKeyInput] = useState(businessConfig.providerApiKey || "");
+  const [providerKeyInput, setProviderKeyInput] = useState(providerCredentials.providerApiKey || "");
   const [showApiKey, setShowApiKey] = useState(false);
   const [isSavingApiConfig, setIsSavingApiConfig] = useState(false);
   const [saveApiSuccessMsg, setSaveApiSuccessMsg] = useState<string | null>(null);
@@ -578,13 +580,13 @@ export const ConfigView: React.FC = () => {
   };
 
   useEffect(() => {
-    if (businessConfig.providerApiUrl || businessConfig.providerApiKey) {
-      setCachedProviderCredentials(businessConfig.providerApiUrl, businessConfig.providerApiKey);
+    if (providerCredentials.providerApiUrl || providerCredentials.providerApiKey) {
+      setCachedProviderCredentials(providerCredentials.providerApiUrl, providerCredentials.providerApiKey);
     }
     if (activeTab === "provider_api") {
       fetchProviderConfig().then((cfg) => {
         setProviderConfig(cfg);
-        if (cfg.providerUrl && !businessConfig.providerApiUrl) {
+        if (cfg.providerUrl && !providerCredentials.providerApiUrl) {
           setProviderUrlInput(cfg.providerUrl);
         }
       });
@@ -594,16 +596,16 @@ export const ConfigView: React.FC = () => {
         .then((res) => setApiAuditResult(res))
         .finally(() => setIsAuditingApi(false));
     }
-  }, [activeTab, businessConfig.providerApiUrl, businessConfig.providerApiKey]);
+  }, [activeTab, providerCredentials.providerApiUrl, providerCredentials.providerApiKey]);
 
   useEffect(() => {
-    if (businessConfig.providerApiUrl) {
-      setProviderUrlInput(businessConfig.providerApiUrl);
+    if (providerCredentials.providerApiUrl) {
+      setProviderUrlInput(providerCredentials.providerApiUrl);
     }
-    if (businessConfig.providerApiKey) {
-      setProviderKeyInput(businessConfig.providerApiKey);
+    if (providerCredentials.providerApiKey) {
+      setProviderKeyInput(providerCredentials.providerApiKey);
     }
-  }, [businessConfig.providerApiUrl, businessConfig.providerApiKey]);
+  }, [providerCredentials.providerApiUrl, providerCredentials.providerApiKey]);
 
   const handleTestApiConnection = async () => {
     setIsTestingApiConnection(true);
@@ -647,8 +649,8 @@ export const ConfigView: React.FC = () => {
         return;
       }
 
-      // 2. Persist in Firestore config so it survives redeployments
-      await updateBusinessConfig({
+      // 2. Persist in private Firestore config/provider document so it survives redeployments
+      await updateProviderCredentials({
         providerApiUrl: providerUrlInput.trim(),
         providerApiKey: providerKeyInput.trim()
       });

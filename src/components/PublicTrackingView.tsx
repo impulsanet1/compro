@@ -4,10 +4,10 @@
  */
 
 import React, { useState, useEffect } from "react";
-import { doc, getDoc, collection, query, where, getDocs } from "firebase/firestore";
+import { doc, getDoc } from "firebase/firestore";
 import { db } from "../firebase";
 import { Receipt, ReceiptItem, getItemOrderIds, formatProviderStatus } from "../types";
-import { syncOrderWithProvider, callBackendApi } from "../services/providerApi";
+import { callBackendApi } from "../services/providerApi";
 import {
   CheckCircle2,
   Clock,
@@ -33,13 +33,13 @@ interface ItemTrackingMetrics {
   orderId: string;
   found: boolean;
   status: string;
-  rawStatus: string;
-  mappedStatus: "en_proceso" | "completado" | "cancelado";
+  rawStatus?: string;
+  mappedStatus: "en_proceso" | "procesando" | "parcial" | "completado" | "cancelado" | "desconocido";
   startCount: number | null;
   remains: number | null;
   delivered: number | null;
-  progressPercent: number;
-  estimatedDelivery: string;
+  progressPercent: number | null;
+  estimatedDelivery: string | null;
   liveInstagram?: {
     username: string;
     currentFollowers: number | null;
@@ -49,6 +49,27 @@ interface ItemTrackingMetrics {
     source: string;
     error?: string;
   } | null;
+}
+
+const UNKNOWN_TRACKING_MESSAGE =
+  "Estamos consultando el estado de tu pedido. Vuelve a intentar en unos minutos.";
+
+function buildUnknownMetrics(
+  orderId: string,
+  startCount: number | null = null,
+  customMessage?: string
+): ItemTrackingMetrics {
+  return {
+    orderId,
+    found: false,
+    status: "Consultando",
+    mappedStatus: "desconocido",
+    startCount,
+    remains: null,
+    delivered: null,
+    progressPercent: null,
+    estimatedDelivery: customMessage || UNKNOWN_TRACKING_MESSAGE,
+  };
 }
 
 type SupportedNetwork = "instagram" | "facebook" | "tiktok" | "youtube" | "generic";
@@ -215,20 +236,6 @@ export const PublicTrackingView: React.FC<PublicTrackingViewProps> = ({
         return;
       }
 
-      // Fallback: if user searched by Folio number (e.g., "IMP-1186", "#1186", "1186")
-      const digitsOnly = cleanInput.replace(/^IMP-/i, "").replace(/^#/, "").trim();
-      const folioNum = /^\d+$/.test(digitsOnly) ? parseInt(digitsOnly, 10) : NaN;
-      if (!isNaN(folioNum) && folioNum > 0) {
-        const qSnap = await getDocs(query(collection(db, "receipts"), where("consecutive", "==", folioNum)));
-        if (!qSnap.empty) {
-          const firstDoc = qSnap.docs[0];
-          const data = { id: firstDoc.id, ...firstDoc.data() } as Receipt;
-          setReceipt(data);
-          await fetchLiveMetrics(data);
-          return;
-        }
-      }
-
       setError("No se encontró ningún comprobante con este identificador. Por favor verifica el enlace o código QR de tu factura.");
       setReceipt(null);
     } catch (err: any) {
@@ -241,108 +248,72 @@ export const PublicTrackingView: React.FC<PublicTrackingViewProps> = ({
     }
   };
 
-  // Function to query MazSocialMarket provider status through safe server proxy with Instagram live verification
+  // Function to query MazSocialMarket provider status through safe server proxy
   const fetchLiveMetrics = async (receiptData: Receipt) => {
     const services = receiptData.services || [];
-    const orderIds: string[] = [];
+    const rawOrderIds: string[] = [];
 
-    services.forEach(item => {
+    services.forEach((item) => {
       const ids = getItemOrderIds(item);
-      ids.forEach(id => {
-        if (id && /^\d+$/.test(id.trim())) {
-          orderIds.push(id.trim());
+      ids.forEach((id) => {
+        const clean = (id || "").replace(/^#/, "").trim();
+        if (/^\d{1,15}$/.test(clean)) {
+          rawOrderIds.push(clean);
         }
       });
     });
 
+    const orderIds = Array.from(new Set(rawOrderIds)).slice(0, 10);
+    if (orderIds.length === 0) {
+      setLiveMetrics({});
+      return;
+    }
+
     try {
-      const data = await callBackendApi<{ success?: boolean; tracking?: ItemTrackingMetrics[] }>(
-        "tracking/customer-status",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            orderIds,
-            receiptTargetAccount: receiptData.targetAccount,
-            items: services.map(item => ({
-              orderId: item.orderId?.trim(),
-              orderIds: getItemOrderIds(item),
-              quantity: item.quantity,
-              socialNetworkId: item.socialNetworkId,
-              socialNetworkName: item.socialNetworkName,
-              serviceName: item.serviceName,
-              targetAccount: item.targetAccount || receiptData.targetAccount,
-              startCount: item.startCount,
-              description: `${item.socialNetworkName || ''} - ${item.serviceName || ''}`
-            }))
-          }),
-          signal: AbortSignal.timeout(15000),
-        }
-      );
+      const data = await callBackendApi<{
+        success?: boolean;
+        tracking?: ItemTrackingMetrics[];
+        error?: string;
+      }>("tracking/customer-status", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          orderIds,
+          items: services.map((item) => ({
+            orderId: item.orderId?.trim(),
+            orderIds: getItemOrderIds(item),
+            quantity: item.quantity,
+            startCount: item.startCount,
+          })),
+        }),
+        signal: AbortSignal.timeout(15000),
+      });
 
       if (data?.success && Array.isArray(data.tracking)) {
         const metricsMap: Record<string, ItemTrackingMetrics> = {};
         data.tracking.forEach((t: ItemTrackingMetrics) => {
-          metricsMap[t.orderId] = t;
+          metricsMap[String(t.orderId)] = t;
+        });
+        orderIds.forEach((id) => {
+          if (!metricsMap[id]) {
+            metricsMap[id] = buildUnknownMetrics(id);
+          }
         });
         setLiveMetrics(metricsMap);
-        return;
+      } else {
+        const fallbackMap: Record<string, ItemTrackingMetrics> = {};
+        orderIds.forEach((id) => {
+          fallbackMap[id] = buildUnknownMetrics(id, null, data?.error);
+        });
+        setLiveMetrics(fallbackMap);
       }
     } catch (err) {
-      console.warn("Primary customer tracking endpoint fallback:", err);
-    }
-
-    // Fallback to direct provider sync if server endpoint returned HTML or was unreachable
-    if (orderIds.length > 0) {
-      try {
-        const fallbackRes = await syncOrderWithProvider(orderIds);
-        if (fallbackRes.success && Array.isArray(fallbackRes.results)) {
-          const metricsMap: Record<string, ItemTrackingMetrics> = {};
-          fallbackRes.results.forEach((r) => {
-            const matchingItem = services.find((it) => getItemOrderIds(it).includes(r.orderId));
-            const qty = Number(matchingItem?.quantity) || 1000;
-            const remains = r.remains !== null && r.remains !== undefined ? Number(r.remains) : null;
-            const startCount =
-              matchingItem?.startCount ?? (r.startCount !== null && r.startCount !== undefined ? Number(r.startCount) : null);
-            const mapped: "en_proceso" | "completado" | "cancelado" =
-              r.mappedStatus === "completado"
-                ? "completado"
-                : r.mappedStatus === "cancelado"
-                ? "cancelado"
-                : "en_proceso";
-            const delivered =
-              mapped === "completado"
-                ? qty
-                : remains !== null && !isNaN(remains)
-                ? Math.max(0, qty - remains)
-                : null;
-            const progressPercent =
-              mapped === "completado"
-                ? 100
-                : mapped === "cancelado"
-                ? 0
-                : delivered !== null && qty > 0
-                ? Math.min(100, Math.max(5, Math.round((delivered / qty) * 100)))
-                : 25;
-
-            metricsMap[r.orderId] = {
-              orderId: r.orderId,
-              found: r.found,
-              status: formatProviderStatus(r.rawStatus),
-              rawStatus: r.rawStatus,
-              mappedStatus: mapped,
-              startCount,
-              remains,
-              delivered,
-              progressPercent,
-              estimatedDelivery: mapped === "completado" ? "Pedido completado con éxito" : "Aprox. 2 a 8 horas",
-            };
-          });
-          setLiveMetrics(metricsMap);
-        }
-      } catch {
-        // Ignore fallback error
-      }
+      console.warn("Customer tracking status error:", err);
+      const fallbackMap: Record<string, ItemTrackingMetrics> = {};
+      orderIds.forEach((id) => {
+        fallbackMap[id] = buildUnknownMetrics(id);
+      });
+      setLiveMetrics(fallbackMap);
     }
   };
 
@@ -412,6 +383,14 @@ export const PublicTrackingView: React.FC<PublicTrackingViewProps> = ({
         </span>
       );
     }
+    if (s === "desconocido") {
+      return (
+        <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-amber-50 text-amber-800 border border-amber-300">
+          <Clock className="w-4 h-4 text-amber-600" />
+          Consultando
+        </span>
+      );
+    }
     return (
       <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-blue-50 text-blue-800 border border-blue-300">
         <Clock className="w-4 h-4 text-blue-600 animate-spin" />
@@ -421,6 +400,16 @@ export const PublicTrackingView: React.FC<PublicTrackingViewProps> = ({
   };
 
   const folioNumber = receipt ? `IMP-${String(receipt.consecutive || 1).padStart(4, "0")}` : "";
+
+  const getSupportWhatsappUrl = () => {
+    let cleanWa = (supportWhatsapp || "573208354198").replace(/\D/g, "");
+    if (cleanWa.length === 10 && !cleanWa.startsWith("57")) {
+      cleanWa = "57" + cleanWa;
+    }
+    return `https://wa.me/${cleanWa}?text=${encodeURIComponent(
+      `Hola ${businessName}, quisiera consultar el estado de mi pedido con comprobante ${folioNumber}.`
+    )}`;
+  };
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-slate-50 to-slate-100/80 text-gray-900 pb-12 font-sans antialiased">
@@ -547,14 +536,27 @@ export const PublicTrackingView: React.FC<PublicTrackingViewProps> = ({
 
               {receipt.services && receipt.services.length > 0 ? (
                 receipt.services.map((item: ReceiptItem, idx: number) => {
-                  const ids = getItemOrderIds(item);
-                  const pId = ids[0] || item.orderId;
+                  const validIds = getItemOrderIds(item)
+                    .map((oid) => (oid || "").replace(/^#/, "").trim())
+                    .filter((oid) => /^\d{1,15}$/.test(oid));
+                  const pId = validIds[0];
                   const metrics = pId ? liveMetrics[pId] : null;
-                  const itemStatus = metrics ? metrics.mappedStatus : (receipt.status === "completado" ? "completado" : "en_proceso");
-                  const progress = metrics ? metrics.progressPercent : (itemStatus === "completado" ? 100 : 25);
-                  const serviceTitle = item.socialNetworkName && item.socialNetworkName.toLowerCase() !== (item.serviceName || "").toLowerCase()
-                    ? `${item.socialNetworkName} - ${item.serviceName}`
-                    : (item.serviceName || item.socialNetworkName || "Servicio");
+                  const itemStatus: ItemTrackingMetrics["mappedStatus"] = metrics
+                    ? metrics.mappedStatus
+                    : receipt.status === "completado"
+                    ? "completado"
+                    : "desconocido";
+                  const progress: number | null =
+                    itemStatus === "completado"
+                      ? 100
+                      : metrics && typeof metrics.progressPercent === "number"
+                      ? metrics.progressPercent
+                      : null;
+                  const serviceTitle =
+                    item.socialNetworkName &&
+                    item.socialNetworkName.toLowerCase() !== (item.serviceName || "").toLowerCase()
+                      ? `${item.socialNetworkName} - ${item.serviceName}`
+                      : item.serviceName || item.socialNetworkName || "Servicio";
 
                   return (
                     <div
@@ -587,53 +589,95 @@ export const PublicTrackingView: React.FC<PublicTrackingViewProps> = ({
                             <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold bg-rose-50 text-rose-800 border border-rose-300">
                               🔴 Cancelado
                             </span>
+                          ) : itemStatus === "parcial" ? (
+                            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold bg-orange-50 text-orange-800 border border-orange-300">
+                              🟠 Parcial
+                            </span>
+                          ) : itemStatus === "desconocido" ? (
+                            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold bg-amber-50 text-amber-800 border border-amber-300">
+                              ⏳ Consultando
+                            </span>
                           ) : (
                             <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold bg-blue-50 text-blue-800 border border-blue-300">
-                              🔵 {metrics?.status ? formatProviderStatus(metrics.status) : (metrics?.rawStatus ? formatProviderStatus(metrics.rawStatus) : "En curso")}
+                              🔵 {metrics?.status ? formatProviderStatus(metrics.status) : metrics?.rawStatus ? formatProviderStatus(metrics.rawStatus) : "Procesando"}
                             </span>
                           )}
                         </div>
                       </div>
 
-                      {/* Live Delivery Progress Bar */}
-                      <div className="bg-slate-50 rounded-xl p-4 border border-slate-200/80 mb-4">
-                        <div className="flex items-center justify-between text-xs font-semibold mb-2">
-                          <span className="text-gray-700 flex items-center gap-1.5">
-                            <TrendingUp className="w-3.5 h-3.5 text-indigo-600" />
-                            Progreso de entrega:
-                          </span>
-                          <span className={`font-mono font-bold ${
-                            itemStatus === "completado" ? "text-emerald-700" : "text-blue-700"
-                          }`}>
-                            {progress}%
-                          </span>
+                      {/* Unknown Status Notice OR Real Delivery Progress Bar */}
+                      {itemStatus === "desconocido" ? (
+                        <div className="bg-amber-50/70 rounded-xl p-4 border border-amber-200/80 mb-4 space-y-3">
+                          <div className="flex items-start gap-2.5 text-xs text-amber-900">
+                            <Clock className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                            <p className="font-medium leading-relaxed">
+                              {metrics?.estimatedDelivery || UNKNOWN_TRACKING_MESSAGE}
+                            </p>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-2 pt-1">
+                            <button
+                              type="button"
+                              onClick={handleRefresh}
+                              disabled={refreshing}
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold text-indigo-700 bg-white hover:bg-indigo-50 border border-indigo-200 transition cursor-pointer active:scale-95 disabled:opacity-60"
+                            >
+                              <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? "animate-spin" : ""}`} />
+                              <span>Reintentar</span>
+                            </button>
+                            <a
+                              href={getSupportWhatsappUrl()}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold text-emerald-700 bg-white hover:bg-emerald-50 border border-emerald-200 transition cursor-pointer active:scale-95"
+                            >
+                              <MessageCircle className="w-3.5 h-3.5" />
+                              <span>Soporte por WhatsApp</span>
+                            </a>
+                          </div>
                         </div>
+                      ) : progress !== null ? (
+                        <div className="bg-slate-50 rounded-xl p-4 border border-slate-200/80 mb-4">
+                          <div className="flex items-center justify-between text-xs font-semibold mb-2">
+                            <span className="text-gray-700 flex items-center gap-1.5">
+                              <TrendingUp className="w-3.5 h-3.5 text-indigo-600" />
+                              Progreso de entrega:
+                            </span>
+                            <span
+                              className={`font-mono font-bold ${
+                                itemStatus === "completado" ? "text-emerald-700" : "text-blue-700"
+                              }`}
+                            >
+                              {progress}%
+                            </span>
+                          </div>
 
-                        {/* Progress track */}
-                        <div className="w-full bg-gray-200 rounded-full h-2.5 overflow-hidden">
-                          <div
-                            className={`h-full rounded-full transition-all duration-700 ${
-                              itemStatus === "completado"
-                                ? "bg-emerald-500"
-                                : itemStatus === "cancelado"
-                                ? "bg-rose-500"
-                                : "bg-gradient-to-r from-blue-500 to-indigo-600 animate-pulse"
-                            }`}
-                            style={{ width: `${progress}%` }}
-                          />
-                        </div>
+                          {/* Progress track */}
+                          <div className="w-full bg-gray-200 rounded-full h-2.5 overflow-hidden">
+                            <div
+                              className={`h-full rounded-full transition-all duration-700 ${
+                                itemStatus === "completado"
+                                  ? "bg-emerald-500"
+                                  : itemStatus === "cancelado"
+                                  ? "bg-rose-500"
+                                  : "bg-gradient-to-r from-blue-500 to-indigo-600 animate-pulse"
+                              }`}
+                              style={{ width: `${progress}%` }}
+                            />
+                          </div>
 
-                        {/* Estimated delivery time */}
-                        <div className="mt-3 flex items-center justify-between text-xs text-gray-500">
-                          <span className="flex items-center gap-1">
-                            <Clock className="w-3.5 h-3.5 text-gray-400" />
-                            Tiempo estimado:
-                          </span>
-                          <span className="font-semibold text-gray-800">
-                            {metrics?.estimatedDelivery || (itemStatus === "completado" ? "Completado con éxito" : "Aprox. 2 a 8 horas")}
-                          </span>
+                          {metrics?.estimatedDelivery && (
+                            <div className="mt-3 flex items-center justify-between text-xs text-gray-500">
+                              <span className="flex items-center gap-1">
+                                <Clock className="w-3.5 h-3.5 text-gray-400" />
+                                Estado de entrega:
+                              </span>
+                              <span className="font-semibold text-gray-800">
+                                {metrics.estimatedDelivery}
+                              </span>
+                            </div>
+                          )}
                         </div>
-                      </div>
+                      ) : null}
 
                       {/* Live Counter Metrics (Conteo Inicial, Cantidad, Restante) */}
                       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs">
@@ -666,14 +710,20 @@ export const PublicTrackingView: React.FC<PublicTrackingViewProps> = ({
                           <span className="text-gray-400 block text-[10px] font-semibold uppercase tracking-wider">
                             Entregados:
                           </span>
-                          <span className={`font-mono font-black text-sm mt-0.5 block ${
-                            itemStatus === "completado" ? "text-emerald-700" : "text-blue-700"
-                          }`}>
+                          <span
+                            className={`font-mono font-black text-sm mt-0.5 block ${
+                              itemStatus === "completado"
+                                ? "text-emerald-700"
+                                : itemStatus === "desconocido"
+                                ? "text-gray-500"
+                                : "text-blue-700"
+                            }`}
+                          >
                             {itemStatus === "completado"
                               ? Number(item.quantity || 0).toLocaleString("es-ES")
                               : metrics?.delivered !== null && metrics?.delivered !== undefined
                               ? Number(metrics.delivered).toLocaleString("es-ES")
-                              : "En curso"}
+                              : "—"}
                           </span>
                         </div>
 

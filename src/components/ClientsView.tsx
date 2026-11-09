@@ -25,7 +25,8 @@ import {
   ChevronRight,
   Split,
   X,
-  Sparkles
+  Sparkles,
+  Zap
 } from "lucide-react";
 import { Client, Receipt, getClientCode, getNormalizedStatus, isWarrantyForClient, buildReceiptsClientIndex, resolveReceiptWarranty, normalizeContact } from "../types";
 import { RepurchaseModal } from "./RepurchaseModal";
@@ -33,9 +34,10 @@ import { safeCopyToClipboard } from "../utils";
 
 interface ClientsViewProps {
   onSelectReceipt: (receipt: Receipt, editMode?: boolean) => void;
+  onRepeatOrder?: (receipt: Receipt, client?: Client) => void;
 }
 
-export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => {
+export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt, onRepeatOrder }) => {
   const { clients, receipts, supplierWarranties, updateClientTag, updateClient, reassignClientCode, resolveDuplicateClientCodes, separateReceiptToNewClient, isDarkMode } = useApp();
   const formatCOP = (val: number) => "$" + Math.round(val).toLocaleString("es-CO");
 
@@ -991,6 +993,19 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
                         <span>Oferta de Recompra (Promo)</span>
                       </button>
 
+                      {onRepeatOrder && clientReceipts.length > 0 && (
+                        <button
+                          type="button"
+                          id="btn-repeat-last-client-order"
+                          onClick={() => onRepeatOrder(clientReceipts[0], selectedClient)}
+                          className="inline-flex items-center gap-1.5 text-xs font-extrabold px-3 py-1.5 rounded-lg transition active:scale-95 cursor-pointer shadow-sm bg-indigo-600 hover:bg-indigo-500 text-white"
+                          title={`Repetir el último pedido (#${clientReceipts[0].consecutive}) en 1 clic`}
+                        >
+                          <Zap className="w-3.5 h-3.5 text-amber-300" />
+                          <span>Repetir Último Pedido</span>
+                        </button>
+                      )}
+
                       <a
                         href={`https://wa.me/${(selectedClient.phone || '').replace(/\D/g, '').length === 10 && !(selectedClient.phone || '').replace(/\D/g, '').startsWith('57') ? '57' + (selectedClient.phone || '').replace(/\D/g, '') : (selectedClient.phone || '').replace(/\D/g, '')}?text=${encodeURIComponent(`Hola ${(selectedClient.name || 'Cliente').split(' ')[0]}! 👋 Te saludamos de ImpulsaNet. ¿En qué podemos ayudarte hoy?`)}`}
                         target="_blank"
@@ -1247,10 +1262,26 @@ export const ClientsView: React.FC<ClientsViewProps> = ({ onSelectReceipt }) => 
                           </div>
                         </div>
 
-                        <div className="flex items-center gap-1.5 sm:gap-2">
+                        <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap justify-end">
                           <span className={`text-xs font-bold mr-1 ${isDarkMode ? "text-indigo-400" : "text-indigo-600"}`}>
                             {formatCOP(receipt.totalCharged)}
                           </span>
+                          {onRepeatOrder && (
+                            <button
+                              id={`btn-repeat-client-receipt-${receipt.consecutive}`}
+                              type="button"
+                              onClick={() => onRepeatOrder(receipt, selectedClient)}
+                              className={`inline-flex items-center gap-1 text-xs font-bold border transition px-2.5 py-1.5 rounded-lg shadow-2xs cursor-pointer ${
+                                isDarkMode
+                                  ? "bg-emerald-950/70 border-emerald-700/80 text-emerald-300 hover:bg-emerald-900"
+                                  : "bg-emerald-50 border-emerald-200 text-emerald-700 hover:bg-emerald-100"
+                              }`}
+                              title="Repetir este pedido en 1 clic (carga cliente y servicios en Emitir)"
+                            >
+                              <Zap className="w-3 h-3 text-emerald-500" />
+                              <span>Repetir</span>
+                            </button>
+                          )}
                           <button
                             id={`btn-view-client-receipt-${receipt.consecutive}`}
                             onClick={() => onSelectReceipt(receipt, false)}

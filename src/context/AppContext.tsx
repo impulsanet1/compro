@@ -57,6 +57,7 @@ import {
 } from "../defaultData";
 import { syncOrderWithProvider, setCachedProviderCredentials, getCachedProviderCredentials, clearCachedProviderCredentials } from "../services/providerApi";
 import { runReferentialIntegrityAudit, IntegrityAuditReport } from "../utils/referentialIntegrityAudit";
+import { handleFirestoreError, OperationType } from "../utils/firestoreErrorHandler";
 
 interface AppContextType {
   user: User | null;
@@ -201,7 +202,14 @@ async function commitReceiptPatchAtomically(receiptId: string, patch: Partial<Re
   const batch = writeBatch(db);
   const ops = applyReceiptPatchToBatch(batch, receiptId, patch);
   if (ops > 0) {
-    await batch.commit();
+    try {
+      await batch.commit();
+    } catch (err: any) {
+      if (err?.code === "permission-denied" || (err?.message && err.message.includes("permissions"))) {
+        handleFirestoreError(err, OperationType.WRITE, `receipts/${receiptId}`);
+      }
+      throw err;
+    }
   }
 }
 
@@ -512,6 +520,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { migratedCount: migrated, totalChecked: allPublicDocs.length };
     } catch (err: any) {
       console.warn("Error in runReceiptsPrivateMigration:", err);
+      if (err?.code === "permission-denied" || (err?.message && err.message.includes("permissions"))) {
+        handleFirestoreError(err, OperationType.WRITE, "receipts_private");
+      }
       setReceiptsMigrationStatus((prev) => ({
         ...prev,
         running: false,
@@ -674,6 +685,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       },
       (error) => {
         console.warn("Firestore config/business error:", error);
+        if (error?.code === "permission-denied" || (error?.message && error.message.includes("permissions"))) {
+          handleFirestoreError(error, OperationType.GET, "config/business");
+        }
       }
     );
 
@@ -698,6 +712,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       },
       (error) => {
         console.warn("Firestore config/provider error:", error);
+        if (error?.code === "permission-denied" || (error?.message && error.message.includes("permissions"))) {
+          handleFirestoreError(error, OperationType.GET, "config/provider");
+        }
       }
     );
 
@@ -761,8 +778,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               rapidApiKey: deleteField(),
             });
           }
-        } catch (err) {
+        } catch (err: any) {
           console.warn("Provider credentials migration check:", err);
+          if (err?.code === "permission-denied" || (err?.message && err.message.includes("permissions"))) {
+            handleFirestoreError(err, OperationType.WRITE, "config/provider");
+          }
         }
       })();
     }
@@ -790,6 +810,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       },
       (error) => {
         console.warn("Firestore social networks error:", error);
+        if (error?.code === "permission-denied" || (error?.message && error.message.includes("permissions"))) {
+          handleFirestoreError(error, OperationType.LIST, "social_networks");
+        }
         setSocialNetworks(DEFAULT_SOCIAL_NETWORKS);
       }
     );
@@ -856,6 +879,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       },
       (error) => {
         console.warn("Firestore services error:", error);
+        if (error?.code === "permission-denied" || (error?.message && error.message.includes("permissions"))) {
+          handleFirestoreError(error, OperationType.LIST, "services");
+        }
         setServices(DEFAULT_SERVICES);
       }
     );
@@ -886,6 +912,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       },
       (error) => {
         console.warn("Firestore combos error:", error);
+        if (error?.code === "permission-denied" || (error?.message && error.message.includes("permissions"))) {
+          handleFirestoreError(error, OperationType.LIST, "combos");
+        }
         setCombos(DEFAULT_COMBOS);
       }
     );
@@ -950,6 +979,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       },
       (error) => {
         console.warn("Firestore receipts error:", error);
+        if (error?.code === "permission-denied" || (error?.message && error.message.includes("permissions"))) {
+          handleFirestoreError(error, OperationType.LIST, "receipts");
+        }
       }
     );
 
@@ -975,6 +1007,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       },
       (error) => {
         console.warn("Firestore receipts_private error:", error);
+        if (error?.code === "permission-denied" || (error?.message && error.message.includes("permissions"))) {
+          handleFirestoreError(error, OperationType.LIST, "receipts_private");
+        }
         hasLoadedPrivateReceiptsRef.current = true;
         recomputeMergedReceipts();
       }
@@ -994,6 +1029,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       },
       (error) => {
         console.warn("Firestore clients error:", error);
+        if (error?.code === "permission-denied" || (error?.message && error.message.includes("permissions"))) {
+          handleFirestoreError(error, OperationType.LIST, "clients");
+        }
         setLoadingData(false);
       }
     );
@@ -1010,7 +1048,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         items.sort((a, b) => new Date(b.sentDate || b.createdAt || 0).getTime() - new Date(a.sentDate || a.createdAt || 0).getTime());
         setSupplierWarranties(items);
       },
-      (error) => console.warn("Firestore supplier_warranties error:", error)
+      (error) => {
+        console.warn("Firestore supplier_warranties error:", error);
+        if (error?.code === "permission-denied" || (error?.message && error.message.includes("permissions"))) {
+          handleFirestoreError(error, OperationType.LIST, "supplier_warranties");
+        }
+      }
     );
 
     return () => {

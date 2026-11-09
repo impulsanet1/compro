@@ -19,15 +19,17 @@ import {
   ChevronRight,
   RotateCcw,
   ShieldCheck,
-  RefreshCw
+  RefreshCw,
+  Zap
 } from "lucide-react";
 import { Receipt, getNormalizedStatus, getItemOrderIds, buildReceiptsClientIndex, isCustomServiceCode, resolveReceiptWarranty, getClientCode } from "../types";
 
 interface HistoryViewProps {
   onSelectReceipt: (receipt: Receipt, editMode?: boolean) => void;
+  onRepeatOrder?: (receipt: Receipt) => void;
 }
 
-export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => {
+export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt, onRepeatOrder }) => {
   const { receipts, getReceiptPrivateData, receiptsMigrationStatus, runReceiptsPrivateMigration, deleteReceipt, updateReceipt, markAllInProcessAsCompleted, syncAllInProcessOrdersWithProvider, clients, isDarkMode, businessConfig } = useApp();
   const formatCOP = (val: number) => "$" + Math.round(val).toLocaleString("es-CO");
 
@@ -1014,6 +1016,22 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onSelectReceipt }) => 
                               >
                                 <ShieldCheck className="w-3 h-3" />
                                 Garantía
+                              </button>
+                            )}
+                            {onRepeatOrder && (
+                              <button
+                                id={`btn-repeat-receipt-${r.consecutive}`}
+                                type="button"
+                                onClick={() => onRepeatOrder(r)}
+                                className={`inline-flex items-center gap-1 text-[11px] font-bold transition px-2 py-1 rounded-md shadow-2xs cursor-pointer border ${
+                                  isDarkMode
+                                    ? "bg-emerald-950/70 border-emerald-700/80 text-emerald-300 hover:bg-emerald-900"
+                                    : "bg-emerald-50 border-emerald-200 text-emerald-700 hover:bg-emerald-100"
+                                }`}
+                                title="Repetir este pedido en 1 clic (carga cliente y servicios en Emitir)"
+                              >
+                                <Zap className="w-3 h-3 text-emerald-500" />
+                                Repetir
                               </button>
                             )}
                             <button

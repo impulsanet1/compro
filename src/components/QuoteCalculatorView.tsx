@@ -37,7 +37,7 @@ export interface QuoteItem {
 }
 
 interface QuoteCalculatorViewProps {
-  onTransferToReceipt?: (items: Partial<ReceiptItem>[]) => void;
+  onTransferToReceipt?: (items: Partial<ReceiptItem>[], clientName?: string) => void;
 }
 
 export const QuoteCalculatorView: React.FC<QuoteCalculatorViewProps> = ({ onTransferToReceipt }) => {
@@ -731,13 +731,19 @@ export const QuoteCalculatorView: React.FC<QuoteCalculatorViewProps> = ({ onTran
                   onClick={() => {
                     const itemsToTransfer: Partial<ReceiptItem>[] = calculatedItems.map((item) => ({
                       socialNetworkId: item.socialNetworkId,
+                      socialNetworkName: item.socialName,
                       serviceId: item.serviceId,
+                      serviceName: item.serviceName,
                       quantity: item.effectiveQty,
-                      cost: item.itemProviderCost,
-                      costUSD: item.providerCostPer1000USD ? (item.effectiveQty / 1000) * item.providerCostPer1000USD : undefined,
-                      price: item.itemChargedPrice
+                      suggestedPrice: item.itemChargedPrice,
+                      chargedPrice: item.itemChargedPrice,
+                      providerCostAtPurchase: item.itemProviderCost,
+                      providerCostCOP: item.itemProviderCost,
+                      providerCostUSD: item.providerCostPer1000USD
+                        ? Number(((item.effectiveQty / 1000) * item.providerCostPer1000USD).toFixed(4))
+                        : null,
                     }));
-                    onTransferToReceipt(itemsToTransfer);
+                    onTransferToReceipt(itemsToTransfer, clientName.trim() || undefined);
                   }}
                   className="w-full flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs shadow-xs transition cursor-pointer active:scale-95 touch-manipulation"
                 >

@@ -523,6 +523,7 @@ async function fetchOrdersFromProvider(apiUrl, apiKey, uniqueIds) {
           mappedStatus: mapSmmStatusToAppStatus(itemData?.status),
           startCount: itemData?.start_count ?? null,
           remains: itemData?.remains ?? null,
+          quantity: itemData?.quantity ?? null,
           charge: itemData?.charge ?? null,
           currency: itemData?.currency ?? 'USD',
         });
@@ -536,6 +537,7 @@ async function fetchOrdersFromProvider(apiUrl, apiKey, uniqueIds) {
           mappedStatus: 'en_proceso',
           startCount: null,
           remains: null,
+          quantity: null,
           charge: null,
           currency: null,
           error: data.error,
@@ -552,6 +554,7 @@ async function fetchOrdersFromProvider(apiUrl, apiKey, uniqueIds) {
             mappedStatus: 'en_proceso',
             startCount: null,
             remains: null,
+            quantity: null,
             charge: null,
             currency: null,
             error: item?.error || 'No se encontró información para esta orden',
@@ -564,6 +567,7 @@ async function fetchOrdersFromProvider(apiUrl, apiKey, uniqueIds) {
             mappedStatus: mapSmmStatusToAppStatus(item.status),
             startCount: item.start_count ?? null,
             remains: item.remains ?? null,
+            quantity: item.quantity ?? null,
             charge: item.charge ?? null,
             currency: item.currency ?? 'USD',
           });

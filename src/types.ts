@@ -1120,6 +1120,7 @@ export interface ProviderOrderSyncResult {
   mappedStatus: "procesando" | "en_proceso" | "parcial" | "completado" | "cancelado" | "desconocido";
   startCount?: string | number | null;
   remains?: string | number | null;
+  quantity?: string | number | null;
   charge?: string | null;
   currency?: string | null;
   error?: string;

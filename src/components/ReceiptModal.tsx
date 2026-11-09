@@ -4,7 +4,7 @@
  */
 
 import React, { useRef, useState, useEffect, useMemo } from "react";
-import { X, ShieldCheck, Edit3, Save, Trash2, ShieldAlert, Calendar, ChevronDown, ChevronUp, MessageSquare, Send, PhoneCall, ExternalLink, Bell, Plus, Check, RotateCcw, AlertCircle, Clock, Hash, RefreshCw, QrCode, Instagram } from "lucide-react";
+import { X, ShieldCheck, Edit3, Save, Trash2, ShieldAlert, Calendar, ChevronDown, ChevronUp, MessageSquare, Send, PhoneCall, ExternalLink, Bell, Plus, Check, RotateCcw, AlertCircle, Clock, Hash, RefreshCw, QrCode, Instagram, Download, Zap } from "lucide-react";
 import { Receipt, ReceiptItem, ReceiptStatus, getNormalizedStatus, getItemOrderIds, getItemOrderIdDisplay, getOrderIdTypeLabel, resolveReceiptWarranty, ProviderOrderSyncResult, formatProviderStatus } from "../types";
 import { motion } from "motion/react";
 import { useApp } from "../context/AppContext";
@@ -17,6 +17,7 @@ interface ReceiptModalProps {
   businessName: string;
   whatsapp: string;
   initialIsEditing?: boolean;
+  onRepeatOrder?: (receipt: Receipt) => void;
 }
 
 export const ReceiptModal: React.FC<ReceiptModalProps> = ({
@@ -25,6 +26,7 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
   businessName,
   whatsapp,
   initialIsEditing = false,
+  onRepeatOrder,
 }) => {
   const { businessConfig, providerCredentials, updateProviderCredentials, updateReceipt, addSupplierWarranty, reopenOrResendWarrantyForCancelledOrder, syncReceiptWithProvider, getReceiptPrivateData } = useApp();
   const receiptRef = useRef<HTMLDivElement>(null);
@@ -160,6 +162,8 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
   const [resendSuccess, setResendSuccess] = useState<string | null>(null);
   const [showCancelConfirm, setShowCancelConfirm] = useState(false);
   const [copiedTracking, setCopiedTracking] = useState(false);
+  const [isDownloadingPng, setIsDownloadingPng] = useState(false);
+  const [pngDownloadDone, setPngDownloadDone] = useState(false);
 
   const handleSaveQuickTargetAccount = async () => {
     const clean = quickTargetAccount.trim();
@@ -548,6 +552,187 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
     newWin.document.write(htmlContent);
     newWin.document.close();
     return true;
+  };
+
+  // Direct 1-click PNG download inside the modal without requiring a popup window
+  const handleDirectDownloadPng = async () => {
+    if (isDownloadingPng) return;
+    setIsDownloadingPng(true);
+    setError(null);
+
+    try {
+      // Load html2canvas dynamically if not yet on window
+      let h2c = (window as any).html2canvas;
+      if (!h2c) {
+        await new Promise<void>((resolve, reject) => {
+          const existingScript = document.querySelector('script[data-html2canvas="true"]') as HTMLScriptElement | null;
+          if (existingScript) {
+            existingScript.addEventListener("load", () => resolve());
+            existingScript.addEventListener("error", () => reject(new Error("No se pudo cargar generador de imagen.")));
+            return;
+          }
+          const script = document.createElement("script");
+          script.src = "https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js";
+          script.async = true;
+          script.setAttribute("data-html2canvas", "true");
+          script.onload = () => resolve();
+          script.onerror = () => reject(new Error("No se pudo cargar generador de imagen."));
+          document.head.appendChild(script);
+        });
+        h2c = (window as any).html2canvas;
+      }
+
+      if (!h2c) {
+        throw new Error("El generador de imagen no está disponible.");
+      }
+
+      // Build clean offscreen receipt card so admin controls / scrollbars are never captured
+      const container = document.createElement("div");
+      container.style.position = "fixed";
+      container.style.left = "-9999px";
+      container.style.top = "0";
+      container.style.width = "680px";
+      container.style.background = "#ffffff";
+      container.style.zIndex = "-1";
+
+      const itemsHtml = (receipt.services || []).map((item) => {
+        const orderIdsStr = getItemOrderIdDisplay(item);
+        const isResent = getIsItemResent(item, receipt);
+        const title = item.socialNetworkName && item.socialNetworkName.toLowerCase() !== (item.serviceName || "").toLowerCase()
+          ? `${item.socialNetworkName} - ${item.serviceName || ""}`
+          : (item.serviceName || item.socialNetworkName || "Servicio");
+
+        return `
+          <tr style="${isResent ? "background-color: #fffdf5;" : ""}">
+            <td style="padding: 12px 16px; border-bottom: 1px solid #f1f5f9; font-weight: 600; color: #0f172a;">
+              <div style="font-size: 13.5px; font-weight: 700; color: #0f172a;">
+                ${title}
+                ${isResent ? `<span style="display: inline-block; margin-left: 6px; background-color: #fef3c7; color: #92400e; border: 1px solid #fde68a; font-size: 9.5px; font-weight: 800; padding: 1px 6px; border-radius: 5px;">🔄 REENVIADO</span>` : ""}
+              </div>
+              <div style="margin-top: 4px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                ${orderIdsStr ? `<span style="font-size: 11.5px; font-weight: 700; color: #0f172a; font-family: monospace;">ID: #${orderIdsStr}</span>` : ""}
+                ${isResent && item.previousOrderId && item.previousOrderId !== orderIdsStr ? `<span style="font-size: 10.5px; color: #94a3b8; font-family: monospace;">Antiguo: <s>#${item.previousOrderId}</s></span>` : ""}
+                ${isResent && item.resendNote ? `<span style="font-size: 10.5px; color: #b45309; font-style: italic;">📌 ${item.resendNote}</span>` : ""}
+              </div>
+            </td>
+            <td style="padding: 12px 16px; border-bottom: 1px solid #f1f5f9; text-align: center; color: #334155; font-weight: 600;">
+              ${(item.quantity || 0).toLocaleString()}
+            </td>
+            <td style="padding: 12px 16px; border-bottom: 1px solid #f1f5f9; text-align: right; font-weight: 700; color: #0f172a;">
+              $${Math.round(item.chargedPrice || 0).toLocaleString("es-CO")} COP
+            </td>
+          </tr>
+        `;
+      }).join("");
+
+      const formattedDateStr = formatDate(receipt.date);
+      const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=140x140&margin=2&data=${encodeURIComponent(getCustomerTrackingUrl(receipt.id, businessConfig?.customTrackingUrl))}`;
+
+      container.innerHTML = `
+        <div style="background: #ffffff; width: 680px; border-radius: 20px; border: 1px solid #e2e8f0; padding: 36px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #0f172a;">
+          <div style="display: flex; justify-content: space-between; align-items: flex-start; padding-bottom: 24px; border-bottom: 2px solid #f1f5f9;">
+            <div>
+              <div style="font-size: 24px; font-weight: 800; color: #0f172a; letter-spacing: -0.5px;">${businessName || "ImpulsaNet"}</div>
+              <div style="font-size: 12px; color: #64748b; font-weight: 500; margin-top: 2px;">Comprobante de Compra Electrónico</div>
+            </div>
+            <div>
+              <div style="text-align: right; font-size: 18px; font-weight: 800; color: #4f46e5;">Nº #${receipt.consecutive || ""}</div>
+              <div style="font-size: 12px; color: #64748b; margin-top: 4px;">${formattedDateStr}</div>
+            </div>
+          </div>
+
+          <div style="background: #f8fafc; border-radius: 12px; border: 1px solid #e2e8f0; padding: 16px; margin: 24px 0; display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+            <div>
+              <div style="font-size: 11px; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px;">Cliente</div>
+              <div style="font-size: 15px; font-weight: 700; color: #0f172a; margin-top: 2px;">${receipt.clientName || "Cliente"}</div>
+            </div>
+            <div>
+              <div style="font-size: 11px; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px;">Teléfono / WhatsApp</div>
+              <div style="font-size: 15px; font-weight: 700; color: #0f172a; margin-top: 2px;">${receipt.clientPhone || "No especificado"}</div>
+            </div>
+          </div>
+
+          <table style="width: 100%; border-collapse: collapse; margin-bottom: 24px;">
+            <thead>
+              <tr>
+                <th style="font-size: 11px; font-weight: 700; text-transform: uppercase; color: #475569; background: #f8fafc; padding: 10px 16px; text-align: left; border-top: 1px solid #e2e8f0; border-bottom: 1px solid #e2e8f0;">Servicio / Producto</th>
+                <th style="font-size: 11px; font-weight: 700; text-transform: uppercase; color: #475569; background: #f8fafc; padding: 10px 16px; text-align: center; border-top: 1px solid #e2e8f0; border-bottom: 1px solid #e2e8f0;">Cantidad</th>
+                <th style="font-size: 11px; font-weight: 700; text-transform: uppercase; color: #475569; background: #f8fafc; padding: 10px 16px; text-align: right; border-top: 1px solid #e2e8f0; border-bottom: 1px solid #e2e8f0;">Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${itemsHtml}
+            </tbody>
+          </table>
+
+          <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 6px; padding-top: 16px; border-top: 2px solid #f1f5f9;">
+            <div style="display: flex; justify-content: space-between; width: 260px; font-size: 14px; color: #64748b;">
+              <span>Subtotal:</span>
+              <span>$${Math.round(totals.subtotal).toLocaleString("es-CO")} COP</span>
+            </div>
+            <div style="display: flex; justify-content: space-between; width: 260px; font-size: 20px; font-weight: 800; color: #059669;">
+              <span>Total Pagado:</span>
+              <span>$${Math.round(totals.totalCharged).toLocaleString("es-CO")} COP</span>
+            </div>
+          </div>
+
+          <div style="background: #e0e7ff; border: 1px solid #c7d2fe; border-radius: 12px; padding: 14px 18px; margin-top: 24px; display: flex; align-items: center; justify-content: space-between; color: #3730a3; font-size: 13px; font-weight: 600;">
+            <span>🛡️ Garantía Activa del Servicio:</span>
+            <span>${resolveReceiptWarranty(receipt, 30).warrantyText}</span>
+          </div>
+
+          <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 14px; padding: 12px 16px; margin-top: 18px; display: flex; align-items: center; justify-content: space-between; gap: 14px; text-align: left;">
+            <div>
+              <div style="font-size: 13px; font-weight: 700; color: #1e1b4b;">📲 Rastreo en Vivo</div>
+              <div style="font-size: 11px; color: #64748b; margin-top: 2px; max-width: 360px; line-height: 1.4;">
+                Escanea el código QR con tu celular para consultar el estado y avance de tu pedido en tiempo real.
+              </div>
+            </div>
+            <div style="background: #ffffff; padding: 6px; border-radius: 10px; border: 1px solid #cbd5e1; display: flex; flex-direction: column; align-items: center; flex-shrink: 0;">
+              <img src="${qrUrl}" alt="QR Rastreo" style="width: 64px; height: 64px; border-radius: 6px;" crossOrigin="anonymous" />
+              <span style="font-size: 8px; font-weight: 700; color: #4338ca; text-transform: uppercase; margin-top: 3px; letter-spacing: 0.5px;">Escanear</span>
+            </div>
+          </div>
+
+          <div style="text-align: center; margin-top: 24px; font-size: 13px; font-style: italic; color: #475569;">
+            "${receipt.thankYouMessage || "¡Gracias por su preferencia!"}"
+          </div>
+        </div>
+      `;
+
+      document.body.appendChild(container);
+      // Wait briefly for QR image to load
+      const qrImg = container.querySelector("img");
+      if (qrImg && !qrImg.complete) {
+        await new Promise<void>((res) => {
+          const t = setTimeout(res, 1200);
+          qrImg.onload = () => { clearTimeout(t); res(); };
+          qrImg.onerror = () => { clearTimeout(t); res(); };
+        });
+      }
+
+      const cardEl = container.firstElementChild as HTMLElement;
+      const canvas = await h2c(cardEl, {
+        scale: 2,
+        useCORS: true,
+        logging: false,
+        backgroundColor: "#ffffff",
+      });
+      document.body.removeChild(container);
+
+      const link = document.createElement("a");
+      link.download = `Comprobante_${receipt.consecutive || "pago"}.png`;
+      link.href = canvas.toDataURL("image/png");
+      link.click();
+
+      setPngDownloadDone(true);
+      setTimeout(() => setPngDownloadDone(false), 2500);
+    } catch (err: any) {
+      console.error("Error al descargar PNG directo:", err);
+      setError("No se pudo generar el PNG directo. Puede usar el botón 'Pestaña'.");
+    } finally {
+      setIsDownloadingPng(false);
+    }
   };
 
 
@@ -1041,13 +1226,37 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
       >
           {/* Header Controls (Pinned Top No Print - Responsive Mobile First) */}
           <div className="no-print bg-white px-3 sm:px-6 py-2.5 border-b border-gray-100 flex flex-col sm:flex-row sm:items-center justify-between gap-2 z-30 shrink-0 shadow-2xs">
-            {/* Top Bar: Status + Consecutive Title + Close Button for Mobile */}
-            <div className="flex items-center justify-between w-full sm:w-auto">
+            {/* Top Bar: Status + Consecutive Title + Quick Status Selector + Close Button for Mobile */}
+            <div className="flex items-center justify-between w-full sm:w-auto gap-2">
               <div className="flex items-center gap-2 min-w-0">
                 <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${isEditing ? "bg-amber-500 animate-pulse" : "bg-emerald-500 animate-pulse"}`}></span>
                 <span className="text-xs sm:text-xs font-extrabold text-gray-900 tracking-wider uppercase truncate">
-                  {isEditing ? "Editando Comprobante" : `Comprobante #${receipt.consecutive || ''}`}
+                  {isEditing ? "Editando Comprobante" : `#${receipt.consecutive || ''}`}
                 </span>
+                {!isEditing && (
+                  <select
+                    id="select-quick-modal-status"
+                    value={editedStatus}
+                    onChange={async (e) => {
+                      const newStatus = e.target.value as ReceiptStatus;
+                      setEditedStatus(newStatus);
+                      try {
+                        await updateReceipt(receipt.id, { status: newStatus });
+                      } catch (err) {
+                        console.error("Error updating status:", err);
+                      }
+                    }}
+                    title="Cambiar estado en 1 clic"
+                    className="px-2 py-1 text-[11px] font-bold rounded-lg bg-gray-50 hover:bg-gray-100 border border-gray-200 text-gray-800 focus:outline-hidden focus:ring-1 focus:ring-indigo-500 cursor-pointer"
+                  >
+                    <option value="procesando">⚙️ Procesando</option>
+                    <option value="en_proceso">🔵 En curso</option>
+                    <option value="parcial">🟠 Parcial</option>
+                    <option value="garantia_en_proceso">🟡 Garantía</option>
+                    <option value="completado">✅ Completado</option>
+                    <option value="cancelado">🔴 Cancelado</option>
+                  </select>
+                )}
               </div>
               <button
                 id="btn-close-receipt-mobile"
@@ -1095,9 +1304,43 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                 </>
               ) : (
                 <>
+                  {/* 1-Click Direct PNG Download */}
+                  <button
+                    id="btn-direct-download-png"
+                    type="button"
+                    disabled={isDownloadingPng}
+                    onClick={handleDirectDownloadPng}
+                    className={`flex-1 sm:flex-none flex items-center justify-center gap-1.5 text-xs font-bold transition px-2.5 py-2 rounded-xl shadow-2xs cursor-pointer touch-manipulation border ${
+                      pngDownloadDone
+                        ? "bg-emerald-600 text-white border-emerald-700"
+                        : "bg-emerald-50 text-emerald-800 hover:bg-emerald-100 border-emerald-300"
+                    }`}
+                    title="Descargar imagen PNG del comprobante en 1 clic sin abrir otra pestaña"
+                  >
+                    {pngDownloadDone ? <Check className="w-3.5 h-3.5" /> : <Download className="w-3.5 h-3.5 text-emerald-700" />}
+                    <span>{isDownloadingPng ? "Generando..." : pngDownloadDone ? "¡PNG Listo!" : "PNG"}</span>
+                  </button>
+
+                  {/* 1-Click Repeat Order */}
+                  {onRepeatOrder && (
+                    <button
+                      id="btn-modal-repeat-order"
+                      type="button"
+                      onClick={() => {
+                        onRepeatOrder(receipt);
+                        onClose();
+                      }}
+                      className="flex-1 sm:flex-none flex items-center justify-center gap-1 text-xs font-bold text-amber-800 bg-amber-50 hover:bg-amber-100 border border-amber-300 transition px-2.5 py-2 rounded-xl shadow-2xs cursor-pointer touch-manipulation"
+                      title="Repetir este pedido en 1 clic (carga cliente y servicios en Emitir)"
+                    >
+                      <Zap className="w-3.5 h-3.5 text-amber-600" />
+                      <span>Repetir</span>
+                    </button>
+                  )}
+
                   {showCancelConfirm ? (
                     <div className="flex items-center gap-1.5 bg-rose-50 border border-rose-200 px-2.5 py-1.5 rounded-xl animate-fade-in">
-                      <span className="text-[11px] font-bold text-rose-800">¿Cancelar pedido?</span>
+                      <span className="text-[11px] font-bold text-rose-800">¿Cancelar?</span>
                       <button
                         type="button"
                         onClick={async () => {
@@ -1127,10 +1370,10 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                         id="btn-quick-cancel-receipt"
                         type="button"
                         onClick={() => setShowCancelConfirm(true)}
-                        className="flex-1 sm:flex-none flex items-center justify-center gap-1 text-xs font-semibold text-rose-600 bg-rose-50/70 hover:bg-rose-100/70 border border-rose-200 transition px-2.5 py-2 rounded-xl cursor-pointer touch-manipulation"
+                        className="flex-1 sm:flex-none flex items-center justify-center gap-1 text-xs font-semibold text-rose-600 bg-rose-50/70 hover:bg-rose-100/70 border border-rose-200 transition px-2 py-2 rounded-xl cursor-pointer touch-manipulation"
                         title="Marcar pedido como cancelado"
                       >
-                        <span>🔴 Cancelar Pedido</span>
+                        <span>🔴 Cancelar</span>
                       </button>
                     )
                   )}
@@ -1158,18 +1401,18 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                     id="btn-sync-all-provider-api"
                     type="button"
                     onClick={() => handleSyncOrders()}
-                    className="flex-1 sm:flex-none flex items-center justify-center gap-1.5 text-xs font-bold text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 transition px-2.5 py-2 rounded-xl cursor-pointer touch-manipulation shadow-2xs"
+                    className="flex-1 sm:flex-none flex items-center justify-center gap-1 text-xs font-bold text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 transition px-2.5 py-2 rounded-xl cursor-pointer touch-manipulation shadow-2xs"
                     title="Sincronizar estado de las órdenes de este comprobante con el proveedor vía API"
                   >
                     <RefreshCw className={`w-3.5 h-3.5 text-blue-600 ${isSyncingProvider ? 'animate-spin' : ''}`} />
-                    <span>Sincronizar API</span>
+                    <span>API</span>
                   </button>
                   <button
                     id="btn-open-receipt-new-tab"
                     type="button"
                     onClick={() => openReceiptInNewTab(receipt, businessName, totals)}
-                    className="flex-1 sm:flex-none flex items-center justify-center gap-1.5 text-xs font-bold text-sky-800 bg-sky-50 hover:bg-sky-100 border border-sky-300 transition px-3 py-2 rounded-xl shadow-2xs cursor-pointer touch-manipulation"
-                    title="Abrir en pestaña nueva para ver o compartir"
+                    className="flex-1 sm:flex-none flex items-center justify-center gap-1 text-xs font-bold text-sky-800 bg-sky-50 hover:bg-sky-100 border border-sky-300 transition px-2.5 py-2 rounded-xl shadow-2xs cursor-pointer touch-manipulation"
+                    title="Abrir en pestaña nueva para ver o imprimir"
                   >
                     <ExternalLink className="w-3.5 h-3.5 text-sky-700" />
                     <span>Pestaña</span>
@@ -1185,15 +1428,15 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                         setTimeout(() => setCopiedTracking(false), 2500);
                       }
                     }}
-                    className={`flex-1 sm:flex-none flex items-center justify-center gap-1.5 text-xs font-bold transition px-3 py-2 rounded-xl shadow-2xs cursor-pointer touch-manipulation border ${
+                    className={`flex-1 sm:flex-none flex items-center justify-center gap-1 text-xs font-bold transition px-2.5 py-2 rounded-xl shadow-2xs cursor-pointer touch-manipulation border ${
                       copiedTracking
                         ? "bg-emerald-600 text-white border-emerald-700"
                         : "bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border-indigo-200"
                     }`}
-                    title="Copiar enlace de rastreo en vivo para el cliente (muestra progreso, tiempo de entrega y conteo)"
+                    title="Copiar enlace de rastreo en vivo para el cliente"
                   >
                     {copiedTracking ? <Check className="w-3.5 h-3.5" /> : <QrCode className="w-3.5 h-3.5 text-indigo-600" />}
-                    <span>{copiedTracking ? "¡Link Copiado!" : "Rastreo Cliente"}</span>
+                    <span>{copiedTracking ? "¡Copiado!" : "Rastreo"}</span>
                   </button>
                   <button
                     id="btn-toggle-admin-panel"

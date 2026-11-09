@@ -7,7 +7,7 @@ import React, { useState } from "react";
 import { AppProvider, useApp } from "./context/AppContext";
 import { LoginView } from "./components/LoginView";
 import { DashboardView } from "./components/DashboardView";
-import { GeneratorView } from "./components/GeneratorView";
+import { GeneratorView, InitialClientDraft } from "./components/GeneratorView";
 import { HistoryView } from "./components/HistoryView";
 import { ClientsView } from "./components/ClientsView";
 import { ConfigView } from "./components/ConfigView";
@@ -16,7 +16,7 @@ import { QuoteCalculatorView } from "./components/QuoteCalculatorView";
 import { ReceiptModal } from "./components/ReceiptModal";
 import { PublicTrackingView } from "./components/PublicTrackingView";
 import { ErrorBoundary } from "./components/ErrorBoundary";
-import { Receipt, ReceiptItem, getSupplierWarrantyTimeStatus } from "./types";
+import { Receipt, ReceiptItem, Client, getSupplierWarrantyTimeStatus, generateCustomServiceCode } from "./types";
 import { LiveServerSyncBadge } from "./components/LiveServerSyncBadge";
 import { OfflineIndicator } from "./components/OfflineIndicator";
 import { useOnlineStatus } from "./hooks/useOnlineStatus";
@@ -53,7 +53,6 @@ const Navigation: React.FC<{ activeTab: string; setActiveTab: (tab: string) => v
 
   const navItems = [
     { id: "dashboard", label: "Dashboard", icon: TrendingUp },
-    { id: "calculator", label: "Cotizador", icon: Calculator },
     { id: "generator", label: "Emitir", icon: PlusCircle },
     { id: "history", label: "Historial", icon: FileText },
     { id: "warranties", label: "Garantías", icon: ShieldAlert, badge: overdueCount > 0 ? overdueCount : undefined },
@@ -83,7 +82,7 @@ const Navigation: React.FC<{ activeTab: string; setActiveTab: (tab: string) => v
           <nav className="flex space-x-1 sm:space-x-1.5 overflow-x-auto py-1">
             {navItems.map((item) => {
               const Icon = item.icon;
-              const isActive = activeTab === item.id;
+              const isActive = activeTab === item.id || (item.id === "generator" && activeTab === "calculator");
               return (
                 <button
                   key={item.id}
@@ -160,16 +159,67 @@ const Navigation: React.FC<{ activeTab: string; setActiveTab: (tab: string) => v
 };
 
 const MainLayout: React.FC = () => {
-  const { loadingData, businessConfig, receipts, isDarkMode } = useApp();
+  const { loadingData, businessConfig, receipts, getReceiptPrivateData, isDarkMode } = useApp();
   const [activeTab, setActiveTab] = useState("dashboard");
   const [selectedReceipt, setSelectedReceipt] = useState<Receipt | null>(null);
   const [isEditModeModal, setIsEditModeModal] = useState<boolean>(false);
   const [transferredItemsFromQuote, setTransferredItemsFromQuote] = useState<Partial<ReceiptItem>[] | undefined>(undefined);
+  const [repeatOrderDraft, setRepeatOrderDraft] = useState<{
+    key: string;
+    client: InitialClientDraft;
+    items: Partial<ReceiptItem>[];
+  } | null>(null);
 
   // Handler to open receipt in view or edit mode
   const handleOpenReceipt = (receipt: Receipt, editMode: boolean = false) => {
     setSelectedReceipt(receipt);
     setIsEditModeModal(editMode);
+  };
+
+  // Handler for 1-Click Repeat Order from HistoryView or ClientsView
+  const handleRepeatOrder = (receipt: Receipt, clientOverride?: Client) => {
+    const priv = getReceiptPrivateData(receipt.id);
+    const privServices = priv?.servicesPrivate || [];
+
+    const repeatedItems: Partial<ReceiptItem>[] = (receipt.services || []).map((srv, idx) => {
+      const privSrv = privServices.find((ps) => ps.id === srv.id) || privServices[idx];
+      const isCustom = srv.socialNetworkId === "custom";
+      const freshCustomCode = isCustom
+        ? generateCustomServiceCode(srv.socialNetworkName || "Servicios Digitales", srv.serviceName || "")
+        : "";
+
+      return {
+        socialNetworkId: srv.socialNetworkId,
+        socialNetworkName: srv.socialNetworkName,
+        serviceId: srv.serviceId,
+        serviceName: srv.serviceName,
+        quantity: srv.quantity,
+        suggestedPrice: srv.suggestedPrice,
+        chargedPrice: srv.chargedPrice,
+        providerCostAtPurchase: privSrv?.providerCostAtPurchase ?? srv.providerCostAtPurchase ?? 0,
+        providerCostUSD: privSrv?.providerCostUSD ?? srv.providerCostUSD ?? null,
+        providerCostCOP: privSrv?.providerCostCOP ?? srv.providerCostCOP ?? privSrv?.providerCostAtPurchase ?? srv.providerCostAtPurchase ?? 0,
+        trmUsed: privSrv?.trmUsed ?? srv.trmUsed ?? null,
+        targetAccount: srv.targetAccount || receipt.targetAccount || undefined,
+        // Dejar ID de proveedor limpio (o código nuevo si es servicio personalizado) para pegar el nuevo ID sin confundirse con el anterior
+        orderId: isCustom ? freshCustomCode : "",
+        orderIds: isCustom ? [freshCustomCode] : [],
+      };
+    });
+
+    setTransferredItemsFromQuote(undefined);
+    setRepeatOrderDraft({
+      key: `repeat_${receipt.id}_${Date.now()}`,
+      client: {
+        id: clientOverride?.id || receipt.clientId,
+        name: clientOverride?.name || receipt.clientName || "",
+        phone: clientOverride?.phone || receipt.clientPhone || "",
+        targetAccount: receipt.targetAccount || (receipt.services || []).find((s) => s.targetAccount)?.targetAccount,
+        sourceConsecutive: receipt.consecutive,
+      },
+      items: repeatedItems,
+    });
+    setActiveTab("generator");
   };
 
   // Sync selectedReceipt with latest data in receipts collection
@@ -200,8 +250,18 @@ const MainLayout: React.FC = () => {
       case "calculator":
         return (
           <QuoteCalculatorView
-            onTransferToReceipt={(items) => {
-              setTransferredItemsFromQuote(items);
+            onTransferToReceipt={(items, quotedClientName) => {
+              if (quotedClientName) {
+                setRepeatOrderDraft({
+                  key: `quote_${Date.now()}`,
+                  client: { name: quotedClientName, phone: "" },
+                  items,
+                });
+                setTransferredItemsFromQuote(undefined);
+              } else {
+                setRepeatOrderDraft(null);
+                setTransferredItemsFromQuote(items);
+              }
               setActiveTab("generator");
             }}
           />
@@ -209,20 +269,28 @@ const MainLayout: React.FC = () => {
       case "generator":
         return (
           <GeneratorView
-            key={transferredItemsFromQuote ? "transferred_" + transferredItemsFromQuote.length : "normal"}
-            initialItems={transferredItemsFromQuote}
+            key={
+              repeatOrderDraft
+                ? repeatOrderDraft.key
+                : transferredItemsFromQuote
+                ? "transferred_" + transferredItemsFromQuote.length
+                : "normal"
+            }
+            initialClient={repeatOrderDraft?.client || null}
+            initialItems={repeatOrderDraft ? repeatOrderDraft.items : transferredItemsFromQuote}
             onReceiptGenerated={(r) => {
               setTransferredItemsFromQuote(undefined);
+              setRepeatOrderDraft(null);
               handleOpenReceipt(r, false);
             }}
           />
         );
       case "history":
-        return <HistoryView onSelectReceipt={handleOpenReceipt} />;
+        return <HistoryView onSelectReceipt={handleOpenReceipt} onRepeatOrder={handleRepeatOrder} />;
       case "warranties":
         return <SupplierWarrantyView onSelectReceipt={handleOpenReceipt} />;
       case "clients":
-        return <ClientsView onSelectReceipt={handleOpenReceipt} />;
+        return <ClientsView onSelectReceipt={handleOpenReceipt} onRepeatOrder={handleRepeatOrder} />;
       case "config":
         return <ConfigView />;
       default:
@@ -266,6 +334,7 @@ const MainLayout: React.FC = () => {
               }}
               businessName={businessConfig.businessName}
               whatsapp={businessConfig.whatsapp}
+              onRepeatOrder={handleRepeatOrder}
             />
           </ErrorBoundary>
         )}

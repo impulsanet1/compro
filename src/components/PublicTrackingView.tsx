@@ -8,6 +8,7 @@ import { doc, getDoc } from "firebase/firestore";
 import { db } from "../firebase";
 import { Receipt, ReceiptItem, getItemOrderIds, formatProviderStatus } from "../types";
 import { callBackendApi } from "../services/providerApi";
+import { handleFirestoreError, OperationType } from "../utils/firestoreErrorHandler";
 import {
   CheckCircle2,
   Clock,
@@ -207,7 +208,10 @@ export const PublicTrackingView: React.FC<PublicTrackingViewProps> = ({
           if (data.businessName) setBusinessName(data.businessName);
           if (data.whatsapp) setSupportWhatsapp(data.whatsapp);
         }
-      } catch {
+      } catch (err: any) {
+        if (err?.code === "permission-denied" || (err?.message && err.message.includes("permissions"))) {
+          handleFirestoreError(err, OperationType.GET, "config/business");
+        }
         // Fallback to defaults
       }
     }
@@ -239,6 +243,9 @@ export const PublicTrackingView: React.FC<PublicTrackingViewProps> = ({
       setError("No se encontró ningún comprobante con este identificador. Por favor verifica el enlace o código QR de tu factura.");
       setReceipt(null);
     } catch (err: any) {
+      if (err?.code === "permission-denied" || (err?.message && err.message.includes("permissions"))) {
+        handleFirestoreError(err, OperationType.GET, `receipts/${cleanInput}`);
+      }
       console.error("Error loading tracking receipt:", err);
       setError("No se pudo cargar la información del pedido. Por favor intenta nuevamente.");
       setReceipt(null);

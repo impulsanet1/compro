@@ -43,6 +43,11 @@ async function ensureProviderCredentialsLoaded(): Promise<{ providerUrl: string;
     return current;
   }
 
+  const userEmail = (auth.currentUser.email || "").toLowerCase().trim();
+  if (userEmail !== "estebanruiz.12vrgassergio@gmail.com") {
+    return current;
+  }
+
   if (!firestoreFetchPromise) {
     firestoreFetchPromise = (async () => {
       try {

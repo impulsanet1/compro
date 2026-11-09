@@ -1,16 +1,17 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Regla base: denegar todo por defecto (sin comodín de "cualquier autenticado")
+    // Regla base: denegar todo por defecto
     match /{document=**} {
       allow read, write: if false;
     }
 
-    // Verificación estricta de administrador con correo verificado
+    // Verificación estricta de administrador con correo verificado (case-insensitive)
     function isAdmin() {
       return request.auth != null &&
-        request.auth.token.email == "estebanruiz.12vrgassergio@gmail.com" &&
-        request.auth.token.email_verified == true;
+        (request.auth.token.email == "estebanruiz.12vrgassergio@gmail.com" ||
+         request.auth.token.email.matches('(?i)^estebanruiz\\.12vrgassergio@gmail\\.com$')) &&
+        (request.auth.token.email_verified == true || request.auth.token.firebase.sign_in_provider == "google.com");
     }
 
     // Comprobantes: lectura pública únicamente por get (nunca list). Escritura y list solo para admin.
@@ -19,7 +20,7 @@ service cloud.firestore {
       allow list, create, update, delete: if isAdmin();
     }
 
-    // Datos internos privados de los comprobantes (notas internas, costos de proveedor, ganancias, etc.): solo isAdmin()
+    // Datos internos privados de los comprobantes: solo isAdmin()
     match /receipts_private/{receiptId} {
       allow get, list, create, update, delete: if isAdmin();
     }
@@ -65,6 +66,11 @@ service cloud.firestore {
     match /users/{userId} {
       allow get, create, update: if (request.auth != null && request.auth.uid == userId) || isAdmin();
       allow list, delete: if isAdmin();
+    }
+
+    // Prueba de conexión básica permitida para comprobaciones del cliente
+    match /test/{docId} {
+      allow get: if true;
     }
   }
 }

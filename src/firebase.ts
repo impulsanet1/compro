@@ -8,15 +8,14 @@ import { getAuth } from "firebase/auth";
 import {
   initializeFirestore,
   getFirestore,
-  persistentLocalCache,
-  persistentMultipleTabManager,
+  memoryLocalCache,
   setLogLevel,
   doc,
   getDocFromServer,
 } from "firebase/firestore";
 import firebaseConfig from "../firebase-applet-config.json";
 
-// Silence internal Firestore SDK diagnostic logs (such as sub-second multi-tab lease clock skew warnings)
+// Silence internal Firestore SDK diagnostic logs
 try {
   setLogLevel("silent");
 } catch {
@@ -36,16 +35,14 @@ try {
     app,
     {
       experimentalAutoDetectLongPolling: true,
-      localCache: persistentLocalCache({
-        tabManager: persistentMultipleTabManager(),
-      }),
+      localCache: memoryLocalCache(),
     },
     targetDatabaseId
   );
-} catch (e) {
+} catch {
   try {
     db = getFirestore(app, targetDatabaseId);
-  } catch (fallbackErr) {
+  } catch {
     db = getFirestore(app);
   }
 }
@@ -65,5 +62,3 @@ async function testConnection() {
 testConnection();
 
 export { app, db, auth };
-
-

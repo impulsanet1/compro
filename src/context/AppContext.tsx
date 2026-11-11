@@ -395,6 +395,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const hasRunProviderMigrationRef = useRef(false);
   const hasRunReceiptsPrivateMigrationRef = useRef(false);
   const isMigratingReceiptsPrivateRef = useRef(false);
+  const activeUnsubscribesRef = useRef<Array<() => void>>([]);
+
+  const cleanupFirestoreListeners = () => {
+    if (activeUnsubscribesRef.current.length > 0) {
+      const fns = [...activeUnsubscribesRef.current];
+      activeUnsubscribesRef.current = [];
+      fns.forEach((fn) => {
+        try {
+          fn();
+        } catch {
+          // Ignore unsubscribe error
+        }
+      });
+    }
+  };
 
   const getReceiptPrivateData = (receiptId: string): ReceiptPrivateData | undefined => {
     return receiptsPrivate[receiptId] || rawPrivateReceiptsRef.current.get(receiptId);
@@ -498,7 +513,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             publicCleanupUpdate[field] = deleteField();
           }
 
-          batch.update(doc(db, "receipts", id), publicCleanupUpdate);
+          batch.set(doc(db, "receipts", id), publicCleanupUpdate, { merge: true });
         }
 
         await batch.commit();
@@ -614,10 +629,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // 1. Listen to Auth State with strict single-admin authorization
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       if (currentUser) {
         const userEmail = (currentUser.email || "").toLowerCase().trim();
         if (userEmail !== AUTHORIZED_ADMIN_EMAIL.toLowerCase()) {
+          cleanupFirestoreListeners();
           console.warn("Unauthorized account attempted access:", currentUser.email);
           setIsAdmin(false);
           setAccessDeniedReason(
@@ -625,6 +641,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           );
           clearCachedProviderCredentials();
         } else if (!currentUser.emailVerified) {
+          cleanupFirestoreListeners();
           console.warn("Unverified admin email attempted access:", currentUser.email);
           setIsAdmin(false);
           setAccessDeniedReason(
@@ -632,10 +649,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           );
           clearCachedProviderCredentials();
         } else {
+          try {
+            await currentUser.getIdToken();
+          } catch {
+            // Proceed even if token cache check fails offline
+          }
           setIsAdmin(true);
           setAccessDeniedReason(null);
         }
       } else {
+        cleanupFirestoreListeners();
         setIsAdmin(false);
         clearCachedProviderCredentials();
       }
@@ -1056,16 +1079,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     );
 
+    activeUnsubscribesRef.current = [
+      unsubConfig,
+      unsubProviderConfig,
+      unsubSocial,
+      unsubServices,
+      unsubCombos,
+      unsubReceipts,
+      unsubReceiptsPrivate,
+      unsubClients,
+      unsubSupplierWarranties,
+    ];
+
     return () => {
-      unsubConfig();
-      unsubProviderConfig();
-      unsubSocial();
-      unsubServices();
-      unsubCombos();
-      unsubReceipts();
-      unsubReceiptsPrivate();
-      unsubClients();
-      unsubSupplierWarranties();
+      cleanupFirestoreListeners();
     };
   }, [user, isAdmin]);
 
@@ -1720,9 +1747,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const logout = async () => {
+    cleanupFirestoreListeners();
     clearCachedProviderCredentials();
     setAccessDeniedReason(null);
     setIsAdmin(false);
+    setUser(null);
     await signOut(auth);
   };
 

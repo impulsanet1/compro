@@ -35,8 +35,18 @@ export function handleFirestoreError(
   error: unknown,
   operationType: OperationType,
   path: string | null
-): never {
+): void {
   const current = auth?.currentUser;
+
+  // Ignore transient listener teardown callbacks when user has just signed out
+  if (
+    !current &&
+    path !== "config/business" &&
+    !(operationType === OperationType.GET && path?.startsWith("receipts/"))
+  ) {
+    return;
+  }
+
   const errInfo: FirestoreErrorInfo = {
     error: error instanceof Error ? error.message : String(error),
     authInfo: {
